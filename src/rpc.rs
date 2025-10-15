@@ -1,8 +1,11 @@
 // Rust
-use log::{info, warn};
+use log::warn;
 use serde::Deserialize;
-use std::time::Duration;
-use tokio::time::sleep;
+use mpl_token_metadata::accounts::Metadata as MplMetadata;
+use solana_program::pubkey::Pubkey;
+use base64::engine::general_purpose::STANDARD as Base64Engine;
+use base64::Engine;
+use std::str::FromStr;
 
 #[derive(Deserialize, Debug)]
 pub struct RpcResponse {
@@ -32,10 +35,15 @@ pub struct AccountKey {
 }
 
 const MAX_RETRIES: u32 = 5;
+const METADATA_PROGRAM: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
 
-pub async fn fetch_transaction_details(signature: &str, https_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn fetch_transaction_details(
+    signature: &str,
+    https_url: &str,
+) -> Result<(String, String, Option<MplMetadata>), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
-    let request = serde_json::json!({
+    // First, get the transaction to extract the mint
+    let tx_request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "getTransaction",
@@ -49,41 +57,81 @@ pub async fn fetch_transaction_details(signature: &str, https_url: &str) -> Resu
         ]
     });
 
-    for attempt in 1..=MAX_RETRIES {
-        let response = client
+    for _ in 1..=MAX_RETRIES {
+        let tx_response = client
             .post(https_url)
-            .json(&request)
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_vec(&tx_request)?)
             .send()
             .await?;
 
-        match response.json::<RpcResponse>().await {
-            Ok(data) => {
-                if let Some(error) = data.error {
-                    return Err(format!("RPC error: {}", error).into());
-                }
-                if let Some(result) = data.result {
-                    let account_keys = result.transaction.message.account_keys;
-                    if account_keys.len() >= 2 && account_keys[0].pubkey != account_keys[1].pubkey {
-                        info!("Creator Address: {}", account_keys[0].pubkey);
-                        info!("New Token Mint Address: {}", account_keys[1].pubkey);
-                        info!("---");
-                    } else {
-                        warn!("Unexpected account keys for {}: {:?}", signature, account_keys);
+        let tx_bytes = tx_response.bytes().await?;
+        let data: RpcResponse = serde_json::from_slice(&tx_bytes)?;
+        if let Some(error) = data.error {
+            return Err(format!("RPC error: {}", error).into());
+        }
+        if let Some(result) = data.result {
+            let account_keys = result.transaction.message.account_keys;
+            if account_keys.len() >= 2 && account_keys[0].pubkey != account_keys[1].pubkey {
+                let creator = account_keys[0].pubkey.clone();
+                let mint = account_keys[1].pubkey.clone();
+
+                // Compute Metadata PDA
+                let metadata_program = Pubkey::from_str(METADATA_PROGRAM)?;
+                let mint_pubkey = Pubkey::from_str(&mint)?;
+                let seeds = &[
+                    b"metadata",
+                    metadata_program.as_ref(),
+                    mint_pubkey.as_ref(),
+                ];
+                let (metadata_pda, _) = Pubkey::find_program_address(seeds, &metadata_program);
+
+                // Batch fetch: getMultipleAccounts for metadata_pda
+                let batch_request = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "getMultipleAccounts",
+                    "params": [
+                        [metadata_pda.to_string()],
+                        {
+                            "encoding": "base64",
+                            "commitment": "confirmed"
+                        }
+                    ]
+                });
+
+                let batch_response = client
+                    .post(https_url)
+                    .header("Content-Type", "application/json")
+                    .body(serde_json::to_vec(&batch_request)?)
+                    .send()
+                    .await?;
+
+                let batch_bytes = batch_response.bytes().await?;
+                let batch_data: serde_json::Value = serde_json::from_slice(&batch_bytes)?;
+                let mut metadata: Option<MplMetadata> = None;
+                if let Some(result) = batch_data.get("result") {
+                    if let Some(value_arr) = result.get("value").and_then(|v| v.as_array()) {
+                        if let Some(value) = value_arr.get(0).and_then(|v| v.as_object()) {
+                            if let Some(data_arr) = value.get("data").and_then(|d| d.as_array()) {
+                                if let Some(base64_data) = data_arr.get(0).and_then(|v| v.as_str()) {
+                                    let decoded = Base64Engine.decode(base64_data)?;
+                                    if let Ok(meta) = MplMetadata::from_bytes(&decoded) {
+                                        metadata = Some(meta);
+                                    }
+                                }
+                            }
+                        }
                     }
-                    return Ok(());
                 }
-                return Err("No transaction data".into());
-            }
-            Err(e) => {
-                if attempt == MAX_RETRIES {
-                    return Err(format!("Failed after {} retries: {}", MAX_RETRIES, e).into());
-                }
-                let delay = Duration::from_millis(2u64.pow(attempt) * 1000);
-                warn!("Retry {} for {} after {}ms: {}", attempt, signature, delay.as_millis(), e);
-                sleep(delay).await;
+                return Ok((creator, mint, metadata));
+            } else {
+                warn!("Unexpected account keys for {}: {:?}", signature, account_keys);
+                return Err("Invalid account keys".into());
             }
         }
+        return Err("No transaction data".into());
     }
 
-    Ok(())
+    Err("Max retries exceeded".into())
 }

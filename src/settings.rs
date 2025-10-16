@@ -3,9 +3,10 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
-    pub wss_url: String,
-    pub https_url: String,
-    pub pump_fun_program: String,
+    pub solana_ws_urls: Vec<String>,
+    pub solana_rpc_urls: Vec<String>,
+    pub pump_fun_contract: String,
+    // ... add other fields as needed
 }
 
 impl Settings {

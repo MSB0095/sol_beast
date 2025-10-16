@@ -1,12 +1,15 @@
-// Rust
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
     pub solana_ws_urls: Vec<String>,
     pub solana_rpc_urls: Vec<String>,
-    pub pump_fun_contract: String,
-    // ... add other fields as needed
+    pub pump_fun_program: String,
+    pub metadata_program: String,
+    pub wallet_keypair_path: String,
+    pub tp_percent: f64,
+    pub sl_percent: f64,
+    pub timeout_secs: i64,
 }
 
 impl Settings {

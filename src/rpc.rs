@@ -1,128 +1,66 @@
-use crate::settings::Settings;
-use base64::engine::general_purpose::STANDARD as Base64Engine;
-use base64::Engine;
-use borsh::{BorshDeserialize, BorshSerialize};
+use crate::{
+    models::{
+        AccountInfoResult,
+        BondingCurveState,
+        Holding,
+        PriceCache,
+        RpcResponse,
+        TransactionResult,
+    },
+    settings::Settings,
+};
+use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
+use borsh::BorshDeserialize;
+use chrono::Utc;
 use futures_util::future::select_ok;
-use log::{info, error};
+use log::info;
 use mpl_token_metadata::accounts::Metadata;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use solana_client::rpc_client::RpcClient;
 use solana_program::pubkey::Pubkey;
 use solana_sdk::{
-    signature::Keypair,
+    instruction::Instruction,
+    signature::{Keypair, Signer},
+    transaction::Transaction,
 };
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{str::FromStr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
-use crate::{Holding, PriceCache};
-use chrono::Utc;
 
-pub const PRICE_CACHE_TTL: Duration = Duration::from_secs(300);
-
-// Bonding Curve State
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
-pub struct BondingCurveState {
-    pub virtual_token_reserves: u64,
-    pub virtual_sol_reserves: u64,
-    pub real_token_reserves: u64,
-    pub real_sol_reserves: u64,
-    pub complete: bool,
-    pub fee_basis_points: u16,
-}
-
-// RPC structures
-#[derive(Deserialize)]
-pub struct RpcResponse<T> {
-    pub result: Option<T>,
-    pub error: Option<Value>,
-}
-#[derive(Deserialize)]
-pub struct TransactionResult {
-    pub transaction: TransactionData,
-}
-#[derive(Deserialize)]
-pub struct TransactionData {
-    pub message: MessageData,
-}
-#[derive(Deserialize)]
-pub struct MessageData {
-    #[serde(rename = "accountKeys")]
-    pub account_keys: Vec<AccountKey>,
-    pub instructions: Vec<Value>,
-}
-#[derive(Deserialize)]
-pub struct AccountKey {
-    pub pubkey: String,
-}
-#[derive(Deserialize)]
-pub struct AccountInfoResult {
-    #[serde(default)]
-    pub value: Option<AccountData>,
-}
-#[derive(Deserialize)]
-pub struct AccountData {
-    pub data: Vec<String>,
-}
-
-
-pub async fn handle_new_token(
+pub async fn fetch_transaction_details(
     signature: &str,
-    holdings: Arc<Mutex<HashMap<String, Holding>>>,
-    is_real: bool,
-    keypair: Option<&Keypair>,
-    price_cache: &Arc<Mutex<PriceCache>>,
-    settings: Arc<Settings>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (_creator, mint) = fetch_transaction_details(signature, &settings).await?;
-    info!("Handling token: {}", mint);
+    settings: &Arc<Settings>,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let data: RpcResponse<TransactionResult> = fetch_with_fallback(
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+            "params": [ signature, { "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
+        }),
+        "getTransaction",
+        settings,
+    )
+    .await?;
 
-    if holdings.lock().await.contains_key(&mint) {
-        info!("Already hold token {}", mint);
-        return Ok(());
-    }
-
-    let metadata = fetch_token_metadata(&mint, &settings).await?;
-
-    if let Some(meta) = &metadata {
-        info!("Token {}: Name={}, Symbol={}, URI={}", mint, meta.name.trim(), meta.symbol.trim(), meta.uri.trim());
-        if !meta.name.is_empty() && !meta.uri.is_empty() {
-            let buy_amount_sol = 0.01; // Example: buy for 0.01 SOL
-            buy_token(&mint, buy_amount_sol, is_real, keypair, holdings, price_cache, &settings).await?;
-        }
-    }
-    else {
-        info!("No metadata found for token {}", mint);
-    }
-
-    Ok(())
-}
-
-pub async fn fetch_transaction_details(signature: &str, settings: &Settings) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
-    let tx_data: RpcResponse<TransactionResult> = fetch_with_fallback(json!({
-        "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
-        "params": [ signature, { "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
-    }), "getTransaction", settings).await?;
-
-    let result = tx_data.result.ok_or("No transaction data")?;
-    let instructions = &result.transaction.message.instructions;
+    let result = data.result.ok_or("No transaction data")?;
+    info!("Transaction data: {:?}", result);
+    let account_keys = &result.transaction.message.account_keys;
     let pump_fun_program_id = &settings.pump_fun_program;
 
-    for instruction_value in instructions {
-        if let Some(instruction) = instruction_value.as_object() {
-            if let Some(program_id) = instruction.get("programId").and_then(|v| v.as_str()) {
-                if program_id == pump_fun_program_id {
-                    // This is a pump.fun instruction.
-                    // The log filter in ws.rs ensures this is a 'create' transaction.
-                    // The mint is the first account.
-                    if let Some(accounts) = instruction.get("accounts").and_then(|v| v.as_array()) {
-                        if let Some(mint_value) = accounts.get(0) {
-                            if let Some(mint) = mint_value.as_str() {
-                                // Creator is the first account in the overall transaction, which is the fee payer and signer.
-                                let creator = result.transaction.message.account_keys[0].pubkey.clone();
-                                return Ok((creator, mint.to_string()));
+    if let Some(meta) = result.meta {
+        if let Some(inner_instructions) = meta.inner_instructions {
+            for inner_instruction in inner_instructions {
+                for instruction in &inner_instruction.instructions {
+                    let program_id_index = instruction.program_id_index as usize;
+                    if let Some(program_id_key) = account_keys.get(program_id_index) {
+                        if program_id_key.pubkey == *pump_fun_program_id {
+                            // Assuming the order of accounts in the instruction is: mint, bonding curve, associated token account, creator
+                            if instruction.accounts.len() >= 4 {
+                                let mint_index = instruction.accounts[0] as usize;
+                                let creator_index = instruction.accounts[3] as usize;
+                                if let (Some(mint_key), Some(creator_key)) = (account_keys.get(mint_index), account_keys.get(creator_index)) {
+                                    return Ok((creator_key.pubkey.clone(), mint_key.pubkey.clone()));
+                                }
                             }
                         }
                     }
@@ -131,72 +69,56 @@ pub async fn fetch_transaction_details(signature: &str, settings: &Settings) -> 
         }
     }
 
-    Err("Could not find pump.fun create instruction or mint account.".into())
+    Err("Could not find pump.fun instruction or extract details".into())
 }
 
-pub async fn fetch_token_metadata(mint: &str, settings: &Settings) -> Result<Option<Metadata>, Box<dyn std::error::Error + Send + Sync>> {
-    let metadata_program_id = Pubkey::from_str(&settings.metadata_program)?;
-    let mint_pubkey = Pubkey::from_str(mint)?;
-    let (metadata_pda, _) = Pubkey::find_program_address(
-        &[b"metadata", metadata_program_id.as_ref(), mint_pubkey.as_ref()],
-        &metadata_program_id,
-    );
-
-    let request = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
-        "params": [ metadata_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
-    });
-
-    let data: RpcResponse<AccountInfoResult> = fetch_with_fallback(request, "getAccountInfo", settings).await?;
-
-    if let Some(result) = data.result {
-        if let Some(account_data) = result.value {
-            if !account_data.data.is_empty() {
-                let base64_data = &account_data.data[0];
-                match Base64Engine.decode(base64_data) {
-                    Ok(decoded) => {
-                        match Metadata::from_bytes(&decoded) {
-                            Ok(meta) => return Ok(Some(meta)),
-                            Err(e) => {
-                                error!("Failed to parse metadata for {}: {}", mint, e);
-                                return Err(e.into());
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to decode base64 data for {}: {}", mint, e);
-                        return Err(e.into());
-                    }
-                }
-            } else {
-                info!("Empty account data for mint {}", mint);
-            }
-        } else {
-            info!("No account info returned for mint {}", mint);
-        }
-    } else {
-        info!("No result in RPC response for mint {}", mint);
-    }
-    Ok(None)
+pub async fn fetch_token_metadata(
+    mint: &str,
+    settings: &Arc<Settings>,
+) -> Result<Option<Metadata>, Box<dyn std::error::Error>> {
+    let metadata_program_pk = Pubkey::from_str(&settings.metadata_program)?;
+    let mint_pk = Pubkey::from_str(mint)?;
+    let metadata_pda = Pubkey::find_program_address(
+        &[b"metadata", metadata_program_pk.as_ref(), mint_pk.as_ref()],
+        &metadata_program_pk,
+    )
+    .0;
+    let data: RpcResponse<AccountInfoResult> = fetch_with_fallback(
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+            "params": [ metadata_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
+        }),
+        "getAccountInfo",
+        settings,
+    )
+    .await?;
+    Ok(data
+        .result
+        .and_then(|r| r.data.get(0).and_then(|d| Base64Engine.decode(d).ok()))
+        .and_then(|d| Metadata::safe_deserialize(&d).ok()))
 }
 
 pub async fn fetch_with_fallback<T: for<'de> Deserialize<'de> + Send + 'static>(
-    request: serde_json::Value,
+    request: Value,
     _method: &str,
-    settings: &Settings,
-) -> Result<RpcResponse<T>, Box<dyn std::error::Error + Send + Sync>> {
+    settings: &Arc<Settings>,
+) -> Result<RpcResponse<T>, Box<dyn std::error::Error>> {
     let client = Arc::new(Client::new());
-    let futures = settings.solana_rpc_urls.iter().map(|rpc_url| {
+    let futures = settings.solana_rpc_urls.iter().map(|http| {
         let client = client.clone();
         let request = request.clone();
         Box::pin(async move {
-            let resp = client.post(rpc_url).header("Content-Type", "application/json").body(request.to_string()).send().await?;
-            let bytes = resp.bytes().await?;
-            let data = serde_json::from_slice::<RpcResponse<T>>(&bytes)?;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(data)
+            client
+                .post(http)
+                .json(&request)
+                .send()
+                .await?
+                .json::<RpcResponse<T>>()
+                .await
+                .map_err(|e| Into::<Box<dyn std::error::Error + Send + Sync>>::into(e))
         })
     });
-    let (data, _) = select_ok(futures).await?;
+    let (data, _) = select_ok(futures).await.map_err(|e| format!("{}", e))?;
     if data.error.is_some() {
         Err("RPC error".into())
     } else {
@@ -204,41 +126,51 @@ pub async fn fetch_with_fallback<T: for<'de> Deserialize<'de> + Send + 'static>(
     }
 }
 
-pub async fn fetch_current_price(mint: &str, price_cache: &Arc<Mutex<PriceCache>>, settings: &Settings) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn fetch_current_price(
+    mint: &str,
+    price_cache: &Arc<Mutex<PriceCache>>,
+    settings: &Arc<Settings>,
+) -> Result<f64, Box<dyn std::error::Error>> {
     let mut cache = price_cache.lock().await;
-    let mint_str = mint.to_string();
-    if let Some((timestamp, price)) = cache.get(&mint_str) {
-        if Instant::now().duration_since(*timestamp) < PRICE_CACHE_TTL {
+    if let Some((timestamp, price)) = cache.get(mint) {
+        if Instant::now().duration_since(*timestamp) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
             return Ok(*price);
         }
     }
 
     let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
     let mint_pubkey = Pubkey::from_str(mint)?;
-    let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding_curve", pump_program.as_ref(), mint_pubkey.as_ref()], &pump_program);
+    let (curve_pda, _) = Pubkey::find_program_address(
+        &[b"bonding_curve", pump_program.as_ref(), mint_pubkey.as_ref()],
+        &pump_program,
+    );
     let request = json!({
         "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
         "params": [ curve_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
     });
-    let data: RpcResponse<AccountInfoResult> = fetch_with_fallback(request, "getAccountInfo", settings).await?;
+    let data: RpcResponse<AccountInfoResult> =
+        fetch_with_fallback(request, "getAccountInfo", settings).await?;
+
     let price = if let Some(result) = data.result {
-        if result.value.is_none() || result.value.as_ref().map_or(true, |d| d.data.is_empty()) {
-            return Err("Bonding curve account not found or empty".into());
-        }
-        let base64_data = &result.value.expect("Verified non-empty in previous check").data[0];
-        let decoded = Base64Engine.decode(base64_data)?;
-        let state = BondingCurveState::try_from_slice(&decoded[8..])?; // Skip 8-byte discriminator
+        let base64_data = &result.data;
+        let decoded = Base64Engine.decode(base64_data.get(0).ok_or("Missing data string")?).map_err(|e| format!("Decode error for {}: {}", mint, e))?;
+        let state = BondingCurveState::try_from_slice(&decoded)
+            .map_err(|e| format!("Deserialize error for {}: {}", mint, e))?;
         if state.complete {
-            return Err("Token migrated".into());
+            return Err(format!("Token {} migrated to Raydium", mint).into());
         }
         let token_reserves = state.virtual_token_reserves as f64;
         let sol_reserves = state.virtual_sol_reserves as f64 / 1_000_000_000.0;
-        if token_reserves > 0.0 { sol_reserves / token_reserves } else { 0.0 }
+        if token_reserves > 0.0 {
+            sol_reserves / token_reserves
+        } else {
+            return Err(format!("Invalid reserves for {}: zero tokens", mint).into());
+        }
     } else {
-        0.0
+        return Err(format!("Bonding curve account not found or empty for {}", mint).into());
     };
 
-    cache.put(mint_str, (Instant::now(), price));
+    cache.put(mint.to_string(), (Instant::now(), price));
     Ok(price)
 }
 
@@ -247,61 +179,63 @@ pub async fn buy_token(
     sol_amount: f64,
     is_real: bool,
     keypair: Option<&Keypair>,
-    holdings: Arc<Mutex<HashMap<String, Holding>>>,
-    price_cache: &Arc<Mutex<PriceCache>>,
-    settings: &Settings,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("Attempting to buy {} with {} SOL", mint, sol_amount);
-    if !is_real {
-        info!("Dry run: Not executing buy transaction.");
-        let price = fetch_current_price(mint, price_cache, settings).await.unwrap_or(0.0);
-        if price > 0.0 {
-            let token_amount = (sol_amount / price) as u64;
-            let mut holdings_guard = holdings.lock().await;
-            holdings_guard.insert(mint.to_string(), Holding {
-                mint: mint.to_string(),
-                amount: token_amount,
-                buy_price: price,
-                buy_time: Utc::now(),
-            });
-            info!("Simulated buy of {} tokens of {}", token_amount, mint);
-        }
-        return Ok(());
+    price_cache: Arc<Mutex<PriceCache>>,
+    settings: &Arc<Settings>,
+) -> Result<Holding, Box<dyn std::error::Error>> {
+    let buy_price = fetch_current_price(mint, &price_cache, settings).await?;
+    let token_amount = (sol_amount / buy_price) as u64;
+    info!(
+        "Buy {}: {} tokens for {} SOL (price: {} SOL/token)",
+        mint, token_amount, sol_amount, buy_price
+    );
+
+    if is_real {
+        let client = RpcClient::new(&settings.solana_rpc_urls[0]);
+        let payer = keypair.ok_or("Keypair required")?;
+        let instruction = Instruction {
+            program_id: Pubkey::from_str(&settings.pump_fun_program)?,
+            accounts: vec![], // TODO: Add payer, mint, bonding curve, ATA
+            data: vec![], // Buy discriminator
+        };
+        let mut tx = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
+        let blockhash = client.get_latest_blockhash()?;
+        tx.sign(&[payer], blockhash);
+        client.send_and_confirm_transaction(&tx)?;
     }
 
-    let _keypair = keypair.ok_or("Keypair required for real transaction")?;
-    
-    // Discriminator for 'buy'
-    let discriminator: [u8; 8] = [109, 160, 113, 29, 33, 135, 141, 6];
-    let mut instruction_data = discriminator.to_vec();
-    instruction_data.extend_from_slice(&((sol_amount * 1_000_000_000.0) as u64).to_le_bytes());
-    instruction_data.extend_from_slice(&0u64.to_le_bytes()); // min_token_output
-
-    info!("Buy instruction data (not sent): {:?}", instruction_data);
-    todo!("Implement full buy transaction sending with all required accounts");
+    Ok(Holding {
+        amount: token_amount,
+        buy_price,
+        buy_time: Utc::now(),
+    })
 }
 
 pub async fn sell_token(
     mint: &str,
-    token_amount: u64,
+    amount: u64,
+    current_price: f64,
     is_real: bool,
     keypair: Option<&Keypair>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("Attempting to sell {} of {}", token_amount, mint);
-    if !is_real {
-        info!("Dry run: Not executing sell transaction.");
-        info!("Simulated sell of {}", mint);
-        return Ok(());
+    settings: &Arc<Settings>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sol_received = amount as f64 * current_price;
+    info!(
+        "Sell {}: {} tokens for {} SOL (price: {} SOL/token)",
+        mint, amount, sol_received, current_price
+    );
+
+    if is_real {
+        let client = RpcClient::new(&settings.solana_rpc_urls[0]);
+        let payer = keypair.ok_or("Keypair required")?;
+        let instruction = Instruction {
+            program_id: Pubkey::from_str(&settings.pump_fun_program)?,
+            accounts: vec![], // TODO: Add payer, mint, bonding curve, ATA
+            data: vec![], // Sell discriminator
+        };
+        let mut tx = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
+        let blockhash = client.get_latest_blockhash()?;
+        tx.sign(&[payer], blockhash);
+        client.send_and_confirm_transaction(&tx)?;
     }
-
-    let _keypair = keypair.ok_or("Keypair required for real transaction")?;
-
-    // Discriminator for 'sell'
-    let discriminator: [u8; 8] = [153, 8, 166, 57, 28, 118, 184, 128];
-    let mut instruction_data = discriminator.to_vec();
-    instruction_data.extend_from_slice(&token_amount.to_le_bytes());
-    instruction_data.extend_from_slice(&0u64.to_le_bytes()); // min_sol_output
-
-    info!("Sell instruction data (not sent): {:?}", instruction_data);
-    todo!("Implement full sell transaction sending with all required accounts");
+    Ok(())
 }

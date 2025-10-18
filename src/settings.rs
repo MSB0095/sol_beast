@@ -10,6 +10,8 @@ pub struct Settings {
     pub tp_percent: f64,
     pub sl_percent: f64,
     pub timeout_secs: i64,
+    pub cache_capacity: usize,
+    pub price_cache_ttl_secs: u64,
 }
 
 impl Settings {

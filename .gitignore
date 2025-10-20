@@ -1,4 +1,2 @@
 /target
 config.toml
-*.json
-.vscode/

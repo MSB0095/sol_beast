@@ -1,10 +1,8 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use chrono::{DateTime, Utc};
 use lru::LruCache;
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde_json::Value;
-use solana_program::pubkey::Pubkey;
 use std::time::Instant;
 
 // Bonding Curve State
@@ -14,40 +12,18 @@ pub struct BondingCurveState {
     pub virtual_sol_reserves: u64,
     pub real_token_reserves: u64,
     pub real_sol_reserves: u64,
-    pub token_total_supply: u64,
     pub complete: bool,
-    pub creator: Pubkey,
-}
-
-#[derive(BorshDeserialize, BorshSerialize, Debug, Clone)]
-pub struct TradeEvent {
-    pub mint: Pubkey,
-    pub sol_amount: u64,
-    pub token_amount: u64,
-    pub is_buy: bool,
-    pub user: Pubkey,
-    pub timestamp: i64,
-    pub virtual_sol_reserves: u64,
-    pub virtual_token_reserves: u64,
-    pub real_sol_reserves: u64,
-    pub real_token_reserves: u64,
-    pub fee_recipient: Pubkey,
-    pub fee_basis_points: u64,
-    pub fee: u64,
-    pub creator: Pubkey,
-    pub creator_fee_basis_points: u64,
-    pub creator_fee: u64,
+    pub fee_basis_points: u16,
 }
 
 // Holdings and Price Cache
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Holding {
-    pub mint: String,
     pub amount: u64,
-    pub buy_price: Decimal,
+    pub buy_price: f64,
     pub buy_time: DateTime<Utc>,
 }
-pub type PriceCache = LruCache<String, (Instant, Decimal)>;
+pub type PriceCache = LruCache<String, (Instant, f64)>;
 
 // RPC structures
 #[derive(Deserialize, Debug)]
@@ -57,13 +33,29 @@ pub struct RpcResponse<T> {
 }
 #[derive(Deserialize, Debug)]
 pub struct TransactionResult {
-    pub transaction: Option<TransactionData>,
+    pub transaction: TransactionData,
+    pub meta: Option<TransactionMeta>,
 }
 #[derive(Deserialize, Debug)]
 pub struct TransactionData {
     pub message: MessageData,
 }
-
+#[derive(Deserialize, Debug)]
+pub struct TransactionMeta {
+    #[serde(rename = "innerInstructions")]
+    pub inner_instructions: Option<Vec<InnerInstruction>>,
+}
+#[derive(Deserialize, Debug)]
+pub struct InnerInstruction {
+    // pub index: u8,
+    pub instructions: Vec<Instruction>,
+}
+#[derive(Deserialize, Debug)]
+pub struct Instruction {
+    #[serde(rename = "programIdIndex")]
+    pub program_id_index: u8,
+    pub accounts: Vec<u8>,
+}
 #[derive(Deserialize, Debug)]
 pub struct MessageData {
     #[serde(rename = "accountKeys")]
@@ -75,10 +67,5 @@ pub struct AccountKey {
 }
 #[derive(Deserialize, Debug)]
 pub struct AccountInfoResult {
-    pub value: Option<AccountInfoValue>,
-}
-
-#[derive(Deserialize, Debug)]
-pub struct AccountInfoValue {
     pub data: Vec<String>,
 }

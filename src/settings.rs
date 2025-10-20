@@ -12,6 +12,10 @@ pub struct Settings {
     pub timeout_secs: i64,
     pub cache_capacity: usize,
     pub price_cache_ttl_secs: u64,
+    pub max_wss_connections: Option<usize>,
+    pub rotate_wss_connections: Option<bool>,
+    pub max_held_tokens: Option<u64>,
+    pub buy_amount: Option<f64>,
 }
 
 impl Settings {

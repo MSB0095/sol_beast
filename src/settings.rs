@@ -22,3 +22,19 @@ impl Settings {
         cfg.try_deserialize().expect("Failed to load config")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_example_config() {
+        // This test validates that `Settings::from_file` can load the example
+        // config without panicking and that a couple of fields match expected
+        // placeholder values from `config.example.toml`.
+        let s = Settings::from_file("config.example.toml");
+        assert_eq!(s.tp_percent, 30.0);
+        assert_eq!(s.sl_percent, -20.0);
+        assert_eq!(s.cache_capacity, 1024);
+    }
+}

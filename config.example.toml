@@ -1,0 +1,10 @@
+solana_ws_urls = ["wss://api.mainnet-beta.solana.com/"]
+solana_rpc_urls = ["https://api.mainnet-beta.solana.com/"]
+pump_fun_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+metadata_program = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+wallet_keypair_path = "./keypair.json"
+tp_percent = 30.0
+sl_percent = -20.0
+timeout_secs = 3600
+cache_capacity = 1024
+price_cache_ttl_secs = 30

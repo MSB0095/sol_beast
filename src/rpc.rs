@@ -1,19 +1,18 @@
 use crate::{
     models::{
-        AccountInfoResult,
-        BondingCurveState,
-        Holding,
-        PriceCache,
-        RpcResponse,
-        TransactionResult,
+    
+    BondingCurveState,
+    Holding,
+    PriceCache,
+    RpcResponse,
+    OffchainTokenMetadata,
     },
     settings::Settings,
 };
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
-use borsh::BorshDeserialize;
 use chrono::Utc;
 use futures_util::future::select_ok;
-use log::info;
+use log::{info, warn, error, debug};
 use mpl_token_metadata::accounts::Metadata;
 use reqwest::Client;
 use serde::Deserialize;
@@ -27,39 +26,174 @@ use solana_sdk::{
 };
 use std::{str::FromStr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::time::Duration;
 
 pub async fn fetch_transaction_details(
     signature: &str,
     settings: &Arc<Settings>,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let data: RpcResponse<TransactionResult> = fetch_with_fallback(
-        json!({
-            "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
-            "params": [ signature, { "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
-        }),
-        "getTransaction",
-        settings,
-    )
-    .await?;
+) -> Result<(String, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
+    // Request the raw JSON (not jsonParsed) so the returned instruction structures
+    // include `programIdIndex` and `accounts` fields which match our deserialization
+    // model. jsonParsed returns a different shape (parsed instructions) which would
+    // not deserialize into our expected types.
+    let mut attempts = 0u8;
+    let data_value: serde_json::Value = loop {
+        attempts += 1;
+        let resp: Result<RpcResponse<Value>, Box<dyn std::error::Error + Send + Sync>> = fetch_with_fallback::<Value>(
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                "params": [ signature, { "encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
+            }),
+            "getTransaction",
+            settings,
+        )
+        .await;
 
-    let result = data.result.ok_or("No transaction data")?;
-    info!("Transaction data: {:?}", result);
-    let account_keys = &result.transaction.message.account_keys;
+        match resp {
+            Ok(rpc_resp) => {
+                if let Some(result_val) = rpc_resp.result {
+                    break result_val;
+                } else {
+                    error!("getTransaction returned no result for signature {}", signature);
+                    return Err("No transaction data".into());
+                }
+            }
+            Err(e) => {
+                let s = e.to_string();
+                // Handle common transient errors (rate limit). Retry a few times with backoff.
+                if (s.contains("Too many requests") || s.contains("429")) && attempts < 4 {
+                    let backoff = std::time::Duration::from_millis(250 * attempts as u64);
+                    debug!("Rate limited fetching tx {} (attempt {}), backing off {:?}: {}", signature, attempts, backoff, s);
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    };
+
+    info!("Transaction data retrieved for {}", signature);
+    debug!("Transaction raw JSON: {}", data_value);
+    // Note: previously we persisted raw transaction JSON to disk for post-mortem
+    // inspection. To reduce file I/O we no longer write files; keep the raw
+    // JSON available in debug logs for interactive troubleshooting.
+    debug!("Transaction JSON (debug only): {}", data_value);
+
+    // Normalize account keys
+    let account_keys_arr = data_value
+        .get("transaction")
+        .and_then(|t| t.get("message"))
+        .and_then(|m| m.get("accountKeys"))
+        .or_else(|| {
+            // older shape: accountKeys under `accountKeys`
+            data_value.get("transaction").and_then(|t| t.get("message")).and_then(|m| m.get("accountKeys"))
+        })
+        .and_then(|v| v.as_array())
+        .ok_or("Missing accountKeys in transaction")?;
+
+    let mut account_keys: Vec<String> = Vec::with_capacity(account_keys_arr.len());
+    for key in account_keys_arr {
+        if let Some(s) = key.as_str() {
+            account_keys.push(s.to_string());
+        } else if let Some(obj) = key.as_object() {
+            if let Some(pubkey) = obj.get("pubkey").and_then(|p| p.as_str()) {
+                account_keys.push(pubkey.to_string());
+            } else {
+                account_keys.push(serde_json::to_string(obj)?);
+            }
+        } else {
+            account_keys.push(key.to_string());
+        }
+    }
+
+    // First pass: prefer postTokenBalances if present (reliable source of mint + owner)
+    if let Some(meta) = data_value.get("meta") {
+        if let Some(post_balances) = meta.get("postTokenBalances").and_then(|v| v.as_array()) {
+            if !post_balances.is_empty() {
+                if let Some(entry) = post_balances.get(0) {
+                    if let (Some(mint), Some(owner)) = (entry.get("mint").and_then(|m| m.as_str()), entry.get("owner").and_then(|o| o.as_str())) {
+                        // try to get creator from parsed initializeMint2 if available
+                        let mut creator_opt: Option<String> = None;
+                        if let Some(inner) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
+                            'outer: for inner_inst in inner {
+                                if let Some(instructions) = inner_inst.get("instructions").and_then(|v| v.as_array()) {
+                                    for instr in instructions {
+                                        if let Some(parsed) = instr.get("parsed") {
+                                            if let Some(t) = parsed.get("type").and_then(|t| t.as_str()) {
+                                                if t == "initializeMint2" {
+                                                    if let Some(info) = parsed.get("info") {
+                                                        if let Some(c) = info.get("mintAuthority").and_then(|c| c.as_str()).or_else(|| info.get("owner").and_then(|o| o.as_str())) {
+                                                            creator_opt = Some(c.to_string());
+                                                            break 'outer;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let creator = creator_opt.unwrap_or_else(|| owner.to_string());
+                        // compute bonding curve PDA
+                        let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
+                        let mint_pk = Pubkey::from_str(mint)?;
+                        // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
+                        let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
+                        // Try to find a token account for this mint that is owned by the bonding curve PDA
+                        let mut holder_addr = owner.to_string();
+                        if let Ok(Some(found)) = find_token_account_owned_by_owner(mint, &curve_pda.to_string(), settings).await {
+                            debug!("Found token account owned by curve PDA: {} -> {}", curve_pda, found);
+                            holder_addr = found;
+                        }
+                        debug!("Found via postTokenBalances mint={} owner={} creator={} curve_pda={} holder={}", mint, owner, creator, curve_pda, holder_addr);
+                        return Ok((creator, mint.to_string(), curve_pda.to_string(), holder_addr));
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: look for pump.fun program in raw inner instructions and map account indices
     let pump_fun_program_id = &settings.pump_fun_program;
-
-    if let Some(meta) = result.meta {
-        if let Some(inner_instructions) = meta.inner_instructions {
+    if let Some(meta) = data_value.get("meta") {
+        if let Some(inner_instructions) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
             for inner_instruction in inner_instructions {
-                for instruction in &inner_instruction.instructions {
-                    let program_id_index = instruction.program_id_index as usize;
-                    if let Some(program_id_key) = account_keys.get(program_id_index) {
-                        if program_id_key.pubkey == *pump_fun_program_id {
-                            // Assuming the order of accounts in the instruction is: mint, bonding curve, associated token account, creator
-                            if instruction.accounts.len() >= 4 {
-                                let mint_index = instruction.accounts[0] as usize;
-                                let creator_index = instruction.accounts[3] as usize;
-                                if let (Some(mint_key), Some(creator_key)) = (account_keys.get(mint_index), account_keys.get(creator_index)) {
-                                    return Ok((creator_key.pubkey.clone(), mint_key.pubkey.clone()));
+                    if let Some(instructions) = inner_instruction.get("instructions").and_then(|v| v.as_array()) {
+                    for instruction in instructions {
+                        // get programId or programIdIndex
+                        let program_id_opt = instruction
+                            .get("programId")
+                            .and_then(|p| p.as_str())
+                            .or_else(|| {
+                                instruction
+                                    .get("programIdIndex")
+                                    .and_then(|idx| idx.as_u64())
+                                    .and_then(|i| account_keys.get(i as usize).map(|s| s.as_str()))
+                            });
+
+                        if let Some(program_id_key) = program_id_opt {
+                            if program_id_key == pump_fun_program_id.as_str() {
+                                if let Some(accounts_val) = instruction.get("accounts").and_then(|a| a.as_array()) {
+                                    if accounts_val.len() >= 4 {
+                                        let mint_index = accounts_val[0].as_u64().ok_or("mint index invalid")? as usize;
+                                        let creator_index = accounts_val[3].as_u64().ok_or("creator index invalid")? as usize;
+                                        if let (Some(mint_key), Some(creator_key)) = (account_keys.get(mint_index), account_keys.get(creator_index)) {
+                                            debug!("Found pump.fun instruction: mint={}, creator={}", mint_key, creator_key);
+                                            // compute bonding curve PDA
+                                            let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
+                                            let mint_pk = Pubkey::from_str(mint_key)?;
+                                            // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
+                                            let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
+                                            return Ok((creator_key.to_string(), mint_key.to_string(), curve_pda.to_string(), creator_key.to_string()));
+                                        } else {
+                                            warn!("Account index lookup failed for instruction in tx {}: mint_index={}, creator_index={}, account_keys_len={}", signature, mint_index, creator_index, account_keys.len());
+                                        }
+                                    } else {
+                                        warn!("Unexpected account count for pump.fun instruction in tx {}: expected>=4 got={}", signature, accounts_val.len());
+                                    }
                                 }
                             }
                         }
@@ -69,13 +203,16 @@ pub async fn fetch_transaction_details(
         }
     }
 
+    debug!("Account keys (len={}): {:?}", account_keys.len(), account_keys);
     Err("Could not find pump.fun instruction or extract details".into())
 }
+
+
 
 pub async fn fetch_token_metadata(
     mint: &str,
     settings: &Arc<Settings>,
-) -> Result<Option<Metadata>, Box<dyn std::error::Error>> {
+) -> Result<(Option<Metadata>, Option<OffchainTokenMetadata>, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
     let metadata_program_pk = Pubkey::from_str(&settings.metadata_program)?;
     let mint_pk = Pubkey::from_str(mint)?;
     let metadata_pda = Pubkey::find_program_address(
@@ -83,7 +220,8 @@ pub async fn fetch_token_metadata(
         &metadata_program_pk,
     )
     .0;
-    let data: RpcResponse<AccountInfoResult> = fetch_with_fallback(
+    debug!("Fetching token metadata for mint {} -> metadata PDA {}", mint, metadata_pda);
+    let data: RpcResponse<Value> = fetch_with_fallback::<Value>(
         json!({
             "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
             "params": [ metadata_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
@@ -92,35 +230,96 @@ pub async fn fetch_token_metadata(
         settings,
     )
     .await?;
-    Ok(data
-        .result
-        .and_then(|r| r.data.get(0).and_then(|d| Base64Engine.decode(d).ok()))
-        .and_then(|d| Metadata::safe_deserialize(&d).ok()))
+    if let Some(r) = data.result {
+        // Normalize: some RPC implementations put the account under result.value
+        let account_obj = if let Some(v) = r.get("value") { v.clone() } else { r.clone() };
+        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+            match Base64Engine.decode(base64_str) {
+                Ok(decoded) => match Metadata::safe_deserialize(&decoded) {
+                    Ok(meta) => {
+                        // Try to fetch off-chain metadata JSON from the URI in on-chain metadata
+                        let uri = meta.uri.trim_end_matches('\u{0}').to_string();
+                        if !uri.is_empty() && (uri.starts_with("http://") || uri.starts_with("https://")) {
+                            let client = Client::new();
+                            match client.get(&uri).send().await {
+                                Ok(resp) => match resp.text().await {
+                                    Ok(body) => match serde_json::from_str::<OffchainTokenMetadata>(&body) {
+                                        Ok(off) => {
+                                            debug!("Fetched off-chain metadata for {}: {:?}", mint, off);
+                                            Ok((Some(meta), Some(off), Some(decoded)))
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to parse off-chain metadata JSON for {}: {}", uri, e);
+                                            Ok((Some(meta), None, Some(decoded)))
+                                        }
+                                    },
+                                    Err(e) => {
+                                        warn!("Failed to read off-chain metadata body for {}: {}", uri, e);
+                                        Ok((Some(meta), None, Some(decoded)))
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!("HTTP error fetching off-chain metadata {}: {}", uri, e);
+                                    Ok((Some(meta), None, Some(decoded)))
+                                }
+                            }
+                            } else {
+                            Ok((Some(meta), None, Some(decoded)))
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to deserialize metadata for mint {}: {}", mint, e);
+                        Ok((None, None, Some(decoded)))
+                    }
+                },
+                Err(e) => {
+                    error!("Base64 decode error for metadata PDA {} mint {}: {}", metadata_pda, mint, e);
+                    Ok((None, None, None))
+                }
+            }
+        } else {
+            warn!("No data field returned in account info for metadata PDA {} mint {}", metadata_pda, mint);
+            Ok((None, None, None))
+        }
+    } else {
+        warn!("getAccountInfo returned no result for metadata PDA {} mint {}", metadata_pda, mint);
+        Ok((None, None, None))
+    }
 }
 
 pub async fn fetch_with_fallback<T: for<'de> Deserialize<'de> + Send + 'static>(
     request: Value,
     _method: &str,
     settings: &Arc<Settings>,
-) -> Result<RpcResponse<T>, Box<dyn std::error::Error>> {
+) -> Result<RpcResponse<T>, Box<dyn std::error::Error + Send + Sync>> {
     let client = Arc::new(Client::new());
     let futures = settings.solana_rpc_urls.iter().map(|http| {
         let client = client.clone();
         let request = request.clone();
         Box::pin(async move {
-            client
-                .post(http)
-                .json(&request)
-                .send()
-                .await?
-                .json::<RpcResponse<T>>()
-                .await
-                .map_err(|e| Into::<Box<dyn std::error::Error + Send + Sync>>::into(e))
+            // Send the request and attempt to parse JSON. If parsing fails, capture the
+            // raw response body to make debugging easier (some RPC endpoints may return
+            // HTML or plain text errors which json() will fail to parse).
+            let resp = client.post(http).json(&request).send().await?;
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+            if !status.is_success() {
+                let err: Box<dyn std::error::Error + Send + Sync> = format!("HTTP {} from {}: {}", status, http, text).into();
+                return Err(err);
+            }
+            match serde_json::from_str::<RpcResponse<T>>(&text) {
+                Ok(parsed) => Ok(parsed),
+                Err(e) => {
+                    let err: Box<dyn std::error::Error + Send + Sync> = format!("JSON parse error from {}: {} -- body: {}", http, e, text).into();
+                    Err(err)
+                }
+            }
         })
     });
     let (data, _) = select_ok(futures).await.map_err(|e| format!("{}", e))?;
     if data.error.is_some() {
-        Err("RPC error".into())
+        // Provide the RPC `error` object in the message for easier debugging
+        Err(format!("RPC error: {:?}", data.error).into())
     } else {
         Ok(data)
     }
@@ -130,7 +329,7 @@ pub async fn fetch_current_price(
     mint: &str,
     price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
-) -> Result<f64, Box<dyn std::error::Error>> {
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
     let mut cache = price_cache.lock().await;
     if let Some((timestamp, price)) = cache.get(mint) {
         if Instant::now().duration_since(*timestamp) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
@@ -140,23 +339,267 @@ pub async fn fetch_current_price(
 
     let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
     let mint_pubkey = Pubkey::from_str(mint)?;
-    let (curve_pda, _) = Pubkey::find_program_address(
-        &[b"bonding_curve", pump_program.as_ref(), mint_pubkey.as_ref()],
-        &pump_program,
-    );
-    let request = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
-        "params": [ curve_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
-    });
-    let data: RpcResponse<AccountInfoResult> =
-        fetch_with_fallback(request, "getAccountInfo", settings).await?;
+    // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
+    let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pubkey.as_ref()], &pump_program);
+    debug!("Fetching bonding curve account for mint {} -> curve PDA {}", mint, curve_pda);
+    // Try multiple commitment levels (prefer most-final) and a few retries to handle
+    // RPC variations and transient propagation delays. Some RPC nodes may not yet have
+    // the newest account data at a particular commitment level. We try `finalized`
+    // first to maximize the chance of getting populated account data.
+    let commitments = ["finalized", "confirmed", "processed"];
+    let mut last_err: Option<String> = None;
+    let mut decoded_opt: Option<Vec<u8>> = None;
+    for c in &commitments {
+        // Try a few attempts per commitment to allow different RPC endpoints to respond
+        // with populated data (fetch_with_fallback picks the first HTTP success which
+        // might still have an empty `value`).
+        for attempt in 0..3 {
+            let request = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                "params": [ curve_pda.to_string(), { "encoding": "base64", "commitment": c } ]
+            });
+            match fetch_with_fallback::<Value>(request, "getAccountInfo", settings).await {
+                Ok(data) => {
+                    if let Some(result_val) = data.result {
+                        let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
+                        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                            match Base64Engine.decode(base64_str) {
+                                Ok(decoded) => {
+                                    decoded_opt = Some(decoded);
+                                    break;
+                                }
+                                Err(e) => {
+                                    last_err = Some(format!("Decode error for bonding curve {} mint {}: {}", curve_pda, mint, e));
+                                }
+                            }
+                        } else {
+                            last_err = Some(format!("No data field in account object for curve PDA {} at commitment {} (attempt {})", curve_pda, c, attempt));
+                        }
+                    } else {
+                        last_err = Some(format!("getAccountInfo returned no result for curve PDA {} at commitment {} (attempt {})", curve_pda, c, attempt));
+                    }
+                }
+                Err(e) => {
+                    last_err = Some(format!("RPC error fetching curve PDA {} at commitment {} (attempt {}): {}", curve_pda, c, attempt, e));
+                }
+            }
+            // slight backoff between attempts
+            tokio::time::sleep(std::time::Duration::from_millis(150 * (attempt as u64 + 1))).await;
+        }
+        if decoded_opt.is_some() {
+            break;
+        }
+    }
 
-    let price = if let Some(result) = data.result {
-        let base64_data = &result.data;
-        let decoded = Base64Engine.decode(base64_data.get(0).ok_or("Missing data string")?).map_err(|e| format!("Decode error for {}: {}", mint, e))?;
-        let state = BondingCurveState::try_from_slice(&decoded)
-            .map_err(|e| format!("Deserialize error for {}: {}", mint, e))?;
+    // If we couldn't read the expected curve PDA, try a server-side search of the pump.fun
+    // program accounts using getProgramAccountsV2 with memcmp filters for the mint. Some
+    // providers index program accounts differently or the PDA may not be available at the
+    // requested commitment; a targeted program-side search is more likely to find the
+    // bonding-curve account than scanning token program accounts client-side.
+    if decoded_opt.is_none() {
+        // If direct queries failed, try a pump.fun program-side lookup (may not always
+        // succeed because the mint is not necessarily stored in the account data). We
+        // also attempt a direct per-endpoint probe for the computed PDA to see if any
+        // RPC node has the account populated.
+        if let Ok(Some(found_curve)) = find_curve_account_by_mint(mint, settings).await {
+            debug!("Found curve account via pump.fun program lookup for mint {} -> {}", mint, found_curve);
+            // Try to fetch the account data for the found curve pubkey once (confirmed)
+            let request = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                "params": [ found_curve, { "encoding": "base64", "commitment": "confirmed" } ]
+            });
+            if let Ok(data) = fetch_with_fallback::<Value>(request, "getAccountInfo", settings).await {
+                if let Some(result_val) = data.result {
+                    let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
+                    if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                        if let Ok(decoded) = Base64Engine.decode(base64_str) {
+                            decoded_opt = Some(decoded);
+                        }
+                    }
+                }
+            }
+        }
+        // Direct per-endpoint probe for the computed PDA: try each configured RPC URL
+        // and pick the first one that returns populated account data. This avoids the
+        // `select_ok` behavior which can return the first HTTP success even when the
+        // `value` is null.
+        if decoded_opt.is_none() {
+            for http in &settings.solana_rpc_urls {
+                let client = reqwest::Client::new();
+                let request = json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+                    "params": [ curve_pda.to_string(), { "encoding": "base64", "commitment": "finalized" } ]
+                });
+                match client.post(http).json(&request).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+                        if !status.is_success() {
+                            debug!("Endpoint {} returned HTTP {} for curve PDA {}: {}", http, status, curve_pda, text);
+                            continue;
+                        }
+                        match serde_json::from_str::<RpcResponse<Value>>(&text) {
+                            Ok(parsed) => {
+                                if let Some(rv) = parsed.result {
+                                    let account_obj = if let Some(v) = rv.get("value") { v.clone() } else { rv.clone() };
+                                    if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                                        if let Ok(decoded) = Base64Engine.decode(base64_str) {
+                                            decoded_opt = Some(decoded);
+                                            break;
+                                        }
+                                    } else {
+                                        debug!("Endpoint {} returned no data for curve PDA {}", http, curve_pda);
+                                    }
+                                } else {
+                                    debug!("Endpoint {} returned null result for curve PDA {}", http, curve_pda);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse JSON from {} for curve PDA {}: {} -- body: {}", http, curve_pda, e, text);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("HTTP error contacting {} for curve PDA {}: {}", http, curve_pda, e);
+                    }
+                }
+            }
+        }
+    }
+
+    let price = if let Some(decoded) = decoded_opt {
+    // Validate expected pump.fun discriminator and minimum length. The pump.fun
+    // bonding-curve account uses an 8-byte Anchor discriminator prefix followed
+    // by the following fields (after the 8 bytes): five u64 (40 bytes) and a
+    // bool (1 byte) => 41 bytes expected post-discriminator. Total minimum
+    // account length = 8 + 41 = 49 bytes.
+    const PUMP_CURVE_DISCRIMINATOR: [u8; 8] = [0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60];
+    let min_total_len: usize = 8 + 41;
+
+    // Helper: rate-limited/logging for curve errors. Use a global debounce map
+    // keyed by curve_pda+mint so we avoid log spam when many RPC calls fail in
+    // a short period.
+    static BONDING_CURVE_ERROR_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> =
+        Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+    async fn report_curve_issue(
+        settings: &crate::settings::Settings,
+        curve_pda: &Pubkey,
+        mint: &str,
+        short_msg: &str,
+        decoded: &[u8],
+    ) {
+        let key = format!("{}:{}", curve_pda, mint);
+        let b64 = Base64Engine.encode(decoded);
+        let full_hex: String = decoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+        if settings.bonding_curve_strict {
+            error!("{} for curve {} mint {}", short_msg, curve_pda, mint);
+            debug!("Bonding curve raw (base64) for {}: {}", curve_pda, b64);
+            debug!("Bonding curve raw (hex) for {}: {}", curve_pda, full_hex);
+        } else {
+            // Tolerant mode: rate-limit warnings to avoid spam. If debounced,
+            // emit a debug line instead of warn.
+            let mut map = BONDING_CURVE_ERROR_TIMES.lock().await;
+            let now = Instant::now();
+            let debounce_secs = settings.bonding_curve_log_debounce_secs;
+                    match map.get(&key) {
+                Some(last) if now.duration_since(*last) < Duration::from_secs(debounce_secs) => {
+                    debug!("Debounced curve issue for {}: {}", key, short_msg);
+                }
+                _ => {
+                    map.insert(key.clone(), now);
+                    // Emit a conspicuous warning but mark it as tolerated.
+                    warn!("Tolerated bonding curve issue for {} mint {}: {}", curve_pda, mint, short_msg);
+                    // Print encoded forms for interactive debugging only (no files).
+                    debug!("Bonding curve raw (base64) for {}: {}", curve_pda, b64);
+                    debug!("Bonding curve raw (hex) for {}: {}", curve_pda, full_hex);
+                }
+            }
+        }
+    }
+
+    if decoded.len() < 8 {
+        report_curve_issue(settings, &curve_pda, mint, &format!("too short: len={} < 8 (no discriminator)", decoded.len()), &decoded).await;
+        return Err(format!("Bonding curve account too short for {}", mint).into());
+    }
+    let disc_bytes = &decoded[..8];
+    if disc_bytes != PUMP_CURVE_DISCRIMINATOR {
+        report_curve_issue(settings, &curve_pda, mint, "unexpected discriminator", &decoded).await;
+        return Err(format!("Unexpected discriminator for {}: not a pump.fun curve", mint).into());
+    }
+    if decoded.len() < min_total_len {
+        report_curve_issue(settings, &curve_pda, mint, &format!("too short: len={} < expected {}", decoded.len(), min_total_len), &decoded).await;
+        return Err(format!("Bonding curve account too short for {}", mint).into());
+    }
+
+    // Safe to slice past the 8-byte discriminator now
+    let slice = &decoded[8..];
+    // Add detailed debug info to help diagnose layout mismatches: length and
+    // a short hex prefix of the on-chain data (post-discriminator).
+    let prefix_len = std::cmp::min(64, slice.len());
+    let prefix_hex: String = slice[..prefix_len].iter().map(|b| format!("{:02x}", b)).collect();
+    debug!(
+        "Bonding curve raw bytes len={} slice_len={} discriminator={:?} first{}={}",
+        decoded.len(),
+        slice.len(),
+        disc_bytes,
+        prefix_len,
+        prefix_hex
+    );
+
+    // Manually parse the fixed fields (5 * u64 + bool = 41 bytes) from the
+    // beginning of the slice. This is more tolerant to trailing bytes that
+    // some pump.fun curve accounts contain (avoid Borsh failing on "not all
+    // bytes read"). We already verified the discriminator and minimum total
+    // length above.
+    let needed = 8 * 5 + 1; // 41
+    if slice.len() < needed {
+        report_curve_issue(settings, &curve_pda, mint, &format!("post-discriminator too short: {} < {}", slice.len(), needed), &decoded).await;
+        return Err(format!("Bonding curve post-discriminator too short for {}", mint).into());
+    }
+
+    // Safe to index because we checked length
+    let virtual_token_reserves = u64::from_le_bytes(slice[0..8].try_into().unwrap());
+    let virtual_sol_reserves = u64::from_le_bytes(slice[8..16].try_into().unwrap());
+    let real_token_reserves = u64::from_le_bytes(slice[16..24].try_into().unwrap());
+    let real_sol_reserves = u64::from_le_bytes(slice[24..32].try_into().unwrap());
+    let token_total_supply = u64::from_le_bytes(slice[32..40].try_into().unwrap());
+    let complete = slice[40] != 0;
+
+    if slice.len() > needed {
+        debug!(
+            "Bonding curve slice for {} has {} extra bytes after expected fields",
+            mint,
+            slice.len() - needed
+        );
+    }
+
+    let state = BondingCurveState {
+        virtual_token_reserves,
+        virtual_sol_reserves,
+        real_token_reserves,
+        real_sol_reserves,
+        token_total_supply,
+        complete,
+    };
+    // Print parsed on-chain bonding curve info at info level so operators can
+    // see the core fields in logs without having to inspect files.
+    info!(
+        "Bonding curve for mint {} curve {}: virtual_token_reserves={} virtual_sol_reserves={} ({} SOL) real_token_reserves={} real_sol_reserves={} ({} SOL) token_total_supply={} complete={}",
+        mint,
+        curve_pda,
+        state.virtual_token_reserves,
+        state.virtual_sol_reserves,
+        state.virtual_sol_reserves as f64 / 1_000_000_000.0,
+        state.real_token_reserves,
+        state.real_sol_reserves,
+        state.real_sol_reserves as f64 / 1_000_000_000.0,
+        state.token_total_supply,
+        state.complete
+    );
         if state.complete {
+            error!("Bonding curve state reports migrated for mint {}", mint);
             return Err(format!("Token {} migrated to Raydium", mint).into());
         }
         let token_reserves = state.virtual_token_reserves as f64;
@@ -164,14 +607,153 @@ pub async fn fetch_current_price(
         if token_reserves > 0.0 {
             sol_reserves / token_reserves
         } else {
+            error!("Invalid reserves for {}: zero tokens (state: {:?})", mint, state);
             return Err(format!("Invalid reserves for {}: zero tokens", mint).into());
         }
     } else {
-        return Err(format!("Bonding curve account not found or empty for {}", mint).into());
+        let msg = last_err.unwrap_or_else(|| format!("Bonding curve account not found or empty for {} (curve PDA {})", mint, curve_pda));
+        error!("{}", msg);
+        return Err(format!("Bonding curve account missing or unreadable for {}: {}", mint, msg).into());
     };
 
     cache.put(mint.to_string(), (Instant::now(), price));
     Ok(price)
+}
+
+/// Find a token account for `mint` whose owner is `owner_pubkey` by querying the
+/// SPL Token program with `getProgramAccounts` and memcmp filters on the mint and owner
+/// fields of the token account layout. Returns the first matching token account pubkey
+/// if found.
+async fn find_token_account_owned_by_owner(
+    mint: &str,
+    owner_pubkey: &str,
+    settings: &Arc<Settings>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    // SPL Token program id
+    let token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    // Use getProgramAccountsV2 which supports pagination and avoids large-result errors
+    // on providers like Helius. Request the smallest page possible (limit/pageSize=1).
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccountsV2",
+        "params": [
+            token_program,
+            {
+                "encoding": "base64",
+                "commitment": "confirmed",
+                "filters": [
+                    { "memcmp": { "offset": 0, "bytes": mint } },
+                    { "memcmp": { "offset": 32, "bytes": owner_pubkey } }
+                ],
+                // Helius accepts `pageSize` for V2 pagination; request a single page entry
+                "pageSize": 1
+            }
+        ]
+    });
+
+    match fetch_with_fallback::<Value>(request, "getProgramAccountsV2", settings).await {
+        Ok(resp) => {
+            if let Some(result_val) = resp.result {
+                // V2 may return either an array of entries or an object with an `accounts` array.
+                if let Some(arr) = result_val.as_array() {
+                    if !arr.is_empty() {
+                        if let Some(entry) = arr.get(0) {
+                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                                return Ok(Some(pubkey.to_string()));
+                            }
+                        }
+                    }
+                } else if let Some(obj_arr) = result_val.get("accounts").and_then(|v| v.as_array()) {
+                    if !obj_arr.is_empty() {
+                        if let Some(entry) = obj_arr.get(0) {
+                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                                return Ok(Some(pubkey.to_string()));
+                            }
+                        }
+                    }
+                } else if let Some(obj_arr) = result_val.get("value").and_then(|v| v.as_array()) {
+                    if !obj_arr.is_empty() {
+                        if let Some(entry) = obj_arr.get(0) {
+                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                                return Ok(Some(pubkey.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        }
+        Err(e) => {
+            warn!("getProgramAccountsV2 lookup failed for mint {} owner {}: {}", mint, owner_pubkey, e);
+            Ok(None)
+        }
+    }
+}
+
+/// Query the pump.fun program accounts (server-side) to find a bonding-curve account
+/// that references `mint`. This uses `getProgramAccountsV2` with a memcmp filter on
+/// the mint bytes. Returns the first matching account pubkey if found.
+async fn find_curve_account_by_mint(
+    mint: &str,
+    settings: &Arc<Settings>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let pump_program = &settings.pump_fun_program;
+    // memcmp expects raw bytes; put the base58 mint into the `bytes` field. Providers
+    // will accept the base58 string as the memcmp value for filters.
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getProgramAccountsV2",
+        "params": [
+            pump_program,
+            {
+                "encoding": "base64",
+                "commitment": "confirmed",
+                "filters": [
+                    { "memcmp": { "offset": 8, "bytes": mint } }
+                ],
+                "pageSize": 1
+            }
+        ]
+    });
+
+    match fetch_with_fallback::<Value>(request, "getProgramAccountsV2", settings).await {
+        Ok(resp) => {
+            if let Some(result_val) = resp.result {
+                if let Some(arr) = result_val.as_array() {
+                    if !arr.is_empty() {
+                        if let Some(entry) = arr.get(0) {
+                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                                return Ok(Some(pubkey.to_string()));
+                            }
+                        }
+                    }
+                } else if let Some(obj_arr) = result_val.get("accounts").and_then(|v| v.as_array()) {
+                    if !obj_arr.is_empty() {
+                        if let Some(entry) = obj_arr.get(0) {
+                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                                return Ok(Some(pubkey.to_string()));
+                            }
+                        }
+                    }
+                } else if let Some(obj_arr) = result_val.get("value").and_then(|v| v.as_array()) {
+                    if !obj_arr.is_empty() {
+                        if let Some(entry) = obj_arr.get(0) {
+                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                                return Ok(Some(pubkey.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None)
+        }
+        Err(e) => {
+            warn!("pump.fun getProgramAccountsV2 lookup failed for mint {}: {}", mint, e);
+            Ok(None)
+        }
+    }
 }
 
 pub async fn buy_token(
@@ -181,7 +763,7 @@ pub async fn buy_token(
     keypair: Option<&Keypair>,
     price_cache: Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
-) -> Result<Holding, Box<dyn std::error::Error>> {
+) -> Result<Holding, Box<dyn std::error::Error + Send + Sync>> {
     let buy_price = fetch_current_price(mint, &price_cache, settings).await?;
     let token_amount = (sol_amount / buy_price) as u64;
     info!(
@@ -192,11 +774,16 @@ pub async fn buy_token(
     if is_real {
         let client = RpcClient::new(&settings.solana_rpc_urls[0]);
         let payer = keypair.ok_or("Keypair required")?;
+        if payer.pubkey().to_string().is_empty() {
+            error!("Keypair provided has empty pubkey for real buy of {}", mint);
+        }
+        debug!("Preparing real buy TX for mint {} amount {} SOL", mint, sol_amount);
         let instruction = Instruction {
             program_id: Pubkey::from_str(&settings.pump_fun_program)?,
             accounts: vec![], // TODO: Add payer, mint, bonding curve, ATA
             data: vec![], // Buy discriminator
         };
+        debug!("Real buy instruction placeholder created for {} (TODO: populate accounts)", mint);
         let mut tx = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
         let blockhash = client.get_latest_blockhash()?;
         tx.sign(&[payer], blockhash);
@@ -207,6 +794,9 @@ pub async fn buy_token(
         amount: token_amount,
         buy_price,
         buy_time: Utc::now(),
+        metadata: None,
+        onchain_raw: None,
+        onchain: None,
     })
 }
 
@@ -217,7 +807,7 @@ pub async fn sell_token(
     is_real: bool,
     keypair: Option<&Keypair>,
     settings: &Arc<Settings>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let sol_received = amount as f64 * current_price;
     info!(
         "Sell {}: {} tokens for {} SOL (price: {} SOL/token)",
@@ -227,11 +817,13 @@ pub async fn sell_token(
     if is_real {
         let client = RpcClient::new(&settings.solana_rpc_urls[0]);
         let payer = keypair.ok_or("Keypair required")?;
+        debug!("Preparing real sell TX for mint {} amount {} tokens", mint, amount);
         let instruction = Instruction {
             program_id: Pubkey::from_str(&settings.pump_fun_program)?,
             accounts: vec![], // TODO: Add payer, mint, bonding curve, ATA
             data: vec![], // Sell discriminator
         };
+        debug!("Real sell instruction placeholder created for {} (TODO: populate accounts)", mint);
         let mut tx = Transaction::new_with_payer(&[instruction], Some(&payer.pubkey()));
         let blockhash = client.get_latest_blockhash()?;
         tx.sign(&[payer], blockhash);

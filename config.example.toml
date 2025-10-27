@@ -8,3 +8,5 @@ sl_percent = -20.0
 timeout_secs = 3600
 cache_capacity = 1024
 price_cache_ttl_secs = 30
+bonding_curve_strict = false
+bonding_curve_log_debounce_secs = 300

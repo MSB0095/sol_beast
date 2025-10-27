@@ -3654,6 +3654,7 @@ dependencies = [
  "log",
  "lru",
  "mpl-token-metadata",
+ "once_cell",
  "rand 0.8.5",
  "reqwest",
  "serde",

@@ -5,6 +5,7 @@ use crate::{
     PriceCache,
 };
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
+use log::{debug, error};
 use borsh::BorshDeserialize;
 use futures_util::{stream::StreamExt, SinkExt};
 use lru::LruCache;
@@ -44,14 +45,8 @@ pub async fn run_ws(
             .keys()
             .filter_map(|mint_str| {
                 Pubkey::from_str(mint_str).ok().map(|mint_pk| {
-                    let (curve_pda, _) = Pubkey::find_program_address(
-                        &[
-                            b"bonding_curve",
-                            pump_fun_program_pk.as_ref(),
-                            mint_pk.as_ref(),
-                        ],
-                        &pump_fun_program_pk,
-                    );
+                    // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
+                    let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_fun_program_pk);
                     curve_pda.to_string()
                 })
             })
@@ -88,14 +83,32 @@ pub async fn run_ws(
                     data.get(0).and_then(|v| v.as_str()),
                 ) {
                     if let Ok(decoded) = Base64Engine.decode(encoded_data) {
-                        if let Ok(state) = BondingCurveState::try_from_slice(&decoded) {
-                            if !state.complete {
-                                let _price = (state.virtual_sol_reserves as f64
-                                    / 1_000_000_000.0)
-                                    / state.virtual_token_reserves as f64;
-                                // This part is tricky as sub ID doesn't directly give mint.
-                                // A better approach is needed, maybe a map from sub ID to mint.
-                                // For now, this update path is lossy.
+                        // Skip Anchor discriminator if present
+                        let slice = if decoded.len() > 8 { &decoded[8..] } else { &decoded[..] };
+                        // Debug: print lengths and a short hex prefix to help diagnose layout issues
+                        let disc_bytes = &decoded[..std::cmp::min(8, decoded.len())];
+                        let prefix_len = std::cmp::min(64, slice.len());
+                        let prefix_hex: String = slice[..prefix_len].iter().map(|b| format!("{:02x}", b)).collect();
+                        debug!(
+                            "WS bonding curve raw bytes len={} slice_len={} discriminator={:?} first{}={}",
+                            decoded.len(),
+                            slice.len(),
+                            disc_bytes,
+                            prefix_len,
+                            prefix_hex
+                        );
+                        match BondingCurveState::try_from_slice(slice) {
+                            Ok(state) => {
+                                if !state.complete {
+                                    let _price = (state.virtual_sol_reserves as f64 / 1_000_000_000.0)
+                                        / state.virtual_token_reserves as f64;
+                                    // This part is tricky as sub ID doesn't directly give mint.
+                                    // A better approach is needed, maybe a map from sub ID to mint.
+                                    // For now, this update path is lossy.
+                                }
+                            }
+                            Err(e) => {
+                                error!("WS deserialize bonding curve failed: {}", e);
                             }
                         }
                     }

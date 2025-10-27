@@ -12,6 +12,10 @@ pub struct Settings {
     pub timeout_secs: i64,
     pub cache_capacity: usize,
     pub price_cache_ttl_secs: u64,
+    #[serde(default = "default_bonding_curve_strict")]
+    pub bonding_curve_strict: bool,
+    #[serde(default = "default_bonding_curve_log_debounce_secs")]
+    pub bonding_curve_log_debounce_secs: u64,
 }
 
 impl Settings {
@@ -22,6 +26,9 @@ impl Settings {
         cfg.try_deserialize().expect("Failed to load config")
     }
 }
+
+fn default_bonding_curve_strict() -> bool { false }
+fn default_bonding_curve_log_debounce_secs() -> u64 { 300 }
 
 #[cfg(test)]
 mod tests {

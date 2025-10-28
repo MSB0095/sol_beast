@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-use borsh::{BorshDeserialize, BorshSerialize};
+// We no longer rely on Borsh for bonding-curve parsing; manual parsing is used
+// to tolerate trailing bytes and layout variations.
 use chrono::{DateTime, Utc};
 use lru::LruCache;
 use serde::Deserialize;
@@ -18,7 +19,7 @@ use std::time::Instant;
 // - real_sol_reserves: u64
 // - token_total_supply: u64
 // - complete: bool
-#[derive(BorshDeserialize, BorshSerialize, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct BondingCurveState {
     pub virtual_token_reserves: u64,
     pub virtual_sol_reserves: u64,
@@ -26,6 +27,21 @@ pub struct BondingCurveState {
     pub real_sol_reserves: u64,
     pub token_total_supply: u64,
     pub complete: bool,
+}
+
+impl BondingCurveState {
+    /// Compute the spot price in SOL per token using the virtual reserves.
+    /// Returns None if token reserve is zero.
+    pub fn spot_price_sol_per_token(&self) -> Option<f64> {
+        if self.virtual_token_reserves == 0 {
+            return None;
+        }
+        // Formula: (virtual_sol_lamports / 1e9) / (virtual_token_base_units / 1e6)
+        // Simplifies to (virtual_sol_lamports / virtual_token_base_units) * 1e-3
+        let vsol = self.virtual_sol_reserves as f64;
+        let vtok = self.virtual_token_reserves as f64;
+        Some((vsol / vtok) * 1e-3)
+    }
 }
 
 // Holdings and Price Cache
@@ -124,4 +140,27 @@ impl AccountKey {
 #[derive(Deserialize, Debug)]
 pub struct AccountInfoResult {
     pub data: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BondingCurveState;
+
+    #[test]
+    fn test_spot_price_formula_unit() {
+        let state = BondingCurveState {
+            virtual_sol_reserves: 30_000_000_000u64, // 30 SOL in lamports
+            virtual_token_reserves: 1_073_000_191_000_000u64, // 1.073B tokens with 6 decimals
+            real_token_reserves: 0,
+            real_sol_reserves: 0,
+            token_total_supply: 0,
+            complete: false,
+        };
+        let price_opt = state.spot_price_sol_per_token();
+        assert!(price_opt.is_some());
+        let price = price_opt.unwrap();
+        let expected = 30.0 / 1_073_000_191.0_f64; // ~2.795e-8
+        let diff = (price - expected).abs();
+        assert!(diff < 1e-15, "price mismatch: got {} expected {} diff {}", price, expected, diff);
+    }
 }

@@ -11,7 +11,8 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 use chrono::Utc;
-use futures_util::future::select_ok;
+// `select_ok` was previously used for parallel RPC fetch; after switching to
+// a rotating sequential probe we no longer need it.
 use log::{info, warn, error, debug};
 use mpl_token_metadata::accounts::Metadata;
 use reqwest::Client;
@@ -25,6 +26,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::{str::FromStr, sync::Arc, time::Instant};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -187,7 +189,15 @@ pub async fn fetch_transaction_details(
                                             let mint_pk = Pubkey::from_str(mint_key)?;
                                             // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
                                             let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-                                            return Ok((creator_key.to_string(), mint_key.to_string(), curve_pda.to_string(), creator_key.to_string()));
+                                            // Try to find a token account for this mint that is owned by the bonding curve PDA
+                                            let mut holder_addr = creator_key.to_string();
+                                            if let Ok(Some(found)) = find_token_account_owned_by_owner(mint_key, &curve_pda.to_string(), settings).await {
+                                                debug!("Found token account owned by curve PDA: {} -> {}", curve_pda, found);
+                                                holder_addr = found;
+                                            } else {
+                                                debug!("No token account owned by curve PDA found in transaction; using creator as holder: {}", creator_key);
+                                            }
+                                            return Ok((creator_key.to_string(), mint_key.to_string(), curve_pda.to_string(), holder_addr));
                                         } else {
                                             warn!("Account index lookup failed for instruction in tx {}: mint_index={}, creator_index={}, account_keys_len={}", signature, mint_index, creator_index, account_keys.len());
                                         }
@@ -292,37 +302,52 @@ pub async fn fetch_with_fallback<T: for<'de> Deserialize<'de> + Send + 'static>(
     _method: &str,
     settings: &Arc<Settings>,
 ) -> Result<RpcResponse<T>, Box<dyn std::error::Error + Send + Sync>> {
-    let client = Arc::new(Client::new());
-    let futures = settings.solana_rpc_urls.iter().map(|http| {
-        let client = client.clone();
-        let request = request.clone();
-        Box::pin(async move {
-            // Send the request and attempt to parse JSON. If parsing fails, capture the
-            // raw response body to make debugging easier (some RPC endpoints may return
-            // HTML or plain text errors which json() will fail to parse).
-            let resp = client.post(http).json(&request).send().await?;
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
-            if !status.is_success() {
-                let err: Box<dyn std::error::Error + Send + Sync> = format!("HTTP {} from {}: {}", status, http, text).into();
-                return Err(err);
-            }
-            match serde_json::from_str::<RpcResponse<T>>(&text) {
-                Ok(parsed) => Ok(parsed),
-                Err(e) => {
-                    let err: Box<dyn std::error::Error + Send + Sync> = format!("JSON parse error from {}: {} -- body: {}", http, e, text).into();
-                    Err(err)
+    // Rotate starting index for RPC URLs to spread load when `rotate_rpc` is enabled.
+    static RPC_ROUND_ROBIN: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+    let urls = &settings.solana_rpc_urls;
+    if urls.is_empty() {
+        return Err("No solana_rpc_urls configured".into());
+    }
+    let client = reqwest::Client::new();
+    // Determine start index
+    let start = if settings.rotate_rpc {
+        RPC_ROUND_ROBIN.fetch_add(1, Ordering::Relaxed) % urls.len()
+    } else {
+        0
+    };
+    // Try each endpoint in round-robin order, return first successful parse
+    for i in 0..urls.len() {
+        let idx = (start + i) % urls.len();
+        let http = &urls[idx];
+        let request_body = request.clone();
+        match client.post(http).json(&request_body).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
+                if !status.is_success() {
+                    debug!("HTTP {} from {}: {}", status, http, text);
+                    continue;
+                }
+                match serde_json::from_str::<RpcResponse<T>>(&text) {
+                    Ok(parsed) => {
+                        if parsed.error.is_some() {
+                            return Err(format!("RPC error from {}: {:?}", http, parsed.error).into());
+                        }
+                        return Ok(parsed);
+                    }
+                    Err(e) => {
+                        debug!("JSON parse error from {}: {} -- body: {}", http, e, text);
+                        continue;
+                    }
                 }
             }
-        })
-    });
-    let (data, _) = select_ok(futures).await.map_err(|e| format!("{}", e))?;
-    if data.error.is_some() {
-        // Provide the RPC `error` object in the message for easier debugging
-        Err(format!("RPC error: {:?}", data.error).into())
-    } else {
-        Ok(data)
+            Err(e) => {
+                debug!("HTTP error contacting {}: {}", http, e);
+                continue;
+            }
+        }
     }
+    Err("All RPC endpoints failed to respond successfully".into())
 }
 
 pub async fn fetch_current_price(
@@ -467,7 +492,8 @@ pub async fn fetch_current_price(
         }
     }
 
-    let price = if let Some(decoded) = decoded_opt {
+    let price: f64;
+    if let Some(decoded) = decoded_opt {
     // Validate expected pump.fun discriminator and minimum length. The pump.fun
     // bonding-curve account uses an 8-byte Anchor discriminator prefix followed
     // by the following fields (after the 8 bytes): five u64 (40 bytes) and a
@@ -575,7 +601,7 @@ pub async fn fetch_current_price(
         );
     }
 
-    let state = BondingCurveState {
+        let state = BondingCurveState {
         virtual_token_reserves,
         virtual_sol_reserves,
         real_token_reserves,
@@ -602,10 +628,12 @@ pub async fn fetch_current_price(
             error!("Bonding curve state reports migrated for mint {}", mint);
             return Err(format!("Token {} migrated to Raydium", mint).into());
         }
+        // Compute price as SOL per token using virtual reserves (per new directive).
+        // SOL = lamports / 1e9; tokens = base_units / 1e6
         let token_reserves = state.virtual_token_reserves as f64;
-        let sol_reserves = state.virtual_sol_reserves as f64 / 1_000_000_000.0;
+        let lamports_reserves = state.virtual_sol_reserves as f64; // lamports
         if token_reserves > 0.0 {
-            sol_reserves / token_reserves
+            price = (lamports_reserves / 1_000_000_000.0) / (token_reserves / 1_000_000.0);
         } else {
             error!("Invalid reserves for {}: zero tokens (state: {:?})", mint, state);
             return Err(format!("Invalid reserves for {}: zero tokens", mint).into());
@@ -614,8 +642,9 @@ pub async fn fetch_current_price(
         let msg = last_err.unwrap_or_else(|| format!("Bonding curve account not found or empty for {} (curve PDA {})", mint, curve_pda));
         error!("{}", msg);
         return Err(format!("Bonding curve account missing or unreadable for {}: {}", mint, msg).into());
-    };
+    }
 
+    // `price` is SOL per token already. Cache and return.
     cache.put(mint.to_string(), (Instant::now(), price));
     Ok(price)
 }
@@ -764,11 +793,16 @@ pub async fn buy_token(
     price_cache: Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
 ) -> Result<Holding, Box<dyn std::error::Error + Send + Sync>> {
-    let buy_price = fetch_current_price(mint, &price_cache, settings).await?;
-    let token_amount = (sol_amount / buy_price) as u64;
+    // fetch_current_price now returns SOL per token
+    let buy_price_sol = fetch_current_price(mint, &price_cache, settings).await?;
+    // compute token amount as SOL amount divided by SOL per token
+    let token_amount = (sol_amount / buy_price_sol) as u64;
     info!(
-        "Buy {}: {} tokens for {} SOL (price: {} SOL/token)",
-        mint, token_amount, sol_amount, buy_price
+        "Buy {}: {} tokens for {} SOL (price: {:.18} SOL/token)",
+        mint,
+        token_amount,
+        sol_amount,
+        buy_price_sol
     );
 
     if is_real {
@@ -792,7 +826,8 @@ pub async fn buy_token(
 
     Ok(Holding {
         amount: token_amount,
-        buy_price,
+        // store buy_price as SOL per token
+        buy_price: buy_price_sol,
         buy_time: Utc::now(),
         metadata: None,
         onchain_raw: None,
@@ -808,10 +843,14 @@ pub async fn sell_token(
     keypair: Option<&Keypair>,
     settings: &Arc<Settings>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // current_price is SOL per token
     let sol_received = amount as f64 * current_price;
     info!(
-        "Sell {}: {} tokens for {} SOL (price: {} SOL/token)",
-        mint, amount, sol_received, current_price
+        "Sell {}: {} tokens for {} SOL (price: {:.18} SOL/token)",
+        mint,
+        amount,
+        format!("{:.9}", sol_received),
+        current_price
     );
 
     if is_real {

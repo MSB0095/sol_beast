@@ -2,7 +2,12 @@ solana_ws_urls = ["wss://api.mainnet-beta.solana.com/"]
 solana_rpc_urls = ["https://api.mainnet-beta.solana.com/"]
 pump_fun_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 metadata_program = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+
+# Wallet configuration (choose ONE of the following):
 wallet_keypair_path = "./keypair.json"
+# wallet_private_key_string = "5J..."  # Base58-encoded private key (88 chars)
+# wallet_keypair_json = "[1,2,3,...]"  # JSON array of 64 bytes
+
 tp_percent = 30.0
 sl_percent = -20.0
 timeout_secs = 3600
@@ -18,3 +23,7 @@ sub_ttl_secs = 900
 wss_subscribe_timeout_secs = 6
 bonding_curve_strict = false
 bonding_curve_log_debounce_secs = 300
+# Optional: a JSON array (serialized keypair bytes) to use as the real wallet keypair
+# wallet_keypair_json = "[1,2,3,...]"
+# Optional: a JSON array to use as the dry-run simulated wallet keypair (use only for testing)
+# simulate_wallet_keypair_json = "[1,2,3,...]"

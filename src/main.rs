@@ -1,5 +1,7 @@
 mod models;
 mod rpc;
+mod tx_builder;
+mod idl;
 mod settings;
 mod ws;
 use ws::WsRequest;
@@ -69,21 +71,43 @@ async fn main() {
     let sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::channel(1000);
     let is_real = std::env::args().any(|arg| arg == "--real");
-    let keypair = if is_real {
-        let bytes = fs::read(settings.wallet_keypair_path.clone()).expect("Keypair file missing");
-        Some(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair"))
+    // Load real keypair either from path or from JSON in config (optional)
+    // Prefer base64 env var for keypairs to avoid storing keys on disk.
+    let keypair: Option<std::sync::Arc<Keypair>> = if is_real {
+        if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_KEYPAIR_B64") {
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid SOL_BEAST_KEYPAIR_B64")))
+        } else if let Some(pk_string) = settings.wallet_private_key_string.clone() {
+            let bytes = settings::parse_private_key_string(&pk_string).expect("Invalid wallet_private_key_string");
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid private key")))
+        } else if let Some(j) = settings.wallet_keypair_json.clone() {
+            let bytes: Vec<u8> = serde_json::from_str(&j).expect("Invalid wallet_keypair_json");
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair")))
+        } else {
+            let bytes = fs::read(settings.wallet_keypair_path.clone()).expect("Keypair file missing");
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair")))
+        }
+    } else {
+        None
+    };
+
+    // Optional simulation keypair (used for dry-run signing). If not provided,
+    // the code will fall back to generating an ephemeral Keypair at runtime.
+    let simulate_keypair: Option<std::sync::Arc<Keypair>> = if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_SIMULATE_KEYPAIR_B64") {
+        Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid SOL_BEAST_SIMULATE_KEYPAIR_B64")))
+    } else if let Some(j) = settings.simulate_wallet_keypair_json.clone() {
+        let bytes: Vec<u8> = serde_json::from_str(&j).expect("Invalid simulate_wallet_keypair_json");
+        Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid simulate keypair")))
     } else {
         None
     };
 
     // Spawn price monitoring
-    let holdings_clone = holdings.clone();
-    let price_cache_clone = price_cache.clone();
-    let settings_clone = settings.clone();
-    let keypair_clone = keypair
-        .as_ref()
-        .map(|kp| Keypair::try_from(kp.to_bytes().as_ref()).unwrap());
-    let trades_map_clone = trades_map.clone();
+    let _holdings_clone = holdings.clone();
+    let _price_cache_clone = price_cache.clone();
+    let _settings_clone = settings.clone();
+    let _keypair_clone = keypair.clone();
+    let simulate_keypair_clone = simulate_keypair.clone();
+    let _trades_map_clone = trades_map.clone();
 
     // Spawn WSS tasks and keep control senders so we can request subscriptions
     let mut ws_control_senders: Vec<mpsc::Sender<WsRequest>> = Vec::new();
@@ -130,12 +154,14 @@ async fn main() {
     let ws_control_senders_clone_for_monitor = ws_control_senders.clone();
     let sub_map_clone_for_monitor = sub_map.clone();
     let next_wss_sender_clone_for_monitor = next_wss_sender.clone();
+    let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();
     tokio::spawn(async move {
         monitor_holdings(
             holdings_clone,
             price_cache_clone,
             is_real,
             keypair_clone.as_ref(),
+            simulate_keypair_clone_for_monitor.as_ref().map(|a| &**a),
             settings_clone,
             trades_map_clone,
             ws_control_senders_clone_for_monitor,
@@ -152,7 +178,8 @@ async fn main() {
             &seen,
             &holdings,
             is_real,
-            keypair.as_ref(),
+            keypair.as_ref().map(|v| &**v),
+            simulate_keypair.as_ref().map(|v| &**v),
             &price_cache,
             &settings,
             ws_control_senders.clone(),
@@ -175,6 +202,7 @@ async fn process_message(
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     is_real: bool,
     keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
     price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
     ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
@@ -228,7 +256,22 @@ async fn process_message(
 
                         let detect_time = Utc::now();
                         info!("New pump.fun token: {}", signature);
-                        if let Err(e) = handle_new_token(signature, holdings, is_real, keypair, price_cache, settings, ws_control_senders.clone(), next_wss_sender.clone(), detect_time, trades_map.clone(), sub_map.clone()).await {
+                        if let Err(e) = handle_new_token(
+                            signature,
+                            holdings,
+                            is_real,
+                            keypair,
+                            simulate_keypair,
+                            price_cache,
+                            settings,
+                            ws_control_senders.clone(),
+                            next_wss_sender.clone(),
+                            detect_time,
+                            trades_map.clone(),
+                            sub_map.clone(),
+                        )
+                        .await
+                        {
                             error!("handle_new_token failed for {}: {}", signature, e);
                             return Err(e);
                         }
@@ -246,6 +289,7 @@ async fn handle_new_token(
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     is_real: bool,
     keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
     price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
     ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
@@ -324,7 +368,16 @@ async fn handle_new_token(
                                 }
                             }
                             if let Some(_price) = price_opt {
-                                match rpc::buy_token(&mint, settings.buy_amount, is_real, keypair, price_cache.clone(), settings).await {
+                                match rpc::buy_token(
+                                    &mint,
+                                    settings.buy_amount,
+                                    is_real,
+                                    keypair,
+                                    simulate_keypair.as_ref().map(|a| &**a),
+                                    price_cache.clone(),
+                                    settings,
+                                )
+                                .await {
                                     Ok(mut holding) => {
                                         holding.metadata = offchain_meta.clone();
                                         holding.onchain_raw = onchain_raw.clone();
@@ -436,6 +489,7 @@ async fn monitor_holdings(
     price_cache: Arc<Mutex<PriceCache>>,
     is_real: bool,
     keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
     settings: Arc<Settings>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
@@ -603,7 +657,17 @@ async fn monitor_holdings(
 
             if should_sell {
                 // Attempt sell
-                if let Err(e) = rpc::sell_token(mint, holding.amount, current_price, is_real, keypair, &settings).await {
+                if let Err(e) = rpc::sell_token(
+                    mint,
+                    holding.amount,
+                    current_price,
+                    is_real,
+                    keypair,
+                    simulate_keypair.as_ref().map(|a| &**a),
+                    &settings,
+                )
+                .await
+                {
                     error!("Sell error for {}: {}", mint, e);
                 }
                 // Prepare trade CSV row using buy record if available
@@ -614,48 +678,59 @@ async fn monitor_holdings(
                 let profit_percent = if holding.buy_price != 0.0 { ((current_price - holding.buy_price) / holding.buy_price) * 100.0 } else { 0.0 };
                 // compute profit in SOL
                 let profit_sol = (sell_tokens as f64 * current_price) - (holding.buy_price * holding.amount as f64);
-                let profit_lamports = profit_sol * 1_000_000_000.0;
+                let _profit_lamports = profit_sol * 1_000_000_000.0;
                 let stop_reason = if profit_percent >= settings.tp_percent { "TP".to_string() } else if profit_percent <= settings.sl_percent { "SL".to_string() } else { "TIMEOUT".to_string() };
                 // Remove buy record and write CSV
                 if let Some(buy_rec) = trades_map.lock().await.remove(mint) {
                     // Append CSV row
                     let file_path = "trades.csv";
-                    let header = "mint,symbol,name,uri,image,creator,detect_time,buy_time,detect_to_buy_secs,buy_sol,buy_price,buy_tokens,sell_time,stop_reason,sell_tokens,sell_sol,profit_percent,profit_sol\n";
+                    // New clearer header (human-readable, consistent numeric formatting)
+                    let header = "mint,symbol,name,uri,image,creator,detect_time,buy_time,detect_to_buy_secs,buy_sol,buy_price_sol_per_token,buy_tokens,sell_time,stop_reason,sell_tokens,sell_sol,profit_percent,profit_sol\n";
                     let needs_header = !std::path::Path::new(file_path).exists();
                     if needs_header {
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
                             let _ = f.write_all(header.as_bytes());
                         }
                     }
+
                     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
                         let detect_to_buy = (buy_rec.buy_time - buy_rec.detect_time).num_seconds();
-                        // write buy price in lamports (integer), SOL with high precision, and profit in scientific notation
-                        // buy_rec.buy_price is now SOL per token
-                        let buy_price_lamports = (buy_rec.buy_price * 1_000_000_000.0) as u128;
+                        // buy_rec.buy_price is SOL per token
                         let buy_price_sol = buy_rec.buy_price;
-                        let profit_sol_scientific = format!("{:.12e}", profit_sol);
+                        // Format numbers for readability: SOL amounts with 9 decimals, percents with 2 decimals
+                        let buy_sol_fmt = format!("{:.9}", buy_rec.buy_amount_sol);
+                        let buy_price_sol_fmt = format!("{:.9}", buy_price_sol);
+                        let sell_sol_fmt = format!("{:.9}", sell_sol);
+                        let profit_percent_fmt = format!("{:.2}", profit_percent);
+                        let profit_sol_fmt = format!("{:.9}", profit_sol);
+
+                        // CSV-quote text fields to avoid breaking on commas/newlines
+                        let q = |s: String| -> String {
+                            // Escape double-quotes by doubling them
+                            let escaped = s.replace('"', "\"\"");
+                            format!("\"{}\"", escaped)
+                        };
+
                         let line = format!(
-                            "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol:.9},{buy_price_lamports:.0},{buy_price_sol:.18},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol:.9},{profit_percent:.12},{profit_sol_scientific},{profit_lamports:.0}\n",
-                            mint = buy_rec.mint,
-                            symbol = buy_rec.symbol.unwrap_or_else(|| "".to_string()),
-                            name = buy_rec.name.unwrap_or_else(|| "".to_string()),
-                            uri = buy_rec.uri.unwrap_or_else(|| "".to_string()),
-                            image = buy_rec.image.unwrap_or_else(|| "".to_string()),
-                            creator = buy_rec.creator,
-                            detect_time = buy_rec.detect_time.to_rfc3339(),
-                            buy_time = buy_rec.buy_time.to_rfc3339(),
+                            "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol},{buy_price},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol},{profit_percent},{profit_sol}\n",
+                            mint = q(buy_rec.mint),
+                            symbol = q(buy_rec.symbol.unwrap_or_else(|| "".to_string())),
+                            name = q(buy_rec.name.unwrap_or_else(|| "".to_string())),
+                            uri = q(buy_rec.uri.unwrap_or_else(|| "".to_string())),
+                            image = q(buy_rec.image.unwrap_or_else(|| "".to_string())),
+                            creator = q(buy_rec.creator),
+                            detect_time = buy_rec.detect_time.format("%+"),
+                            buy_time = buy_rec.buy_time.format("%+"),
                             detect_to_buy_secs = detect_to_buy,
-                            buy_sol = buy_rec.buy_amount_sol,
-                            buy_price_lamports = buy_price_lamports,
-                            buy_price_sol = buy_price_sol,
+                            buy_sol = buy_sol_fmt,
+                            buy_price = buy_price_sol_fmt,
                             buy_tokens = buy_rec.buy_amount_tokens,
-                            sell_time = sell_time.to_rfc3339(),
+                            sell_time = sell_time.format("%+"),
                             stop_reason = stop_reason,
                             sell_tokens = sell_tokens,
-                            sell_sol = sell_sol,
-                            profit_percent = profit_percent,
-                            profit_sol_scientific = profit_sol_scientific,
-                            profit_lamports = profit_lamports
+                            sell_sol = sell_sol_fmt,
+                            profit_percent = profit_percent_fmt,
+                            profit_sol = profit_sol_fmt
                         );
                         let _ = f.write_all(line.as_bytes());
                     }

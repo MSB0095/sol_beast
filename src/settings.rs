@@ -1,4 +1,7 @@
 use serde::Deserialize;
+use base64::engine::general_purpose::STANDARD as Base64Engine;
+use base64::Engine;
+use std::env;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
@@ -7,6 +10,10 @@ pub struct Settings {
     pub pump_fun_program: String,
     pub metadata_program: String,
     pub wallet_keypair_path: String,
+    #[serde(default)]
+    pub wallet_keypair_json: Option<String>,
+    #[serde(default)]
+    pub wallet_private_key_string: Option<String>,
     pub tp_percent: f64,
     pub sl_percent: f64,
     pub timeout_secs: i64,
@@ -34,6 +41,8 @@ pub struct Settings {
     pub bonding_curve_strict: bool,
     #[serde(default = "default_bonding_curve_log_debounce_secs")]
     pub bonding_curve_log_debounce_secs: u64,
+    #[serde(default)]
+    pub simulate_wallet_keypair_json: Option<String>,
 }
 
 impl Settings {
@@ -43,6 +52,54 @@ impl Settings {
         let cfg = builder.build().expect("Failed to build config");
         cfg.try_deserialize().expect("Failed to load config")
     }
+}
+
+/// Try to read a base64-encoded keypair from the given env var. Returns
+/// the raw decoded bytes if present and valid, otherwise None.
+pub fn load_keypair_from_env_var(var: &str) -> Option<Vec<u8>> {
+    if let Ok(s) = env::var(var) {
+        match Base64Engine.decode(&s) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!("Failed to decode {}: {}", var, e);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// Parse a private key string in various formats:
+/// - Base58 (standard Solana format, 88 chars)
+/// - JSON array string like "[1,2,3,...]" 
+/// - Comma-separated bytes like "1,2,3,..."
+pub fn parse_private_key_string(s: &str) -> Result<Vec<u8>, String> {
+    let trimmed = s.trim();
+    
+    // Try base58 first (most common format)
+    if trimmed.len() >= 80 && !trimmed.starts_with('[') && !trimmed.contains(',') {
+        return bs58::decode(trimmed)
+            .into_vec()
+            .map_err(|e| format!("Base58 decode failed: {}", e));
+    }
+    
+    // Try JSON array format: [1,2,3,...]
+    if trimmed.starts_with('[') {
+        return serde_json::from_str::<Vec<u8>>(trimmed)
+            .map_err(|e| format!("JSON parse failed: {}", e));
+    }
+    
+    // Try comma-separated format: 1,2,3,...
+    if trimmed.contains(',') {
+        let parts: Result<Vec<u8>, _> = trimmed
+            .split(',')
+            .map(|s| s.trim().parse::<u8>())
+            .collect();
+        return parts.map_err(|e| format!("CSV parse failed: {}", e));
+    }
+    
+    Err("Unrecognized private key format. Expected: base58, JSON array, or comma-separated bytes".to_string())
 }
 
 fn default_bonding_curve_strict() -> bool { false }

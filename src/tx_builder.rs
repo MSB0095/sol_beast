@@ -27,6 +27,7 @@ pub struct SellArgs {
 }
 
 // Discriminators from pumpfun IDL (8 bytes)
+// Using plain buy instruction (not buy_exact_sol_in)
 pub const BUY_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 pub const SELL_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
 
@@ -83,6 +84,12 @@ pub fn build_buy_instruction(
     if let Some(creator) = creator_pubkey {
         context.insert("bonding_curve.creator".to_string(), creator);
     }
+    // Add fee_recipient - pump.fun uses a fixed address for protocol fees
+    let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")
+        .map_err(|e| format!("Invalid fee_recipient pubkey: {}", e))?;
+    context.insert("fee_recipient".to_string(), fee_recipient);
+    // NOTE: fee_program is NOT in main instruction accounts - only invoked via CPI
+    // Do NOT add fee_program to context
 
     let pref = ["pumpfun", "pumpfunamm", "pumpfunfees"];
     for key in pref.iter() {
@@ -161,6 +168,14 @@ pub fn build_sell_instruction(
     if let Some(creator) = creator_pubkey {
         context.insert("bonding_curve.creator".to_string(), creator);
     }
+    // Add fee_recipient - pump.fun uses a fixed address for protocol fees
+    let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")
+        .map_err(|e| format!("Invalid fee_recipient pubkey: {}", e))?;
+    context.insert("fee_recipient".to_string(), fee_recipient);
+    // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
+    let fee_program_pubkey = Pubkey::from_str(FEE_PROGRAM_PUBKEY)
+        .map_err(|e| format!("Invalid fee_program pubkey: {}", e))?;
+    context.insert("fee_program".to_string(), fee_program_pubkey);
     let pref = ["pumpfun", "pumpfunamm", "pumpfunfees"];
     for key in pref.iter() {
         if let Some(idl) = idls.get(*key) {

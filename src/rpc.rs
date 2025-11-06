@@ -723,6 +723,42 @@ async fn build_missing_ata_preinstructions(
     Ok(pre)
 }
 
+/// Fetch bonding curve state for safety checks (liquidity validation)
+async fn fetch_bonding_curve_state(mint: &str, settings: &Arc<Settings>) -> Result<BondingCurveState, Box<dyn std::error::Error + Send + Sync>> {
+    let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
+    let mint_pubkey = Pubkey::from_str(mint)?;
+    let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pubkey.as_ref()], &pump_program);
+    
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [ curve_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
+    });
+    
+    let data = fetch_with_fallback::<Value>(request, "getAccountInfo", settings).await?;
+    if let Some(result_val) = data.result {
+        let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
+        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+            let decoded = Base64Engine.decode(base64_str)?;
+            
+            // Parse bonding curve state
+            const PUMP_CURVE_DISCRIMINATOR: [u8; 8] = [0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60];
+            if decoded.len() >= 49 && &decoded[..8] == PUMP_CURVE_DISCRIMINATOR {
+                let slice = &decoded[8..];
+                let state = BondingCurveState {
+                    virtual_token_reserves: u64::from_le_bytes(slice[0..8].try_into().unwrap()),
+                    virtual_sol_reserves: u64::from_le_bytes(slice[8..16].try_into().unwrap()),
+                    real_token_reserves: u64::from_le_bytes(slice[16..24].try_into().unwrap()),
+                    real_sol_reserves: u64::from_le_bytes(slice[24..32].try_into().unwrap()),
+                    token_total_supply: u64::from_le_bytes(slice[32..40].try_into().unwrap()),
+                    complete: slice[40] != 0,
+                };
+                return Ok(state);
+            }
+        }
+    }
+    Err("Failed to fetch bonding curve state".into())
+}
+
 /// Fetch the bonding curve account for `mint` and attempt to read the creator pubkey
 /// from the on-chain `BondingCurve` struct. Returns `None` if the account is missing
 /// or the layout is unexpected.
@@ -914,6 +950,43 @@ pub async fn buy_token(
     let buy_price_sol = fetch_current_price(mint, &price_cache, settings).await?;
     // compute token amount as SOL amount divided by SOL per token
     let token_amount = (sol_amount / buy_price_sol) as u64;
+    
+    // Safety checks when enabled
+    if settings.enable_safer_sniping {
+        // Check 1: Minimum tokens threshold
+        if token_amount < settings.min_tokens_threshold {
+            return Err(format!(
+                "Token amount {} is below minimum threshold {} (price too high: {:.18} SOL/token)",
+                token_amount, settings.min_tokens_threshold, buy_price_sol
+            ).into());
+        }
+        
+        // Check 2: Maximum SOL per token (price ceiling)
+        if buy_price_sol > settings.max_sol_per_token {
+            return Err(format!(
+                "Token price {:.18} SOL/token exceeds maximum {:.18} SOL/token (already too expensive)",
+                buy_price_sol, settings.max_sol_per_token
+            ).into());
+        }
+        
+        // Check 3: Liquidity checks (requires bonding curve data)
+        if let Ok(state) = fetch_bonding_curve_state(mint, settings).await {
+            let real_sol = state.real_sol_reserves as f64 / 1_000_000_000.0;
+            if real_sol < settings.min_liquidity_sol {
+                return Err(format!(
+                    "Liquidity {:.4} SOL is below minimum {:.4} SOL (too risky)",
+                    real_sol, settings.min_liquidity_sol
+                ).into());
+            }
+            if real_sol > settings.max_liquidity_sol {
+                return Err(format!(
+                    "Liquidity {:.4} SOL exceeds maximum {:.4} SOL (too late)",
+                    real_sol, settings.max_liquidity_sol
+                ).into());
+            }
+        }
+    }
+    
     info!(
         "Buy {}: {} tokens for {} SOL (price: {:.18} SOL/token)",
         mint,
@@ -946,22 +1019,40 @@ pub async fn buy_token(
             let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program_pk);
             context.insert("creator_vault".to_string(), creator_vault);
         }
-        // Add fee_recipient (typically the global config authority or protocol fee account)
-        // For pump.fun, this is typically derived or a specific pubkey
-        // Using the global PDA as a safe default (or fetch from settings if available)
-        let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program_pk);
-        context.insert("fee_recipient".to_string(), global_pda);
+        // Add fee_recipient - pump.fun uses a fixed address for protocol fees
+        let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
+        context.insert("fee_recipient".to_string(), fee_recipient);
+        
+        // NOTE: fee_program is invoked via CPI (Cross-Program Invocation) inside pump.fun program
+        // It is NOT included in the main instruction accounts list - only in inner instructions
+        // Do NOT add fee_program to context
+        
+        // Debug: log context before IDL building
+        debug!("Context for buy instruction building:");
+        for (k, v) in context.iter() {
+            debug!("  {}: {}", k, v);
+        }
+        
         // detect_idl result preferred; otherwise fallback order
         let try_idls: Vec<SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_iter().map(|(_k,v)| v).collect() };
         for idl in try_idls {
+            debug!("Trying IDL with program_id: {}", idl.address);
             match idl.build_accounts_for("buy", &context) {
                 Ok(metas) => {
-                    debug!("IDL {} build_accounts_for(buy) succeeded with {} accounts", idl.address, metas.len());
+                    warn!("IDL {} build_accounts_for(buy) succeeded with {} accounts - USING THIS IDL", idl.address, metas.len());
                     for (i, meta) in metas.iter().enumerate() {
                         debug!("  [{}] {} (signer={}, writable={})", i, meta.pubkey, meta.is_signer, meta.is_writable);
                     }
+                    // Apply slippage to max_sol_cost: increase by slippage_bps basis points
+                    let base_cost_lamports = (buy_price_sol * 1_000_000_000.0) as u64;
+                    let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
+                    let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
                     let mut d = BUY_DISCRIMINATOR.to_vec();
-                    d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { amount: token_amount, max_sol_cost: (buy_price_sol * 1_000_000_000.0) as u64, track_volume: Some(false) })?);
+                    d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { 
+                        amount: token_amount, 
+                        max_sol_cost: max_sol_cost_with_slippage, 
+                        track_volume: Some(false) 
+                    })?);
                     built_instr = Some(solana_program::instruction::Instruction { program_id: idl.address, accounts: metas, data: d });
                     break;
                 }
@@ -1022,10 +1113,24 @@ pub async fn buy_token(
             let mut all_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
             for pi in ata_pre.into_iter() { all_instrs.push(pi); }
             all_instrs.push(instruction);
-            let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
-            let blockhash = client.get_latest_blockhash()?;
-            tx.sign(&[payer], blockhash);
-            client.send_and_confirm_transaction(&tx)?;
+            
+            // Choose transaction submission method
+            if settings.helius_sender_enabled {
+                info!("Using Helius Sender for buy transaction of mint {}", mint);
+                let signature = crate::helius_sender::send_transaction_with_retry(
+                    all_instrs,
+                    payer,
+                    settings,
+                    &client,
+                    3, // max retries
+                ).await?;
+                info!("Buy transaction sent via Helius Sender: {}", signature);
+            } else {
+                let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
+                let blockhash = client.get_latest_blockhash()?;
+                tx.sign(&[payer], blockhash);
+                client.send_and_confirm_transaction(&tx)?;
+            }
         } else {
             info!("CONFIRM_REAL!=1: skipping actual send for buy of {}. Set CONFIRM_REAL=1 to enable.", mint);
         }
@@ -1065,18 +1170,28 @@ pub async fn buy_token(
                 let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program_pk);
                 context.insert("creator_vault".to_string(), creator_vault);
             }
-            // Add fee_recipient (global PDA)
-            let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program_pk);
-            context.insert("fee_recipient".to_string(), global_pda);
+            // Add fee_recipient - pump.fun uses a fixed address
+            let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
+            context.insert("fee_recipient".to_string(), fee_recipient);
+            // NOTE: fee_program is invoked via CPI, not included in main instruction accounts
+            // Do NOT add fee_program to context
             match idl.build_accounts_for("buy", &context) {
                 Ok(metas) => {
                     debug!("IDL build_accounts_for(buy) succeeded with {} accounts (dry-run)", metas.len());
                     for (i, meta) in metas.iter().enumerate() {
                         debug!("  [{}] {} (signer={}, writable={})", i, meta.pubkey, meta.is_signer, meta.is_writable);
                     }
+                    // Apply slippage to max_sol_cost
+                    let base_cost_lamports = (buy_price_sol * 1_000_000_000.0) as u64;
+                    let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
+                    let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
                     instruction_opt = Some(solana_program::instruction::Instruction { program_id, accounts: metas, data: {
                         let mut d = BUY_DISCRIMINATOR.to_vec();
-                        d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { amount: token_amount, max_sol_cost: (buy_price_sol * 1_000_000_000.0) as u64, track_volume: Some(false) })?);
+                        d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { 
+                            amount: token_amount, 
+                            max_sol_cost: max_sol_cost_with_slippage, 
+                            track_volume: Some(false) 
+                        })?);
                         d
                     }});
                 }
@@ -1128,6 +1243,16 @@ pub async fn buy_token(
             tx_instructions.push(pi);
         }
         tx_instructions.push(instruction.clone());
+        
+        // Debug: log instruction details before simulation
+        debug!("DRY RUN buy simulation for {}: program_id={}", mint, instruction.program_id);
+        debug!("  Instruction has {} accounts:", instruction.accounts.len());
+        for (i, acc) in instruction.accounts.iter().enumerate() {
+            debug!("    [{}] {} (signer={}, writable={})", i, acc.pubkey, acc.is_signer, acc.is_writable);
+        }
+        debug!("  Instruction data length: {} bytes", instruction.data.len());
+        debug!("  Payer (sim wallet): {}", sim_payer_pubkey);
+        
         let mut tx = Transaction::new_with_payer(&tx_instructions, Some(&sim_payer_pubkey));
         match client.get_latest_blockhash() {
             Ok(blockhash) => {
@@ -1148,8 +1273,11 @@ pub async fn buy_token(
                 match client.simulate_transaction_with_config(&tx, config) {
                     Ok(simulation) => {
                         if let Some(ref err) = simulation.value.err {
-                            if format!("{:?}", err).contains("AccountNotFound") {
+                            let err_str = format!("{:?}", err);
+                            if err_str.contains("AccountNotFound") {
                                 info!("DRY RUN buy: tx built correctly for {} (simulation AccountNotFound is expected - ephemeral keypair has no SOL/accounts)", mint);
+                            } else if err_str.contains("IncorrectProgramId") {
+                                warn!("DRY RUN buy simulation: IncorrectProgramId for {}", mint);
                             } else {
                                 warn!("DRY RUN buy simulation error for {}: {:?}", mint, err);
                             }
@@ -1194,7 +1322,7 @@ pub async fn sell_token(
     );
 
     let client = RpcClient::new(&settings.solana_rpc_urls[0]);
-    let idls = load_all_idls();
+    let _idls = load_all_idls();
     let creator_opt = fetch_bonding_curve_creator(mint, settings).await.ok().flatten();
 
     if is_real {
@@ -1216,9 +1344,12 @@ pub async fn sell_token(
             let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program_pk);
             context.insert("creator_vault".to_string(), creator_vault);
         }
-        // Add fee_recipient (global PDA)
-        let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program_pk);
-        context.insert("fee_recipient".to_string(), global_pda);
+        // Add fee_recipient - pump.fun uses a fixed address for protocol fees
+        let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
+        context.insert("fee_recipient".to_string(), fee_recipient);
+        // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
+        let fee_program_pubkey = Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ")?;
+        context.insert("fee_program".to_string(), fee_program_pubkey);
         let try_idls: Vec<SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_iter().map(|(_k,v)| v).collect() };
         for idl in try_idls {
             match idl.build_accounts_for("sell", &context) {
@@ -1271,10 +1402,24 @@ pub async fn sell_token(
             let mut all_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
             for pi in ata_pre.into_iter() { all_instrs.push(pi); }
             all_instrs.push(instruction);
-            let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
-            let blockhash = client.get_latest_blockhash()?;
-            tx.sign(&[payer], blockhash);
-            client.send_and_confirm_transaction(&tx)?;
+            
+            // Choose transaction submission method
+            if settings.helius_sender_enabled {
+                info!("Using Helius Sender for sell transaction of mint {}", mint);
+                let signature = crate::helius_sender::send_transaction_with_retry(
+                    all_instrs,
+                    payer,
+                    settings,
+                    &client,
+                    3, // max retries
+                ).await?;
+                info!("Sell transaction sent via Helius Sender: {}", signature);
+            } else {
+                let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
+                let blockhash = client.get_latest_blockhash()?;
+                tx.sign(&[payer], blockhash);
+                client.send_and_confirm_transaction(&tx)?;
+            }
         } else {
             info!("CONFIRM_REAL!=1: skipping actual send for sell of {}. Set CONFIRM_REAL=1 to enable.", mint);
         }
@@ -1295,6 +1440,16 @@ pub async fn sell_token(
             settings,
         )?;
         debug!("Preparing simulated sell TX for mint {} amount {} tokens (dry run)", mint, amount);
+        
+        // Debug: log instruction details before simulation
+        debug!("DRY RUN sell simulation for {}: program_id={}", mint, instruction.program_id);
+        debug!("  Instruction has {} accounts:", instruction.accounts.len());
+        for (i, acc) in instruction.accounts.iter().enumerate() {
+            debug!("    [{}] {} (signer={}, writable={})", i, acc.pubkey, acc.is_signer, acc.is_writable);
+        }
+        debug!("  Instruction data length: {} bytes", instruction.data.len());
+        debug!("  Payer (sim wallet): {}", sim_payer_pubkey);
+        
         let mut tx = Transaction::new_with_payer(&[instruction.clone()], Some(&sim_payer_pubkey));
         match client.get_latest_blockhash() {
             Ok(blockhash) => {
@@ -1315,8 +1470,13 @@ pub async fn sell_token(
                 match client.simulate_transaction_with_config(&tx, config) {
                     Ok(sim) => {
                         if let Some(ref err) = sim.value.err {
-                            if format!("{:?}", err).contains("AccountNotFound") {
+                            let err_str = format!("{:?}", err);
+                            if err_str.contains("AccountNotFound") {
                                 info!("DRY RUN sell: tx built correctly for {} (simulation AccountNotFound is expected - ephemeral keypair has no SOL/accounts)", mint);
+                            } else if err_str.contains("Custom(3012)") {
+                                info!("DRY RUN sell: tx built correctly for {} (Custom(3012) is expected - no tokens to sell in ephemeral wallet)", mint);
+                            } else if err_str.contains("IncorrectProgramId") {
+                                warn!("DRY RUN sell simulation: IncorrectProgramId for {}", mint);
                             } else {
                                 warn!("DRY RUN sell simulation error for {}: {:?}", mint, err);
                             }

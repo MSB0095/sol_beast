@@ -4,6 +4,7 @@ mod tx_builder;
 mod idl;
 mod settings;
 mod ws;
+mod helius_sender;
 use ws::WsRequest;
 
 use std::str::FromStr;
@@ -18,6 +19,7 @@ use crate::{
 };
 use chrono::Utc;
 use log::{error, info, debug};
+use solana_sdk::signature::Signer;
 use lru::LruCache;
 use solana_sdk::signature::Keypair;
 use mpl_token_metadata::accounts::Metadata as OnchainMetadataRaw;
@@ -82,9 +84,11 @@ async fn main() {
         } else if let Some(j) = settings.wallet_keypair_json.clone() {
             let bytes: Vec<u8> = serde_json::from_str(&j).expect("Invalid wallet_keypair_json");
             Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair")))
-        } else {
-            let bytes = fs::read(settings.wallet_keypair_path.clone()).expect("Keypair file missing");
+        } else if let Some(path) = settings.wallet_keypair_path.clone() {
+            let bytes = fs::read(path).expect("Keypair file missing");
             Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair")))
+        } else {
+            panic!("No wallet keypair configured! Set wallet_keypair_path, wallet_private_key_string, wallet_keypair_json, or SOL_BEAST_KEYPAIR_B64 env var");
         }
     } else {
         None
@@ -94,6 +98,11 @@ async fn main() {
     // the code will fall back to generating an ephemeral Keypair at runtime.
     let simulate_keypair: Option<std::sync::Arc<Keypair>> = if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_SIMULATE_KEYPAIR_B64") {
         Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid SOL_BEAST_SIMULATE_KEYPAIR_B64")))
+    } else if let Some(pk_string) = settings.simulate_wallet_private_key_string.clone() {
+        let bytes = settings::parse_private_key_string(&pk_string).expect("Invalid simulate_wallet_private_key_string");
+        let kp = Keypair::try_from(bytes.as_slice()).expect("Invalid simulate private key");
+        info!("Loaded simulate keypair, pubkey: {}", kp.pubkey());
+        Some(std::sync::Arc::new(kp))
     } else if let Some(j) = settings.simulate_wallet_keypair_json.clone() {
         let bytes: Vec<u8> = serde_json::from_str(&j).expect("Invalid simulate_wallet_keypair_json");
         Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid simulate keypair")))

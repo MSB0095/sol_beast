@@ -1,5 +1,4 @@
 use solana_program::{instruction::AccountMeta, pubkey::Pubkey};
-use solana_sdk::signature::Signer;
 use serde_json::Value;
 use std::{collections::HashMap, fs, str::FromStr};
 

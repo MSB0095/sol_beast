@@ -30,7 +30,7 @@ pub enum WsRequest {
 pub async fn run_ws(
     wss_url: &str,
     tx: mpsc::Sender<String>,
-    seen: Arc<Mutex<LruCache<String, ()>>>,
+    _seen: Arc<Mutex<LruCache<String, ()>>>,
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
     price_cache: Arc<Mutex<PriceCache>>,
     mut control_rx: mpsc::Receiver<WsRequest>,
@@ -42,10 +42,9 @@ pub async fn run_ws(
         let (mut write, mut read) = ws_stream.split();
 
         debug!(
-            "WSS {} connected; seen cache size {} (max_detect_to_buy_secs={})",
+            "WSS {} connected (max_create_to_buy_secs={})",
             wss_url,
-            seen.lock().await.len(),
-            settings.max_detect_to_buy_secs
+            settings.max_create_to_buy_secs
         );
 
         // pump.fun program logs

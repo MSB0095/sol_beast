@@ -23,6 +23,7 @@ use crate::tx_builder::{build_buy_instruction, build_sell_instruction, BUY_DISCR
 use crate::idl::load_all_idls;
 use spl_associated_token_account::{get_associated_token_address, instruction::create_associated_token_account};
 use solana_program::pubkey::Pubkey;
+use spl_token::{self, instruction::close_account};
 use solana_sdk::{
     signature::{Keypair, Signer},
     transaction::Transaction,
@@ -596,11 +597,21 @@ pub async fn fetch_current_price(
     let token_total_supply = u64::from_le_bytes(slice[32..40].try_into().unwrap());
     let complete = slice[40] != 0;
 
+    // Parse creator (32 bytes after complete bool)
+    // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes)
+    let creator = if slice.len() >= 73 {
+        Pubkey::try_from(&slice[41..73]).ok()
+    } else {
+        None
+    };
+
     if slice.len() > needed {
         debug!(
-            "Bonding curve slice for {} has {} extra bytes after expected fields",
+            "Bonding curve slice for {} has {} extra bytes after expected fields (total {} bytes, creator {:?})",
             mint,
-            slice.len() - needed
+            slice.len() - needed,
+            slice.len(),
+            creator.map(|p| p.to_string())
         );
     }
 
@@ -611,11 +622,12 @@ pub async fn fetch_current_price(
         real_sol_reserves,
         token_total_supply,
         complete,
+        creator,
     };
     // Print parsed on-chain bonding curve info at info level so operators can
     // see the core fields in logs without having to inspect files.
     info!(
-        "Bonding curve for mint {} curve {}: virtual_token_reserves={} virtual_sol_reserves={} ({} SOL) real_token_reserves={} real_sol_reserves={} ({} SOL) token_total_supply={} complete={}",
+        "Bonding curve for mint {} curve {}: virtual_token_reserves={} virtual_sol_reserves={} ({} SOL) real_token_reserves={} real_sol_reserves={} ({} SOL) token_total_supply={} complete={} creator={:?}",
         mint,
         curve_pda,
         state.virtual_token_reserves,
@@ -625,7 +637,8 @@ pub async fn fetch_current_price(
         state.real_sol_reserves,
         state.real_sol_reserves as f64 / 1_000_000_000.0,
         state.token_total_supply,
-        state.complete
+        state.complete,
+        state.creator.map(|p| p.to_string())
     );
         if state.complete {
             error!("Bonding curve state reports migrated for mint {}", mint);
@@ -676,17 +689,20 @@ async fn detect_idl_for_mint(mint: &str, settings: &Arc<Settings>) -> Option<Sim
 async fn build_missing_ata_preinstructions(
     accounts: &[AccountMeta],
     context: &HashMap<String, Pubkey>,
-    settings: &Arc<Settings>,
+    _settings: &Arc<Settings>,
 ) -> Result<Vec<solana_program::instruction::Instruction>, Box<dyn std::error::Error + Send + Sync>> {
     let mut pre: Vec<solana_program::instruction::Instruction> = Vec::new();
     // For candidate owners, prepare owner->mint pairs to check
     let mut candidates: Vec<(Pubkey, Pubkey)> = Vec::new();
     // extract mint from context
     let mint_pk = if let Some(m) = context.get("mint") { *m } else { return Ok(pre); };
-    // common owners to check: user, bonding_curve, bonding_curve.creator (creator)
-    if let Some(user) = context.get("user") { candidates.push((*user, mint_pk)); }
-    if let Some(bc) = context.get("bonding_curve") { candidates.push((*bc, mint_pk)); }
-    if let Some(creator) = context.get("bonding_curve.creator") { candidates.push((*creator, mint_pk)); }
+    
+    // ONLY create ATAs for the user - NOT for bonding_curve or creator
+    // The pump.fun program creates those internally via CPI
+    // Attempting to create them manually will fail with "Provided owner is not allowed"
+    if let Some(user) = context.get("user") { 
+        candidates.push((*user, mint_pk)); 
+    }
 
     // Also inspect explicit AccountMeta entries to detect ATAs by pattern
     for am in accounts.iter() {
@@ -694,29 +710,11 @@ async fn build_missing_ata_preinstructions(
         for (owner, mint) in candidates.iter() {
             let ata = get_associated_token_address(owner, mint);
             if ata == am.pubkey {
-                // check existence
-                let req = json!({"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[ata.to_string(), {"encoding":"base64","commitment":"confirmed"}]});
-                match fetch_with_fallback::<Value>(req, "getAccountInfo", settings).await {
-                    Ok(info) => {
-                        if info.result.is_none() {
-                            // create for payer later
-                            // payer will be decided by caller (use payer as context user if present)
-                            let payer = context.get("payer").cloned().unwrap_or(*owner);
-                            pre.push(create_associated_token_account(&payer, owner, mint, &spl_associated_token_account::id()));
-                        } else if let Some(rv) = info.result {
-                            let val = if let Some(v) = rv.get("value") { v.clone() } else { rv.clone() };
-                            if val.is_null() {
-                                let payer = context.get("payer").cloned().unwrap_or(*owner);
-                                pre.push(create_associated_token_account(&payer, owner, mint, &spl_associated_token_account::id()));
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // assume missing; add create instruction
-                        let payer = context.get("payer").cloned().unwrap_or(*owner);
-                        pre.push(create_associated_token_account(&payer, owner, mint, &spl_associated_token_account::id()));
-                    }
-                }
+                // ALWAYS create ATA instruction (it's idempotent - won't fail if exists)
+                // This avoids race conditions on very early sniping
+                let payer = context.get("payer").cloned().unwrap_or(*owner);
+                pre.push(create_associated_token_account(&payer, owner, mint, &spl_token::id()));
+                debug!("Adding create ATA instruction for owner {} mint {}", owner, mint);
             }
         }
     }
@@ -744,6 +742,13 @@ async fn fetch_bonding_curve_state(mint: &str, settings: &Arc<Settings>) -> Resu
             const PUMP_CURVE_DISCRIMINATOR: [u8; 8] = [0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60];
             if decoded.len() >= 49 && &decoded[..8] == PUMP_CURVE_DISCRIMINATOR {
                 let slice = &decoded[8..];
+                // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) = 73 bytes minimum
+                let creator = if slice.len() >= 73 {
+                    Pubkey::try_from(&slice[41..73]).ok()
+                } else {
+                    None
+                };
+                
                 let state = BondingCurveState {
                     virtual_token_reserves: u64::from_le_bytes(slice[0..8].try_into().unwrap()),
                     virtual_sol_reserves: u64::from_le_bytes(slice[8..16].try_into().unwrap()),
@@ -751,6 +756,7 @@ async fn fetch_bonding_curve_state(mint: &str, settings: &Arc<Settings>) -> Resu
                     real_sol_reserves: u64::from_le_bytes(slice[24..32].try_into().unwrap()),
                     token_total_supply: u64::from_le_bytes(slice[32..40].try_into().unwrap()),
                     complete: slice[40] != 0,
+                    creator,
                 };
                 return Ok(state);
             }
@@ -758,6 +764,44 @@ async fn fetch_bonding_curve_state(mint: &str, settings: &Arc<Settings>) -> Resu
     }
     Err("Failed to fetch bonding curve state".into())
 }
+
+/// Fetch the fee_recipient from the Global PDA account
+/// Global account layout (after 8-byte discriminator):
+/// - initialized: bool (1 byte)
+/// - authority: Pubkey (32 bytes)
+/// - fee_recipient: Pubkey (32 bytes) ← at offset 8 + 1 + 32 = 41
+async fn fetch_global_fee_recipient(settings: &Arc<Settings>) -> Result<Pubkey, Box<dyn std::error::Error + Send + Sync>> {
+    let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
+    let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program);
+    
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [ global_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
+    });
+    
+    let data = fetch_with_fallback::<Value>(request, "getAccountInfo", settings).await?;
+    if let Some(result_val) = data.result {
+        let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
+        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+            let decoded = Base64Engine.decode(base64_str)?;
+            
+            // Global discriminator
+            const GLOBAL_DISCRIMINATOR: [u8; 8] = [0xa7, 0xe8, 0xe8, 0xb1, 0xc8, 0x6c, 0x72, 0x7f];
+            if decoded.len() >= 73 && &decoded[..8] == GLOBAL_DISCRIMINATOR {
+                let slice = &decoded[8..];
+                // Layout: initialized (bool, 1 byte) + authority (32 bytes) + fee_recipient (32 bytes)
+                // fee_recipient is at offset 1 + 32 = 33
+                if slice.len() >= 65 {
+                    let fee_recipient = Pubkey::try_from(&slice[33..65])?;
+                    info!("Fetched fee_recipient from Global PDA: {}", fee_recipient);
+                    return Ok(fee_recipient);
+                }
+            }
+        }
+    }
+    Err("Failed to fetch fee_recipient from Global account".into())
+}
+
 
 /// Fetch the bonding curve account for `mint` and attempt to read the creator pubkey
 /// from the on-chain `BondingCurve` struct. Returns `None` if the account is missing
@@ -948,8 +992,8 @@ pub async fn buy_token(
 ) -> Result<Holding, Box<dyn std::error::Error + Send + Sync>> {
     // fetch_current_price now returns SOL per token
     let buy_price_sol = fetch_current_price(mint, &price_cache, settings).await?;
-    // compute token amount as SOL amount divided by SOL per token
-    let token_amount = (sol_amount / buy_price_sol) as u64;
+    // compute token amount as SOL amount divided by SOL per token, multiplied by 10^6 for pump.fun decimals
+    let token_amount = ((sol_amount / buy_price_sol) * 1_000_000.0) as u64;
     
     // Safety checks when enabled
     if settings.enable_safer_sniping {
@@ -995,10 +1039,14 @@ pub async fn buy_token(
         buy_price_sol
     );
 
+    // Fetch fee_recipient from Global PDA (needed for both real and simulate modes)
+    let fee_recipient = fetch_global_fee_recipient(settings).await?;
+
     if is_real {
         let client = RpcClient::new(&settings.solana_rpc_urls[0]);
         let payer = keypair.ok_or("Keypair required")?;
         debug!("Preparing buy TX for mint {} amount {} SOL (real)", mint, sol_amount);
+        
         // Determine best IDL for this mint (try detect by PDA existence)
         let detected_idl_opt = detect_idl_for_mint(mint, settings).await;
         let mut built_instr: Option<solana_program::instruction::Instruction> = None;
@@ -1019,8 +1067,7 @@ pub async fn buy_token(
             let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program_pk);
             context.insert("creator_vault".to_string(), creator_vault);
         }
-        // Add fee_recipient - pump.fun uses a fixed address for protocol fees
-        let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
+        // Use actual fee_recipient from bonding curve
         context.insert("fee_recipient".to_string(), fee_recipient);
         
         // NOTE: fee_program is invoked via CPI (Cross-Program Invocation) inside pump.fun program
@@ -1044,7 +1091,8 @@ pub async fn buy_token(
                         debug!("  [{}] {} (signer={}, writable={})", i, meta.pubkey, meta.is_signer, meta.is_writable);
                     }
                     // Apply slippage to max_sol_cost: increase by slippage_bps basis points
-                    let base_cost_lamports = (buy_price_sol * 1_000_000_000.0) as u64;
+                    // max_sol_cost should be the maximum SOL we're willing to spend (in lamports)
+                    let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
                     let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
                     let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
                     let mut d = BUY_DISCRIMINATOR.to_vec();
@@ -1063,41 +1111,30 @@ pub async fn buy_token(
             if let Some(e) = last_err { debug!("IDL buy build errors: {}", e); }
             // fallback to legacy builder using configured pump program
             let program_id = Pubkey::from_str(&settings.pump_fun_program)?;
+            // Calculate max_sol_cost with slippage
+            let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
+            let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
+            let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
             build_buy_instruction(
                 &program_id,
                 mint,
                 token_amount,
-                (buy_price_sol * 1_000_000_000.0) as u64,
+                max_sol_cost_with_slippage,
                 Some(false),
                 &payer_pubkey,
+                &fee_recipient,
                 creator_opt,
                 settings,
             )?
         };
-        // Ensure ATA exists; if missing, create a create_associated_token_account instruction
-    let ata = get_associated_token_address(&payer_pubkey, &mint_pk);
-        let ata_info_req = json!({
-            "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
-            "params": [ ata.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
-        });
+        // ALWAYS create user's ATA when buying (even if exists, instruction will succeed idempotently)
+        // This ensures the account exists and we can close it later when selling to reclaim rent
+        let _ata = get_associated_token_address(&payer_pubkey, &mint_pk);
         let mut pre_instructions: Vec<solana_program::instruction::Instruction> = Vec::new();
-        match fetch_with_fallback::<Value>(ata_info_req, "getAccountInfo", settings).await {
-            Ok(info) => {
-                if info.result.is_none() {
-                    // not found -> create
-                    pre_instructions.push(create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_associated_token_account::id()));
-                } else if let Some(result_val) = info.result {
-                    // normalize
-                    let val = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
-                    if val.is_null() {
-                        pre_instructions.push(create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_associated_token_account::id()));
-                    }
-                }
-            }
-            Err(e) => {
-                debug!("Failed to check ATA existence for {}: {}", ata, e);
-            }
-        }
+        
+        // Always add ATA creation instruction - it's idempotent (won't fail if already exists)
+        pre_instructions.push(create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()));
+        
         // Use environment gating to avoid accidental real sends
         if std::env::var("CONFIRM_REAL").unwrap_or_else(|_| "0".to_string()) == "1" {
             // prepare context with payer so ATA creation uses correct funding account
@@ -1182,7 +1219,7 @@ pub async fn buy_token(
                         debug!("  [{}] {} (signer={}, writable={})", i, meta.pubkey, meta.is_signer, meta.is_writable);
                     }
                     // Apply slippage to max_sol_cost
-                    let base_cost_lamports = (buy_price_sol * 1_000_000_000.0) as u64;
+                    let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
                     let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
                     let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
                     instruction_opt = Some(solana_program::instruction::Instruction { program_id, accounts: metas, data: {
@@ -1201,13 +1238,17 @@ pub async fn buy_token(
         let instruction = if let Some(instr) = instruction_opt { instr } else {
             if let Some(e) = last_err { debug!("IDL build failed for buy: {}", e); }
             // fallback to legacy builder
+            let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
+            let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
+            let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
             build_buy_instruction(
                 &program_id,
                 mint,
                 token_amount,
-                (buy_price_sol * 1_000_000_000.0) as u64,
+                max_sol_cost_with_slippage,
                 Some(false),
                 &sim_payer_pubkey,
+                &fee_recipient,
                 creator_opt,
                 settings,
             )?
@@ -1224,11 +1265,11 @@ pub async fn buy_token(
         }), "getAccountInfo", settings).await {
             Ok(info) => {
                 if info.result.is_none() {
-                    pre_instructions.push(create_associated_token_account(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_associated_token_account::id()));
+                    pre_instructions.push(create_associated_token_account(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
                 } else if let Some(result_val) = info.result {
                     let val = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
                     if val.is_null() {
-                        pre_instructions.push(create_associated_token_account(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_associated_token_account::id()));
+                        pre_instructions.push(create_associated_token_account(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
                     }
                 }
             }
@@ -1324,6 +1365,9 @@ pub async fn sell_token(
     let client = RpcClient::new(&settings.solana_rpc_urls[0]);
     let _idls = load_all_idls();
     let creator_opt = fetch_bonding_curve_creator(mint, settings).await.ok().flatten();
+    
+    // Fetch fee_recipient from Global PDA
+    let fee_recipient = fetch_global_fee_recipient(settings).await?;
 
     if is_real {
         // Real run: build instruction with the real keypair's pubkey as user (signer)
@@ -1344,8 +1388,7 @@ pub async fn sell_token(
             let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program_pk);
             context.insert("creator_vault".to_string(), creator_vault);
         }
-        // Add fee_recipient - pump.fun uses a fixed address for protocol fees
-        let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
+        // Use actual fee_recipient from bonding curve
         context.insert("fee_recipient".to_string(), fee_recipient);
         // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
         let fee_program_pubkey = Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ")?;
@@ -1355,7 +1398,13 @@ pub async fn sell_token(
             match idl.build_accounts_for("sell", &context) {
                 Ok(metas) => {
                     let mut d = SELL_DISCRIMINATOR.to_vec();
-                    d.extend(borsh::to_vec(&crate::tx_builder::SellArgs { amount, min_sol_output: (current_price * 1_000_000_000.0) as u64 })?);
+                    // Calculate min_sol_output: (tokens / 1e6) * (SOL per token) * 1e9 lamports
+                    // Simplifies to: tokens * current_price * 1000
+                    let min_sol_output = (amount as f64 * current_price * 1000.0) as u64;
+                    // Apply slippage tolerance (reduce minimum by slippage percentage)
+                    let slippage_multiplier = 1.0 - (settings.slippage_bps as f64 / 10000.0);
+                    let min_sol_with_slippage = (min_sol_output as f64 * slippage_multiplier) as u64;
+                    d.extend(borsh::to_vec(&crate::tx_builder::SellArgs { amount, min_sol_output: min_sol_with_slippage })?);
                     instruction_opt = Some(solana_program::instruction::Instruction { program_id: idl.address, accounts: metas, data: d });
                     break;
                 }
@@ -1365,12 +1414,17 @@ pub async fn sell_token(
         let instruction = if let Some(instr) = instruction_opt { instr } else {
             // fallback to legacy builder using configured pump program
             let program_id = Pubkey::from_str(&settings.pump_fun_program)?;
+            // Calculate min_sol_output with slippage
+            let min_sol_output = (amount as f64 * current_price * 1000.0) as u64;
+            let slippage_multiplier = 1.0 - (settings.slippage_bps as f64 / 10000.0);
+            let min_sol_with_slippage = (min_sol_output as f64 * slippage_multiplier) as u64;
             build_sell_instruction(
                 &program_id,
                 mint,
                 amount,
-                (current_price * 1_000_000_000.0) as u64,
+                min_sol_with_slippage,
                 &user_pubkey,
+                &fee_recipient,
                 creator_opt,
                 settings,
             )?
@@ -1390,18 +1444,23 @@ pub async fn sell_token(
         }
         if std::env::var("CONFIRM_REAL").unwrap_or_else(|_| "0".to_string()) == "1" {
             debug!("Sending real sell TX for mint {} amount {} tokens", mint, amount);
-            // prepare real context
-            let mut real_context: HashMap<String, Pubkey> = HashMap::new();
-            real_context.insert("mint".to_string(), mint_pk);
-            real_context.insert("user".to_string(), user_pubkey);
-            real_context.insert("payer".to_string(), user_pubkey);
-            if let Some(c) = creator_opt { real_context.insert("bonding_curve.creator".to_string(), c); }
-            if let Some(bc) = context.get("bonding_curve") { real_context.insert("bonding_curve".to_string(), *bc); }
-            if let Some(cv) = context.get("creator_vault") { real_context.insert("creator_vault".to_string(), *cv); }
-            let ata_pre = build_missing_ata_preinstructions(&instruction.accounts, &real_context, settings).await?;
+            // For sell, we don't need to create any ATAs - they should already exist from buy
+            // Just build the transaction with sell instruction + close_account
             let mut all_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
-            for pi in ata_pre.into_iter() { all_instrs.push(pi); }
             all_instrs.push(instruction);
+            
+            // After selling, close the ATA to reclaim rent (~0.00203928 SOL)
+            // close_account(token_program_id, account, destination, owner, signers)
+            let ata = get_associated_token_address(&user_pubkey, &mint_pk);
+            let close_ata_instruction = close_account(
+                &spl_token::id(),           // token program
+                &ata,                        // account to close
+                &user_pubkey,               // destination for lamports (rent refund)
+                &user_pubkey,               // owner of the account
+                &[],                         // no additional signers needed
+            )?;
+            all_instrs.push(close_ata_instruction);
+            info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
             
             // Choose transaction submission method
             if settings.helius_sender_enabled {
@@ -1430,12 +1489,17 @@ pub async fn sell_token(
         let sim_payer_ref: &Keypair = if let Some(k) = simulate_keypair { k } else { _maybe_owned_sim = Some(Keypair::new()); _maybe_owned_sim.as_ref().unwrap() };
         let sim_payer_pubkey = sim_payer_ref.pubkey();
         let program_id = Pubkey::from_str(&settings.pump_fun_program)?;
+        // Calculate min_sol_output with slippage
+        let min_sol_output = (amount as f64 * current_price * 1000.0) as u64;
+        let slippage_multiplier = 1.0 - (settings.slippage_bps as f64 / 10000.0);
+        let min_sol_with_slippage = (min_sol_output as f64 * slippage_multiplier) as u64;
         let instruction = build_sell_instruction(
             &program_id,
             mint,
             amount,
-            (current_price * 1_000_000_000.0) as u64,
+            min_sol_with_slippage,
             &sim_payer_pubkey,
+            &fee_recipient,
             creator_opt,
             settings,
         )?;

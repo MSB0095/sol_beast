@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use lru::LruCache;
 use serde::Deserialize;
 use serde_json::Value;
+use solana_sdk::pubkey::Pubkey;
 use std::time::Instant;
 
 // Bonding Curve State
@@ -18,8 +19,9 @@ use std::time::Instant;
 // - real_token_reserves: u64
 // - real_sol_reserves: u64
 // - token_total_supply: u64
-// - complete: bool
-#[derive(Debug, PartialEq)]
+// - complete: bool (1 byte)
+// - creator: Pubkey (32 bytes)
+#[derive(Debug, PartialEq, Clone)]
 pub struct BondingCurveState {
     pub virtual_token_reserves: u64,
     pub virtual_sol_reserves: u64,
@@ -27,6 +29,7 @@ pub struct BondingCurveState {
     pub real_sol_reserves: u64,
     pub token_total_supply: u64,
     pub complete: bool,
+    pub creator: Option<Pubkey>,
 }
 
 impl BondingCurveState {
@@ -155,6 +158,7 @@ mod tests {
             real_sol_reserves: 0,
             token_total_supply: 0,
             complete: false,
+            creator: None,
         };
         let price_opt = state.spot_price_sol_per_token();
         assert!(price_opt.is_some());

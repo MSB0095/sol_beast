@@ -210,12 +210,13 @@ pub async fn send_transaction_via_helius(
     // Simulate to get compute units
     let sim_result = rpc_client.simulate_transaction(&test_tx)?;
     let compute_units = if let Some(units) = sim_result.value.units_consumed {
-        // Add 10% margin to units consumed
-        let units_with_margin = (units as f64 * 1.1).ceil() as u32;
-        std::cmp::max(units_with_margin, 1000)
+        // Add 20% margin to units consumed, with minimum of 200,000 for pump.fun transactions
+        // (ATA creation + pump.fun buy/sell typically needs 150k-200k CU)
+        let units_with_margin = (units as f64 * 1.2).ceil() as u32;
+        std::cmp::max(units_with_margin, 200_000)
     } else {
         debug!("Simulation did not return compute units, using default");
-        100_000u32
+        200_000u32
     };
     
     debug!("Compute units for transaction: {}", compute_units);

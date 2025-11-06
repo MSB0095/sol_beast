@@ -3686,6 +3686,7 @@ dependencies = [
  "solana-program",
  "solana-sdk",
  "spl-associated-token-account",
+ "spl-token 6.0.0",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "toml 0.8.23",

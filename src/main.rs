@@ -480,8 +480,15 @@ async fn handle_new_token(
                                 let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
                             }
                         }
-                        Ok(Ok(Err(err_msg))) => log::warn!("Subscribe request rejected for {}: {}", mint, err_msg),
-                        Ok(Err(_)) | Err(_) => log::warn!("Subscribe request timed out or failed for {}", mint),
+                        Ok(Ok(Err(err_msg))) => {
+                            if err_msg.contains("max subscriptions") {
+                                debug!("Subscribe rejected for {} (all {} WSS slots full - will retry on next token)", mint, ws_control_senders.len() * settings.max_subs_per_wss);
+                            } else {
+                                log::warn!("Subscribe request rejected for {}: {}", mint, err_msg);
+                            }
+                        }
+                        Ok(Err(_)) => log::warn!("Subscribe channel closed for {}", mint),
+                        Err(_) => log::warn!("Subscribe request timed out for {} ({}s timeout - WSS may be overloaded)", mint, settings.wss_subscribe_timeout_secs),
                     }
                 }
             }

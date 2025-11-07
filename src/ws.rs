@@ -1,7 +1,7 @@
 use crate::{settings::Settings, Holding, PriceCache};
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 use futures_util::{stream::StreamExt, SinkExt};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use lru::LruCache;
 use serde_json::{json, Value};
 use solana_program::pubkey::Pubkey;
@@ -25,6 +25,17 @@ pub enum WsRequest {
         sub_id: u64,
         resp: oneshot::Sender<Result<(), String>>,
     },
+    GetHealth {
+        resp: oneshot::Sender<WsHealth>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct WsHealth {
+    pub active_subs: usize,
+    pub pending_subs: usize,
+    pub recent_timeouts: usize,
+    pub is_healthy: bool,
 }
 
 pub async fn run_ws(
@@ -101,7 +112,9 @@ pub async fn run_ws(
         let mut req_id_counter: i64 = 1000;
         let mut active_sub_count: usize = 0;
         let mut subid_to_mint: HashMap<u64, (String, Instant, String)> = HashMap::new();
-        let mut pending_sub: HashMap<i64, oneshot::Sender<Result<u64, String>>> = HashMap::new();
+        let mut pending_sub: HashMap<i64, (oneshot::Sender<Result<u64, String>>, Instant)> = HashMap::new();
+        let mut recent_timeouts: usize = 0;
+        let mut last_successful_sub: Option<Instant> = None;
 
         const CURVE_DISCRIM: [u8; 8] = [0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60];
 
@@ -139,7 +152,7 @@ pub async fn run_ws(
                     if let (Some(id), Some(result)) =
                         (value.get("id").and_then(|v| v.as_i64()), value.get("result"))
                     {
-                        if let Some(responder) = pending_sub.remove(&id) {
+                        if let Some((responder, _timestamp)) = pending_sub.remove(&id) {
                             if let Some(sub_id) = result.as_u64() {
                                 // Move any placeholder mapping keyed by request-id to the
                                 // actual subscription id returned by the RPC. Earlier we
@@ -151,13 +164,39 @@ pub async fn run_ws(
                                 // intended mint.
                                 if let Some(entry) = subid_to_mint.remove(&(id as u64)) {
                                     subid_to_mint.insert(sub_id, entry);
+                                    debug!("Subscription confirmed: req_id={} -> sub_id={}", id, sub_id);
+                                }
+                                last_successful_sub = Some(Instant::now());
+                                // Reset timeout counter on success
+                                if recent_timeouts > 0 {
+                                    recent_timeouts = recent_timeouts.saturating_sub(1);
                                 }
                                 let _ = responder.send(Ok(sub_id));
                             } else {
+                                // Subscription failed - decrement counter
+                                if active_sub_count > 0 {
+                                    active_sub_count -= 1;
+                                }
                                 let _ = responder.send(Err(format!(
                                     "subscribe result missing subscription id: {}",
                                     text
                                 )));
+                            }
+                            continue;
+                        }
+                    }
+
+                    // ---- unsubscribe response ----
+                    if let Some(id) = value.get("id").and_then(|v| v.as_i64()) {
+                        if id == -1 {
+                            // This is an unsubscribe response (we use id=-1 for unsubscribes)
+                            // The result should be a boolean indicating success
+                            if let Some(result) = value.get("result") {
+                                if result.as_bool() == Some(true) {
+                                    debug!("Unsubscribe confirmed");
+                                } else {
+                                    debug!("Unsubscribe response: {:?}", result);
+                                }
                             }
                             continue;
                         }
@@ -279,32 +318,55 @@ pub async fn run_ws(
                 // ---------- control channel ----------
                 Some(req) = control_rx.recv() => {
                     match req {
+                        WsRequest::GetHealth { resp } => {
+                            // Check if connection is healthy based on recent activity
+                            let is_healthy = recent_timeouts < 3 && (
+                                last_successful_sub.is_none() || 
+                                last_successful_sub.map(|t| t.elapsed().as_secs() < 300).unwrap_or(false)
+                            );
+                            let _ = resp.send(WsHealth {
+                                active_subs: active_sub_count,
+                                pending_subs: pending_sub.len(),
+                                recent_timeouts,
+                                is_healthy,
+                            });
+                        }
                         WsRequest::Subscribe { account, mint, resp } => {
+                            // Fast-fail if connection appears unhealthy
+                            if recent_timeouts >= 5 {
+                                warn!("WSS connection unhealthy (recent_timeouts={}), rejecting subscription for {}", recent_timeouts, mint);
+                                let _ = resp.send(Err(format!("WSS connection degraded (timeouts={})", recent_timeouts)));
+                                continue;
+                            }
+                            
                             if active_sub_count >= settings.max_subs_per_wss {
                                 let _ = resp.send(Err(format!(
-                                    "max subscriptions reached on this WSS ({}).",
+                                    "max subscriptions reached on this WSS ({})",
                                     settings.max_subs_per_wss
                                 )));
                             } else {
                                 req_id_counter += 1;
                                 let id = req_id_counter;
-                                pending_sub.insert(id, resp);
                                 let req_json = json!({
                                     "jsonrpc": "2.0",
                                     "id": id,
                                     "method": "accountSubscribe",
-                                    "params": [ account, { "commitment": "confirmed", "encoding": "base64" } ]
+                                    "params": [ account.clone(), { "commitment": "confirmed", "encoding": "base64" } ]
                                 })
                                 .to_string();
                                 if let Err(e) = write.send(Message::Text(req_json)).await {
-                                    debug!("subscribe send error: {}", e);
-                                    pending_sub.remove(&id);
+                                    error!("subscribe send error for {}: {}", mint, e);
+                                    let _ = resp.send(Err(format!("failed to send subscribe request: {}", e)));
                                 } else {
+                                    // Store pending subscription with timestamp for timeout tracking
+                                    pending_sub.insert(id, (resp, Instant::now()));
                                     subid_to_mint.insert(
                                         id as u64, // placeholder – will be overwritten when RPC answers
-                                        (mint, Instant::now(), account),
+                                        (mint.clone(), Instant::now(), account),
                                     );
+                                    // Increment counter optimistically - will decrement if subscription fails
                                     active_sub_count += 1;
+                                    debug!("Sent subscribe request for {} (req_id={}, active={}/{})", mint, id, active_sub_count, settings.max_subs_per_wss);
                                 }
                             }
                         }
@@ -316,26 +378,73 @@ pub async fn run_ws(
                                 "params": [ sub_id ]
                             })
                             .to_string();
-                            let reply = if write.send(Message::Text(req_json)).await.is_err() {
-                                Err("failed to send unsubscribe".into())
+                            if let Err(e) = write.send(Message::Text(req_json)).await {
+                                error!("failed to send unsubscribe for sub {}: {}", sub_id, e);
+                                let _ = resp.send(Err(format!("failed to send unsubscribe: {}", e)));
                             } else {
-                                subid_to_mint.remove(&sub_id);
-                                if active_sub_count > 0 { active_sub_count -= 1; }
-                                Ok(())
-                            };
-                            let _ = resp.send(reply);
+                                // Remove from tracking and decrement counter
+                                if let Some((mint, _, _)) = subid_to_mint.remove(&sub_id) {
+                                    if active_sub_count > 0 {
+                                        active_sub_count -= 1;
+                                    }
+                                    debug!("Sent unsubscribe for {} sub {} (active={}/{})", mint, sub_id, active_sub_count, settings.max_subs_per_wss);
+                                } else {
+                                    debug!("Sent unsubscribe for unknown sub {} (active={}/{})", sub_id, active_sub_count, settings.max_subs_per_wss);
+                                }
+                                let _ = resp.send(Ok(()));
+                            }
                         }
                     }
                 }
 
                 // ---------- periodic TTL clean-up ----------
-                _ = tokio::time::sleep(std::time::Duration::from_secs(settings.sub_ttl_secs)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(settings.sub_ttl_secs.min(30))) => {
                     let now = Instant::now();
+                    
+                    // Clean up timed-out pending subscription requests
+                    let timed_out_pending: Vec<i64> = pending_sub
+                        .iter()
+                        .filter_map(|(req_id, (_sender, timestamp))| {
+                            if now.duration_since(*timestamp).as_secs() > settings.wss_subscribe_timeout_secs {
+                                Some(*req_id)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    
+                    if !timed_out_pending.is_empty() {
+                        recent_timeouts = recent_timeouts.saturating_add(timed_out_pending.len());
+                        warn!("WSS {} timing out {} subscriptions (recent_timeouts={})", wss_url, timed_out_pending.len(), recent_timeouts);
+                    }
+                    
+                    for req_id in timed_out_pending {
+                        if let Some((sender, _)) = pending_sub.remove(&req_id) {
+                            // Decrement active count since this subscription never completed
+                            if active_sub_count > 0 {
+                                active_sub_count -= 1;
+                            }
+                            // Remove placeholder mapping
+                            subid_to_mint.remove(&(req_id as u64));
+                            let _ = sender.send(Err(format!("subscription request timed out after {}s", settings.wss_subscribe_timeout_secs)));
+                            debug!("Cleaned up timed-out pending subscription req_id={} (active={}/{})", req_id, active_sub_count, settings.max_subs_per_wss);
+                        }
+                    }
+                    
+                    // Clean up stale active subscriptions based on TTL
                     let to_remove: Vec<u64> = subid_to_mint
                         .iter()
-                        .filter_map(|(sid, (_, last, _))| {
-                            (now.duration_since(*last).as_secs() > settings.sub_ttl_secs)
-                                .then_some(*sid)
+                        .filter_map(|(sid, (mint, last, _))| {
+                            // Skip placeholder entries (these are tracked in pending_sub)
+                            if pending_sub.contains_key(&(*sid as i64)) {
+                                return None;
+                            }
+                            if now.duration_since(*last).as_secs() > settings.sub_ttl_secs {
+                                debug!("Subscription {} for {} is stale ({}s since last update, TTL={}s)", sid, mint, now.duration_since(*last).as_secs(), settings.sub_ttl_secs);
+                                Some(*sid)
+                            } else {
+                                None
+                            }
                         })
                         .collect();
 
@@ -348,11 +457,14 @@ pub async fn run_ws(
                         })
                         .to_string();
                         if let Err(e) = write.send(Message::Text(req_json)).await {
-                            debug!("failed to send unsubscribe for {}: {}", sid, e);
+                            error!("failed to send unsubscribe for stale sub {}: {}", sid, e);
                         } else {
-                            subid_to_mint.remove(&sid);
-                            if active_sub_count > 0 { active_sub_count -= 1; }
-                            debug!("unsubscribed stale sub {}", sid);
+                            if let Some((mint, _, _)) = subid_to_mint.remove(&sid) {
+                                if active_sub_count > 0 { 
+                                    active_sub_count -= 1; 
+                                }
+                                debug!("Unsubscribed stale sub {} for {} (active={}/{})", sid, mint, active_sub_count, settings.max_subs_per_wss);
+                            }
                         }
                     }
                 }

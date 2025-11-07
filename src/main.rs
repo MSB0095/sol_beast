@@ -5,7 +5,7 @@ mod idl;
 mod settings;
 mod ws;
 mod helius_sender;
-use ws::WsRequest;
+use ws::{WsRequest, WsHealth};
 
 use std::str::FromStr;
 use once_cell::sync::Lazy;
@@ -18,7 +18,7 @@ use crate::{
     settings::Settings,
 };
 use chrono::Utc;
-use log::{error, info, debug};
+use log::{error, info, debug, warn};
 use solana_sdk::signature::Signer;
 use lru::LruCache;
 use solana_sdk::signature::Keypair;
@@ -43,6 +43,40 @@ struct BuyRecord {
     buy_amount_sol: f64,
     buy_amount_tokens: u64,
     buy_price: f64,
+}
+
+/// Select the healthiest WSS endpoint with available slots.
+/// Returns None if all endpoints are degraded or unavailable.
+async fn select_healthy_wss(
+    ws_control_senders: &Arc<Vec<mpsc::Sender<WsRequest>>>,
+    settings: &Settings,
+) -> Option<usize> {
+    if ws_control_senders.is_empty() {
+        return None;
+    }
+
+    let mut health_scores: Vec<(usize, i32)> = Vec::new();
+    
+    for (idx, sender) in ws_control_senders.iter().enumerate() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if sender.send(WsRequest::GetHealth { resp: tx }).await.is_ok() {
+            if let Ok(Ok(h)) = tokio::time::timeout(Duration::from_millis(100), rx).await {
+                let mut score = 100;
+                score -= (h.recent_timeouts as i32) * 30; // Heavy penalty for timeouts
+                if h.active_subs >= settings.max_subs_per_wss {
+                    score -= 1000; // Reject full endpoints
+                }
+                score -= (h.pending_subs as i32) * 15; // Penalty for pending work
+                if h.is_healthy {
+                    score += 50;
+                }
+                health_scores.push((idx, score));
+            }
+        }
+    }
+    
+    health_scores.sort_by(|a, b| b.1.cmp(&a.1));
+    health_scores.first().filter(|(_, score)| *score > 0).map(|(idx, _)| *idx)
 }
 
 #[tokio::main(worker_threads = 4)]
@@ -328,22 +362,22 @@ async fn handle_new_token(
             let price_source = settings.price_source.clone();
             let mut _used_wss = false;
             if price_source != "rpc" && !ws_control_senders.is_empty() {
-                // true round-robin selection across WSS senders
-                let idx = next_wss_sender.fetch_add(1, Ordering::Relaxed) % ws_control_senders.len();
-                let sender = &ws_control_senders[idx];
-                let (resp_tx, resp_rx) = oneshot::channel::<Result<u64, String>>();
-                // Subscribe to the bonding_curve PDA (streamed state includes virtual reserves)
-                let pump_prog = solana_sdk::pubkey::Pubkey::from_str(&settings.pump_fun_program)?;
-                let mint_pk = solana_sdk::pubkey::Pubkey::from_str(&mint)?;
-                let (curve_pda, _) = solana_sdk::pubkey::Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
-                let subscribe_req = WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.clone(), resp: resp_tx };
-                if let Err(e) = sender.send(subscribe_req).await {
-                    log::warn!("Failed to send subscribe request for {}: {}", mint, e);
-                } else {
-                    // Wait for a subscription id or timeout
-                    match tokio::time::timeout(std::time::Duration::from_secs(settings.wss_subscribe_timeout_secs), resp_rx).await {
-                        Ok(Ok(Ok(sub_id))) => {
-                            _used_wss = true;
+                // Health-based WSS selection (avoid degraded/full endpoints)
+                if let Some(idx) = select_healthy_wss(&ws_control_senders, &settings).await {
+                    let sender = &ws_control_senders[idx];
+                    let (resp_tx, resp_rx) = oneshot::channel::<Result<u64, String>>();
+                    // Subscribe to the bonding_curve PDA (streamed state includes virtual reserves)
+                    let pump_prog = solana_sdk::pubkey::Pubkey::from_str(&settings.pump_fun_program)?;
+                    let mint_pk = solana_sdk::pubkey::Pubkey::from_str(&mint)?;
+                    let (curve_pda, _) = solana_sdk::pubkey::Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
+                    let subscribe_req = WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.clone(), resp: resp_tx };
+                    if let Err(e) = sender.send(subscribe_req).await {
+                        log::warn!("Failed to send subscribe request for {}: {}", mint, e);
+                    } else {
+                        // Use aggressive 5s timeout for fast failover
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await {
+                            Ok(Ok(Ok(sub_id))) => {
+                                _used_wss = true;
                             debug!("Subscribed to {} on sub {}", mint, sub_id);
                             // Attempt an immediate RPC fetch to prime the price cache.
                             // Some WSS providers delay the initial account notification;
@@ -482,14 +516,19 @@ async fn handle_new_token(
                         }
                         Ok(Ok(Err(err_msg))) => {
                             if err_msg.contains("max subscriptions") {
-                                debug!("Subscribe rejected for {} (all {} WSS slots full - will retry on next token)", mint, ws_control_senders.len() * settings.max_subs_per_wss);
+                                debug!("Subscribe rejected for {} (WSS idx={} full)", mint, idx);
+                            } else if err_msg.contains("degraded") {
+                                debug!("WSS idx={} degraded, skipped {}", idx, mint);
                             } else {
                                 log::warn!("Subscribe request rejected for {}: {}", mint, err_msg);
                             }
                         }
-                        Ok(Err(_)) => log::warn!("Subscribe channel closed for {}", mint),
-                        Err(_) => log::warn!("Subscribe request timed out for {} ({}s timeout - WSS may be overloaded)", mint, settings.wss_subscribe_timeout_secs),
+                        Ok(Err(_)) => log::warn!("Subscribe channel closed for {} (WSS idx={})", mint, idx),
+                        Err(_) => warn!("Subscribe timed out for {} (WSS idx={}, 5s)", mint, idx),
                     }
+                    }
+                } else {
+                    debug!("No healthy WSS available for {} (all degraded/full)", mint);
                 }
             }
             // We do not fall back to RPC here; WSS-only mode requires a streamed

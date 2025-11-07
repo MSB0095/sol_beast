@@ -2,3 +2,4 @@
 config.toml
 .vscode
 .github
+trades.csv

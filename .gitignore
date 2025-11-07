@@ -1,5 +1,5 @@
 /target
 config.toml
-.vscode
-.github
+./.vscode
+./.github
 trades.csv

@@ -236,7 +236,7 @@ async fn main() -> Result<(), AppError> {
             rpc_client_clone,
             is_real,
             keypair_clone.as_ref(),
-            simulate_keypair_clone_for_monitor.as_ref().map(|a| &**a),
+            simulate_keypair_clone_for_monitor.as_deref(),
             settings_clone,
             trades_map_clone,
             ws_control_senders_clone_for_monitor,
@@ -354,8 +354,8 @@ async fn main() -> Result<(), AppError> {
             &holdings,
             &rpc_client,
             is_real,
-            keypair.as_ref().map(|v| &**v),
-            simulate_keypair.as_ref().map(|v| &**v),
+            keypair.as_deref(),
+            simulate_keypair.as_deref(),
             &price_cache,
             &settings,
             ws_control_senders.clone(),
@@ -416,8 +416,8 @@ async fn process_message(
         }
 
         if let (Some(logs), Some(signature)) = (logs_opt, sig_opt) {
-            if logs.iter().any(|log| log.as_str() == Some("Program log: Instruction: InitializeMint2")) {
-                    if seen.lock().await.put(signature.to_string(), ()).is_none() {
+            if logs.iter().any(|log| log.as_str() == Some("Program log: Instruction: InitializeMint2"))
+                    && seen.lock().await.put(signature.to_string(), ()).is_none() {
                         // If we're already at max holdings, skip detection work
                         // but do not block processing of other websocket messages
                         // (like account notifications). Debounce the debug log
@@ -462,7 +462,6 @@ async fn process_message(
                             return Err(e);
                         }
                     }
-            }
         }
     } else {
         debug!("Websocket message missing params/result/value: {:?}", value);
@@ -539,7 +538,7 @@ async fn handle_new_token(
             let mut _used_wss = false;
             if price_source != "rpc" && !ws_control_senders.is_empty() {
                 // Health-based WSS selection (avoid degraded/full endpoints)
-                if let Some(idx) = select_healthy_wss(&ws_control_senders, &settings).await {
+                if let Some(idx) = select_healthy_wss(&ws_control_senders, settings).await {
                     let sender = &ws_control_senders[idx];
                     let (resp_tx, resp_rx) = oneshot::channel::<Result<u64, String>>();
                     // Subscribe to the bonding_curve PDA (streamed state includes virtual reserves)
@@ -560,7 +559,7 @@ async fn handle_new_token(
                             // fetching the curve once via RPC gives us an initial price
                             // we can act on while the WSS subscription delivers updates.
                             let mut price_opt: Option<f64> = None;
-                            match rpc::fetch_current_price(&mint, &price_cache, rpc_client, settings).await {
+                            match rpc::fetch_current_price(&mint, price_cache, rpc_client, settings).await {
                                 Ok(p) => {
                                     debug!("Primed price cache for {} via RPC: {:.18} SOL/token", mint, p);
                                     price_opt = Some(p);
@@ -597,7 +596,7 @@ async fn handle_new_token(
                                     settings.buy_amount,
                                     is_real,
                                     keypair,
-                                    simulate_keypair.as_ref().map(|a| &**a),
+                                    simulate_keypair,
                                     price_cache.clone(),
                                     rpc_client,
                                     settings,
@@ -650,7 +649,7 @@ async fn handle_new_token(
                                             uri: offchain_meta.as_ref().and_then(|o| o.image.clone()).or_else(|| onchain_struct.as_ref().and_then(|on| on.uri.clone())),
                                             image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
                                             creator: creator.clone(),
-                                            detect_time: detect_time,
+                                            detect_time,
                                             buy_time: holding.buy_time,
                                             buy_amount_sol: settings.buy_amount,
                                             buy_amount_tokens: holding.amount,

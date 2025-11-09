@@ -119,7 +119,7 @@ pub async fn fetch_transaction_details(
     if let Some(meta) = data_value.get("meta") {
         if let Some(post_balances) = meta.get("postTokenBalances").and_then(|v| v.as_array()) {
             if !post_balances.is_empty() {
-                if let Some(entry) = post_balances.get(0) {
+                if let Some(entry) = post_balances.first() {
                     if let (Some(mint), Some(owner)) = (entry.get("mint").and_then(|m| m.as_str()), entry.get("owner").and_then(|o| o.as_str())) {
                         // try to get creator from parsed initializeMint2 if available
                         let mut creator_opt: Option<String> = None;
@@ -250,7 +250,7 @@ pub async fn fetch_token_metadata(
     if let Some(r) = data.result {
         // Normalize: some RPC implementations put the account under result.value
         let account_obj = if let Some(v) = r.get("value") { v.clone() } else { r.clone() };
-        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
             match Base64Engine.decode(base64_str) {
                 Ok(decoded) => match Metadata::safe_deserialize(&decoded) {
                     Ok(meta) => {
@@ -396,7 +396,7 @@ pub async fn fetch_current_price(
                 Ok(data) => {
                     if let Some(result_val) = data.result {
                         let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
-                        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
                             match Base64Engine.decode(base64_str) {
                                 Ok(decoded) => {
                                     decoded_opt = Some(decoded);
@@ -445,7 +445,7 @@ pub async fn fetch_current_price(
             if let Ok(data) = fetch_with_fallback::<Value>(request, "getAccountInfo", rpc_client, settings).await {
                 if let Some(result_val) = data.result {
                     let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
-                    if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                    if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
                         if let Ok(decoded) = Base64Engine.decode(base64_str) {
                             decoded_opt = Some(decoded);
                         }
@@ -476,7 +476,7 @@ pub async fn fetch_current_price(
                             Ok(parsed) => {
                                 if let Some(rv) = parsed.result {
                                     let account_obj = if let Some(v) = rv.get("value") { v.clone() } else { rv.clone() };
-                                    if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                                    if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
                                         if let Ok(decoded) = Base64Engine.decode(base64_str) {
                                             decoded_opt = Some(decoded);
                                             break;
@@ -730,12 +730,12 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
     let data = fetch_with_fallback::<Value>(request, "getAccountInfo", rpc_client, settings).await?;
     if let Some(result_val) = data.result {
         let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
-        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
             let decoded = Base64Engine.decode(base64_str)?;
             
             // Parse bonding curve state
             const PUMP_CURVE_DISCRIMINATOR: [u8; 8] = [0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60];
-            if decoded.len() >= 49 && &decoded[..8] == PUMP_CURVE_DISCRIMINATOR {
+            if decoded.len() >= 49 && decoded[..8] == PUMP_CURVE_DISCRIMINATOR {
                 let slice = &decoded[8..];
                 // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) = 73 bytes minimum
                 let creator = if slice.len() >= 73 {
@@ -777,12 +777,12 @@ pub async fn fetch_global_fee_recipient(rpc_client: &Arc<RpcClient>, settings: &
     let data = fetch_with_fallback::<Value>(request, "getAccountInfo", rpc_client, settings).await?;
     if let Some(result_val) = data.result {
         let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
-        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
             let decoded = Base64Engine.decode(base64_str)?;
             
             // Global discriminator
             const GLOBAL_DISCRIMINATOR: [u8; 8] = [0xa7, 0xe8, 0xe8, 0xb1, 0xc8, 0x6c, 0x72, 0x7f];
-            if decoded.len() >= 73 && &decoded[..8] == GLOBAL_DISCRIMINATOR {
+            if decoded.len() >= 73 && decoded[..8] == GLOBAL_DISCRIMINATOR {
                 let slice = &decoded[8..];
                 // Layout: initialized (bool, 1 byte) + authority (32 bytes) + fee_recipient (32 bytes)
                 // fee_recipient is at offset 1 + 32 = 33
@@ -813,7 +813,7 @@ pub async fn fetch_bonding_curve_creator(mint: &str, rpc_client: &Arc<RpcClient>
         Ok(resp) => {
             if let Some(result_val) = resp.result {
                 let account_obj = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
-                if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.get(0)).and_then(|v| v.as_str()) {
+                if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
                     if let Ok(decoded) = Base64Engine.decode(base64_str) {
                         // BondingCurve layout per IDL: 8-byte discriminator + 5*u64 + bool + creator(pubkey)
                         let needed = 8 + 8*5 + 1 + 32; // 8 + 40 + 1 + 32 = 81
@@ -875,7 +875,7 @@ async fn find_token_account_owned_by_owner(
                 // V2 may return either an array of entries or an object with an `accounts` array.
                 if let Some(arr) = result_val.as_array() {
                     if !arr.is_empty() {
-                        if let Some(entry) = arr.get(0) {
+                        if let Some(entry) = arr.first() {
                             if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
                                 return Ok(Some(pubkey.to_string()));
                             }
@@ -883,7 +883,7 @@ async fn find_token_account_owned_by_owner(
                     }
                 } else if let Some(obj_arr) = result_val.get("accounts").and_then(|v| v.as_array()) {
                     if !obj_arr.is_empty() {
-                        if let Some(entry) = obj_arr.get(0) {
+                        if let Some(entry) = obj_arr.first() {
                             if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
                                 return Ok(Some(pubkey.to_string()));
                             }
@@ -891,7 +891,7 @@ async fn find_token_account_owned_by_owner(
                     }
                 } else if let Some(obj_arr) = result_val.get("value").and_then(|v| v.as_array()) {
                     if !obj_arr.is_empty() {
-                        if let Some(entry) = obj_arr.get(0) {
+                        if let Some(entry) = obj_arr.first() {
                             if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
                                 return Ok(Some(pubkey.to_string()));
                             }
@@ -943,7 +943,7 @@ async fn find_curve_account_by_mint(
             if let Some(result_val) = resp.result {
                 if let Some(arr) = result_val.as_array() {
                     if !arr.is_empty() {
-                        if let Some(entry) = arr.get(0) {
+                        if let Some(entry) = arr.first() {
                             if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
                                 return Ok(Some(pubkey.to_string()));
                             }
@@ -951,7 +951,7 @@ async fn find_curve_account_by_mint(
                     }
                 } else if let Some(obj_arr) = result_val.get("accounts").and_then(|v| v.as_array()) {
                     if !obj_arr.is_empty() {
-                        if let Some(entry) = obj_arr.get(0) {
+                        if let Some(entry) = obj_arr.first() {
                             if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
                                 return Ok(Some(pubkey.to_string()));
                             }
@@ -959,7 +959,7 @@ async fn find_curve_account_by_mint(
                     }
                 } else if let Some(obj_arr) = result_val.get("value").and_then(|v| v.as_array()) {
                     if !obj_arr.is_empty() {
-                        if let Some(entry) = obj_arr.get(0) {
+                        if let Some(entry) = obj_arr.first() {
                             if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
                                 return Ok(Some(pubkey.to_string()));
                             }
@@ -993,13 +993,12 @@ pub async fn sell_token(
     // current_price is SOL per token
     let sol_received = amount as f64 * current_price;
     info!(
-        "Sell {}: {} tokens for {} SOL (price: {:.18} SOL/token)",
+        "Sell {}: {} tokens for {:.9} SOL (price: {:.18} SOL/token)",
         mint,
         amount,
-        format!("{:.9}", sol_received),
+        sol_received,
         current_price
     );
-
     let client = RpcClient::new(&settings.solana_rpc_urls[0]);
     let _idls = load_all_idls();
     let creator_opt = fetch_bonding_curve_creator(mint, rpc_client, settings).await.ok().flatten();
@@ -1031,7 +1030,7 @@ pub async fn sell_token(
         // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
         let fee_program_pubkey = Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ")?;
         context.insert("fee_program".to_string(), fee_program_pubkey);
-        let try_idls: Vec<SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_iter().map(|(_k,v)| v).collect() };
+        let try_idls: Vec<SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_values().collect() };
         for idl in try_idls {
             match idl.build_accounts_for("sell", &context) {
                 Ok(metas) => {
@@ -1153,7 +1152,7 @@ pub async fn sell_token(
         debug!("  Instruction data length: {} bytes", instruction.data.len());
         debug!("  Payer (sim wallet): {}", sim_payer_pubkey);
         
-        let mut tx = Transaction::new_with_payer(&[instruction.clone()], Some(&sim_payer_pubkey));
+        let mut tx = Transaction::new_with_payer(std::slice::from_ref(&instruction), Some(&sim_payer_pubkey));
         match client.get_latest_blockhash() {
             Ok(blockhash) => {
                 // For dry-run simulation with ephemeral keypair:

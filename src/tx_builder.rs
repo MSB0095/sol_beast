@@ -97,12 +97,12 @@ pub fn build_buy_instruction(
     let (user_vol_acc, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", user.as_ref()], &pump_program);
 
     // Build accounts in exact order expected by pump.fun (don't use add_or_merge to avoid deduplication)
-    let mut accounts: Vec<AccountMeta> = Vec::new();
-    accounts.push(AccountMeta::new_readonly(global_pda, false));           // 0: global
-    accounts.push(AccountMeta::new(*fee_recipient, false));                // 1: fee_recipient (from bonding curve, non-signer)
-    accounts.push(AccountMeta::new_readonly(mint_pk, false));              // 2: mint
-    accounts.push(AccountMeta::new(bonding_curve_pda, false));             // 3: bonding_curve
-    // Associated bonding curve is a standard ATA for the bonding curve PDA
+    let mut accounts: Vec<AccountMeta> = vec![
+        AccountMeta::new_readonly(global_pda, false),           // 0: global
+        AccountMeta::new(*fee_recipient, false),                // 1: fee_recipient (from bonding curve, non-signer)
+        AccountMeta::new_readonly(mint_pk, false),              // 2: mint
+        AccountMeta::new(bonding_curve_pda, false),             // 3: bonding_curve
+    ];    // Associated bonding curve is a standard ATA for the bonding curve PDA
     let assoc_bonding = get_associated_token_address(&bonding_curve_pda, &mint_pk);
     accounts.push(AccountMeta::new(assoc_bonding, false));                 // 4: assoc_bonding
     accounts.push(AccountMeta::new(associated_user, false));               // 5: assoc_user
@@ -176,12 +176,12 @@ pub fn build_sell_instruction(
     let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &pump_program);
     
     // Build accounts in exact order expected by pump.fun (don't use add_or_merge to avoid deduplication)
-    let mut accounts: Vec<AccountMeta> = Vec::new();
-    accounts.push(AccountMeta::new_readonly(global_pda, false));             // 0: global
-    accounts.push(AccountMeta::new(*fee_recipient, false));                  // 1: fee_recipient (from bonding curve)
-    accounts.push(AccountMeta::new_readonly(mint_pk, false));                // 2: mint
-    accounts.push(AccountMeta::new(bonding_curve_pda, false));               // 3: bonding_curve
-    // Associated bonding curve is a standard ATA for the bonding curve PDA
+    let mut accounts: Vec<AccountMeta> = vec![
+        AccountMeta::new_readonly(global_pda, false),             // 0: global
+        AccountMeta::new(*fee_recipient, false),                  // 1: fee_recipient (from bonding curve)
+        AccountMeta::new_readonly(mint_pk, false),                // 2: mint
+        AccountMeta::new(bonding_curve_pda, false),               // 3: bonding_curve
+    ];    // Associated bonding curve is a standard ATA for the bonding curve PDA
     let assoc_bonding = get_associated_token_address(&bonding_curve_pda, &mint_pk);
     accounts.push(AccountMeta::new(assoc_bonding, false));                   // 4: assoc_bonding
     accounts.push(AccountMeta::new(associated_user, false));                 // 5: assoc_user

@@ -58,10 +58,10 @@ pub async fn monitor_holdings(
                     if Instant::now().duration_since(*ts) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
                         Ok(*price)
                     } else {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("WSS cached price for {} expired", mint))))
+                        Err(Box::new(std::io::Error::other(format!("WSS cached price for {} expired", mint))))
                     }
                 } else {
-                    Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("No WSS cached price for {}", mint))))
+                    Err(Box::new(std::io::Error::other(format!("No WSS cached price for {}", mint))))
                 }
             } else {
                 rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await
@@ -202,7 +202,7 @@ pub async fn monitor_holdings(
                     current_price,
                     is_real,
                     keypair,
-                    simulate_keypair.as_ref().map(|a| &**a),
+                    simulate_keypair,
                     &rpc_client,
                     &settings,
                 )

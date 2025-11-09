@@ -174,9 +174,7 @@ pub async fn run_ws(
                                 let _ = responder.send(Ok(sub_id));
                             } else {
                                 // Subscription failed - decrement counter
-                                if active_sub_count > 0 {
-                                    active_sub_count -= 1;
-                                }
+                                active_sub_count = active_sub_count.saturating_sub(1);
                                 let _ = responder.send(Err(format!(
                                     "subscribe result missing subscription id: {}",
                                     text
@@ -223,7 +221,7 @@ pub async fn run_ws(
                             Some(a) => a,
                             None => continue,
                         };
-                        let encoded = match data_arr.get(0).and_then(|v| v.as_str()) {
+                        let encoded = match data_arr.first().and_then(|v| v.as_str()) {
                             Some(e) => e,
                             None => continue,
                         };
@@ -233,7 +231,7 @@ pub async fn run_ws(
                         };
 
                         // ---- bonding-curve account ----
-                        if decoded.len() >= 8 && &decoded[..8] == &CURVE_DISCRIM[..] {
+                        if decoded.len() >= 8 && decoded[..8] == CURVE_DISCRIM[..] {
                             if decoded.len() < 8 + 41 {
                                 error!("curve account too short for sub {}", sub_id);
                                 continue;
@@ -271,7 +269,7 @@ pub async fn run_ws(
                                 / (virtual_token_base_units / 1_000_000.0);
 
                             let mut cache = price_cache.lock().await;
-                            if let Some((_, prev)) = cache.get(mint).map(|e| (e.0.clone(), e.1)) {
+                            if let Some((_, prev)) = cache.get(mint).map(|e| (e.0, e.1)) {
                                 // Compute percent change robustly. If the previous price is
                                 // extremely small or zero, clamp the denominator to avoid
                                 // producing misleading huge percentages.
@@ -394,9 +392,7 @@ pub async fn run_ws(
                             } else {
                                 // Remove from tracking and decrement counter
                                 if let Some((mint, _, _)) = subid_to_mint.remove(&sub_id) {
-                                    if active_sub_count > 0 {
-                                        active_sub_count -= 1;
-                                    }
+                                    active_sub_count = active_sub_count.saturating_sub(1);
                                     debug!("Sent unsubscribe for {} sub {} (active={}/{})", mint, sub_id, active_sub_count, settings.max_subs_per_wss);
                                 } else {
                                     debug!("Sent unsubscribe for unknown sub {} (active={}/{})", sub_id, active_sub_count, settings.max_subs_per_wss);
@@ -431,9 +427,7 @@ pub async fn run_ws(
                     for req_id in timed_out_pending {
                         if let Some((sender, _)) = pending_sub.remove(&req_id) {
                             // Decrement active count since this subscription never completed
-                            if active_sub_count > 0 {
-                                active_sub_count -= 1;
-                            }
+                            active_sub_count = active_sub_count.saturating_sub(1);
                             // Remove placeholder mapping
                             subid_to_mint.remove(&(req_id as u64));
                             let _ = sender.send(Err(format!("subscription request timed out after {}s", settings.wss_subscribe_timeout_secs)));
@@ -468,13 +462,9 @@ pub async fn run_ws(
                         .to_string();
                         if let Err(e) = write.send(Message::Text(req_json)).await {
                             error!("failed to send unsubscribe for stale sub {}: {}", sid, e);
-                        } else {
-                            if let Some((mint, _, _)) = subid_to_mint.remove(&sid) {
-                                if active_sub_count > 0 { 
-                                    active_sub_count -= 1; 
-                                }
-                                debug!("Unsubscribed stale sub {} for {} (active={}/{})", sid, mint, active_sub_count, settings.max_subs_per_wss);
-                            }
+                        } else if let Some((mint, _, _)) = subid_to_mint.remove(&sid) {
+                            active_sub_count = active_sub_count.saturating_sub(1);
+                            debug!("Unsubscribed stale sub {} for {} (active={}/{})", sid, mint, active_sub_count, settings.max_subs_per_wss);
                         }
                     }
                 }

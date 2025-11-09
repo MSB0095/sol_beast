@@ -120,7 +120,7 @@ pub async fn buy_token(
         }
         
         // detect_idl result preferred; otherwise fallback order
-        let try_idls: Vec<crate::idl::SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_iter().map(|(_k,v)| v).collect() };
+        let try_idls: Vec<crate::idl::SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_values().collect() };
         for idl in try_idls {
             debug!("Trying IDL with program_id: {}", idl.address);
             match idl.build_accounts_for("buy", &context) {
@@ -169,11 +169,9 @@ pub async fn buy_token(
         // ALWAYS create user's ATA when buying (even if exists, instruction will succeed idempotently)
         // This ensures the account exists and we can close it later when selling to reclaim rent
         let _ata = get_associated_token_address(&payer_pubkey, &mint_pk);
-        let mut pre_instructions: Vec<solana_program::instruction::Instruction> = Vec::new();
-        
-        // Always add ATA creation instruction - it's idempotent (won't fail if already exists)
-        pre_instructions.push(create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()));
-        
+        let mut pre_instructions: Vec<solana_program::instruction::Instruction> = vec![
+            create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()),
+        ];        
         // prepare context with payer so ATA creation uses correct funding account
         let mut real_context: HashMap<String, Pubkey> = HashMap::new();
         real_context.insert("mint".to_string(), mint_pk);

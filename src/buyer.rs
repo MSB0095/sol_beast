@@ -169,7 +169,7 @@ pub async fn buy_token(
         // ALWAYS create user's ATA when buying (even if exists, instruction will succeed idempotently)
         // This ensures the account exists and we can close it later when selling to reclaim rent
         let _ata = get_associated_token_address(&payer_pubkey, &mint_pk);
-        let mut pre_instructions: Vec<solana_program::instruction::Instruction> = vec![
+        let _pre_instructions: Vec<solana_program::instruction::Instruction> = vec![
             create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()),
         ];        
         // prepare context with payer so ATA creation uses correct funding account

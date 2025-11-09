@@ -80,10 +80,7 @@ pub async fn monitor_holdings(
                         if !has_sub {
                             let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
                             let now = Instant::now();
-                            let do_try = match attempts.get(mint) {
-                                Some(last) if now.duration_since(*last).as_secs() < SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS => false,
-                                _ => true,
-                            };
+                            let do_try = !matches!(attempts.get(mint), Some(last) if now.duration_since(*last).as_secs() < SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS);
                             if do_try {
                                 attempts.insert(mint.clone(), now);
                                 if !ws_control_senders.is_empty() {
@@ -129,10 +126,7 @@ pub async fn monitor_holdings(
                                     // Debounced warn
                                     let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
                                     let now = Instant::now();
-                                    let should_log = match warns.get(mint) {
-                                        Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS => false,
-                                        _ => true,
-                                    };
+                                    let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
                                     if should_log {
                                         warns.insert(mint.clone(), now);
                                         log::warn!("Price fetch failed for {}: {}", mint, e2);
@@ -150,10 +144,7 @@ pub async fn monitor_holdings(
                             // No subscription and we didn't attempt one — debounced warn and continue
                             let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
                             let now = Instant::now();
-                            let should_log = match warns.get(mint) {
-                                Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS => false,
-                                _ => true,
-                            };
+                            let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
                             if should_log {
                                 warns.insert(mint.clone(), now);
                                 log::warn!("Price fetch failed for {}: {}", mint, e);
@@ -182,13 +173,13 @@ pub async fn monitor_holdings(
             let elapsed = Utc::now().signed_duration_since(holding.buy_time).num_seconds();
 
             let should_sell = if profit_percent >= settings.tp_percent {
-                info!("TP hit for {}: +{:.6}% ({} SOL/token)", mint, profit_percent, format!("{:.18}", current_price));
+                info!("TP hit for {}: +{:.6}% ({:.18} SOL/token)", mint, profit_percent, current_price);
                 true
             } else if profit_percent <= settings.sl_percent {
-                info!("SL hit for {}: {:.6}% ({} SOL/token)", mint, profit_percent, format!("{:.18}", current_price));
+                info!("SL hit for {}: {:.6}% ({:.18} SOL/token)", mint, profit_percent, current_price);
                 true
             } else if elapsed >= settings.timeout_secs {
-                info!("Timeout for {}: {}s ({} SOL/token)", mint, elapsed, format!("{:.18}", current_price));
+                info!("Timeout for {}: {}s ({:.18} SOL/token)", mint, elapsed, current_price);
                 true
             } else {
                 false

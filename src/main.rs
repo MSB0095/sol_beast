@@ -1,11 +1,48 @@
 mod models;
+mod error;
 mod rpc;
 mod tx_builder;
 mod idl;
 mod settings;
 mod ws;
 mod helius_sender;
-use ws::{WsRequest, WsHealth};
+mod api;
+mod buyer;
+mod monitor;
+mod state;
+use crate::error::AppError;
+use api::{ApiState, BotStats, create_router};
+use ws::{WsRequest};
+
+// Global bot control for logging
+static BOT_CONTROL: once_cell::sync::OnceCell<std::sync::Arc<api::BotControl>> = once_cell::sync::OnceCell::new();
+
+// Helper macro to log to both console and API
+macro_rules! bot_log {
+    ($level:expr, $msg:expr) => {
+        log::info!("[{}] {}", $level, $msg);
+        if let Some(control) = BOT_CONTROL.get() {
+            let control_clone = control.clone();
+            let msg_string = $msg.to_string();
+            let level_string = $level.to_string();
+            tokio::spawn(async move {
+                control_clone.add_log(&level_string, msg_string, None).await;
+            });
+        }
+    };
+    ($level:expr, $msg:expr, $detail:expr) => {
+        log::info!("[{}] {} - {}", $level, $msg, $detail);
+        if let Some(control) = BOT_CONTROL.get() {
+            let control_clone = control.clone();
+            let msg_string = $msg.to_string();
+            let level_string = $level.to_string();
+            let detail_string = Some($detail.to_string());
+            tokio::spawn(async move {
+                control_clone.add_log(&level_string, msg_string, detail_string).await;
+            });
+        }
+    };
+}
 
 use std::str::FromStr;
 use once_cell::sync::Lazy;
@@ -16,34 +53,21 @@ const MAX_HELD_LOG_DEBOUNCE_SECS: u64 = 60;
 use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
+    state::BuyRecord,
 };
 use chrono::Utc;
 use log::{error, info, debug, warn};
 use solana_sdk::signature::Signer;
 use lru::LruCache;
 use solana_sdk::signature::Keypair;
+use solana_client::rpc_client::RpcClient;
 use mpl_token_metadata::accounts::Metadata as OnchainMetadataRaw;
 use std::{collections::HashMap, fs, sync::Arc, time::Instant};
-use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize};
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration};
 
-// Buy record used to track a pending trade until it's closed (sold).
-#[derive(Clone, Debug)]
-struct BuyRecord {
-    mint: String,
-    symbol: Option<String>,
-    name: Option<String>,
-    uri: Option<String>,
-    image: Option<String>,
-    creator: String,
-    detect_time: chrono::DateTime<Utc>,
-    buy_time: chrono::DateTime<Utc>,
-    buy_amount_sol: f64,
-    buy_amount_tokens: u64,
-    buy_price: f64,
-}
+
 
 /// Select the healthiest WSS endpoint with available slots.
 /// Returns None if all endpoints are degraded or unavailable.
@@ -80,7 +104,7 @@ async fn select_healthy_wss(
 }
 
 #[tokio::main(worker_threads = 4)]
-async fn main() {
+async fn main() -> Result<(), AppError> {
     env_logger::init();
     // Print an unconditional startup line so users see the binary started
     // even when RUST_LOG is not set (typo like RUST_LOGS will otherwise be silent).
@@ -89,19 +113,23 @@ async fn main() {
         std::process::id(),
         std::env::var("RUST_LOG").ok()
     );
-    let settings = Arc::new(Settings::from_file("config.toml"));
+    let settings = Arc::new(Settings::from_file("config.toml")?);
+    let rpc_client = Arc::new(RpcClient::new(settings.solana_rpc_urls[0].clone()));
     // Touch these settings here so they are used by the binary (avoid warnings)
     let price_source_cfg = settings.price_source.clone();
     let rpc_rotate_secs_cfg = settings.rpc_rotate_interval_secs;
     info!("Configured price_source={} rpc_rotate_interval_secs={}", price_source_cfg, rpc_rotate_secs_cfg);
     let seen = Arc::new(Mutex::new(LruCache::new(
-        settings.cache_capacity.try_into().unwrap(),
+        settings.cache_capacity.try_into()?,
     )));
     let holdings = Arc::new(Mutex::new(HashMap::new()));
     // Map to track buy metadata so we can write completed trades to CSV on sell
     let trades_map: Arc<Mutex<HashMap<String, BuyRecord>>> = Arc::new(Mutex::new(HashMap::new()));
+    // API data structures for detected coins and trades
+    let detected_coins = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let trades_list = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let price_cache = Arc::new(Mutex::new(LruCache::new(
-        settings.cache_capacity.try_into().unwrap(),
+        settings.cache_capacity.try_into()?,
     )));
     // Shared map of active subscriptions for mints we care about. Value is (wss_sender_index, sub_id)
     let sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -111,18 +139,18 @@ async fn main() {
     // Prefer base64 env var for keypairs to avoid storing keys on disk.
     let keypair: Option<std::sync::Arc<Keypair>> = if is_real {
         if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_KEYPAIR_B64") {
-            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid SOL_BEAST_KEYPAIR_B64")))
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?))
         } else if let Some(pk_string) = settings.wallet_private_key_string.clone() {
-            let bytes = settings::parse_private_key_string(&pk_string).expect("Invalid wallet_private_key_string");
-            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid private key")))
+            let bytes = settings::parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?))
         } else if let Some(j) = settings.wallet_keypair_json.clone() {
-            let bytes: Vec<u8> = serde_json::from_str(&j).expect("Invalid wallet_keypair_json");
-            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair")))
+            let bytes: Vec<u8> = serde_json::from_str(&j)?;
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?))
         } else if let Some(path) = settings.wallet_keypair_path.clone() {
-            let bytes = fs::read(path).expect("Keypair file missing");
-            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid keypair")))
+            let bytes = fs::read(path)?;
+            Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?))
         } else {
-            panic!("No wallet keypair configured! Set wallet_keypair_path, wallet_private_key_string, wallet_keypair_json, or SOL_BEAST_KEYPAIR_B64 env var");
+            return Err(AppError::InvalidKeypair("No wallet keypair configured! Set wallet_keypair_path, wallet_private_key_string, wallet_keypair_json, or SOL_BEAST_KEYPAIR_B64 env var".to_string()));
         }
     } else {
         None
@@ -131,15 +159,15 @@ async fn main() {
     // Optional simulation keypair (used for dry-run signing). If not provided,
     // the code will fall back to generating an ephemeral Keypair at runtime.
     let simulate_keypair: Option<std::sync::Arc<Keypair>> = if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_SIMULATE_KEYPAIR_B64") {
-        Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid SOL_BEAST_SIMULATE_KEYPAIR_B64")))
+        Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?))
     } else if let Some(pk_string) = settings.simulate_wallet_private_key_string.clone() {
-        let bytes = settings::parse_private_key_string(&pk_string).expect("Invalid simulate_wallet_private_key_string");
-        let kp = Keypair::try_from(bytes.as_slice()).expect("Invalid simulate private key");
+        let bytes = settings::parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
+        let kp = Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?;
         info!("Loaded simulate keypair, pubkey: {}", kp.pubkey());
         Some(std::sync::Arc::new(kp))
     } else if let Some(j) = settings.simulate_wallet_keypair_json.clone() {
-        let bytes: Vec<u8> = serde_json::from_str(&j).expect("Invalid simulate_wallet_keypair_json");
-        Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).expect("Invalid simulate keypair")))
+        let bytes: Vec<u8> = serde_json::from_str(&j)?;
+        Some(std::sync::Arc::new(Keypair::try_from(bytes.as_slice()).map_err(|e| AppError::InvalidKeypair(e.to_string()))?))
     } else {
         None
     };
@@ -189,19 +217,23 @@ async fn main() {
     // can unsubscribe subscriptions on sell).
     let holdings_clone = holdings.clone();
     let price_cache_clone = price_cache.clone();
+    let rpc_client_clone = rpc_client.clone();
     let settings_clone = settings.clone();
     let keypair_clone = keypair
         .as_ref()
-        .map(|kp| Keypair::try_from(kp.to_bytes().as_ref()).unwrap());
+        .map(|kp| Keypair::try_from(kp.to_bytes().as_ref()).map_err(|e| AppError::InvalidKeypair(e.to_string())))
+        .transpose()?;
     let trades_map_clone = trades_map.clone();
     let ws_control_senders_clone_for_monitor = ws_control_senders.clone();
     let sub_map_clone_for_monitor = sub_map.clone();
     let next_wss_sender_clone_for_monitor = next_wss_sender.clone();
     let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();
+    let trades_list_clone_for_monitor = trades_list.clone();
     tokio::spawn(async move {
-        monitor_holdings(
+        monitor::monitor_holdings(
             holdings_clone,
             price_cache_clone,
+            rpc_client_clone,
             is_real,
             keypair_clone.as_ref(),
             simulate_keypair_clone_for_monitor.as_ref().map(|a| &**a),
@@ -210,8 +242,108 @@ async fn main() {
             ws_control_senders_clone_for_monitor,
             sub_map_clone_for_monitor,
             next_wss_sender_clone_for_monitor,
+            trades_list_clone_for_monitor,
         )
         .await
+    });
+
+    // Start REST API server
+    let initial_mode = if is_real { api::BotMode::Real } else { api::BotMode::DryRun };
+    let bot_control = Arc::new(api::BotControl::new_with_mode(initial_mode));
+    
+    // Set global bot control for logging across the application
+    if BOT_CONTROL.set(bot_control.clone()).is_err() {
+        return Err(AppError::Init("Failed to set global bot control".to_string()));
+    }
+    
+    let api_stats = Arc::new(tokio::sync::Mutex::new(BotStats {
+        total_buys: 0,
+        total_sells: 0,
+        total_profit: 0.0,
+        current_holdings: vec![],
+        uptime_secs: 0,
+        last_activity: chrono::Utc::now().to_rfc3339(),
+        running_state: Some("running".to_string()),
+        mode: Some(if is_real { "real" } else { "dry-run" }.to_string()),
+    }));
+    
+    let api_state = ApiState {
+        settings: Arc::new(tokio::sync::Mutex::new(settings.as_ref().clone())),
+        stats: api_stats.clone(),
+        bot_control: bot_control.clone(),
+        detected_coins: detected_coins.clone(),
+        trades: trades_list.clone(),
+    };
+    
+    // Add initial startup log
+    bot_control.add_log(
+        "info",
+        format!("Bot initialized in {} mode", if is_real { "real" } else { "dry-run" }),
+        Some(format!("Wallet: {}", if is_real { 
+            keypair.as_ref().map(|k| k.pubkey().to_string()).unwrap_or_else(|| "None".to_string())
+        } else {
+            "Simulation mode".to_string()
+        }))
+    ).await;
+    
+    // Set initial bot state to Running (since the bot starts immediately)
+    {
+        let mut state = bot_control.running_state.lock().await;
+        *state = api::BotRunningState::Running;
+    }
+    
+    // Set initial mode based on is_real flag
+    {
+        let mut mode = bot_control.mode.lock().await;
+        *mode = if is_real { api::BotMode::Real } else { api::BotMode::DryRun };
+    }
+    
+    // Spawn a task to periodically sync holdings to API stats
+    let holdings_for_sync = holdings.clone();
+    let api_stats_for_sync = api_stats.clone();
+    let bot_control_for_sync = bot_control.clone();
+    let start_time = Instant::now();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            
+            // Sync holdings to API stats
+            let holdings_vec: Vec<api::HoldingWithMint> = {
+                let holdings_map = holdings_for_sync.lock().await;
+                holdings_map
+                    .iter()
+                    .map(|(mint, holding)| api::HoldingWithMint {
+                        mint: mint.clone(),
+                        holding: holding.clone(),
+                    })
+                    .collect()
+            };
+            
+            let mut stats = api_stats_for_sync.lock().await;
+            stats.current_holdings = holdings_vec;
+            stats.uptime_secs = start_time.elapsed().as_secs();
+            stats.last_activity = chrono::Utc::now().to_rfc3339();
+            
+            // Log holdings count periodically (every 10 seconds)
+            if stats.uptime_secs % 10 == 0 && !stats.current_holdings.is_empty() {
+                bot_control_for_sync.add_log(
+                    "info",
+                    format!("Currently holding {} positions", stats.current_holdings.len()),
+                    None
+                ).await;
+            }
+        }
+    });
+    
+    let api_router = create_router(api_state);
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+            .await
+            .map_err(|e| AppError::Network(e.to_string()))?;
+        info!("API server listening on 0.0.0.0:8080");
+        axum::serve(listener, api_router)
+            .await
+            .map_err(|e| AppError::Network(e.to_string()))
     });
 
     // Process messages
@@ -220,6 +352,7 @@ async fn main() {
             &msg,
             &seen,
             &holdings,
+            &rpc_client,
             is_real,
             keypair.as_ref().map(|v| &**v),
             simulate_keypair.as_ref().map(|v| &**v),
@@ -229,20 +362,25 @@ async fn main() {
             next_wss_sender.clone(),
             trades_map.clone(),
             sub_map.clone(),
+            detected_coins.clone(),
+            trades_list.clone(),
         )
         .await
         {
             // Log the error and a truncated preview of the incoming message for debugging.
             let preview: String = msg.chars().take(200).collect();
             error!("process_message failed for incoming message (truncated): {}... error: {}", preview, e);
+            bot_log!("error", "Failed to process WebSocket message", format!("{}", e));
         }
     }
+    Ok(())
 }
 
 async fn process_message(
     text: &str,
     seen: &Arc<Mutex<LruCache<String, ()>>>,
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
+    rpc_client: &Arc<RpcClient>,
     is_real: bool,
     keypair: Option<&Keypair>,
     simulate_keypair: Option<&Keypair>,
@@ -252,6 +390,8 @@ async fn process_message(
     next_wss_sender: Arc<AtomicUsize>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
+    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+    trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // NOTE: don't short-circuit all incoming messages when max held coins is
     // reached — that would also skip websocket account notifications which we
@@ -302,6 +442,7 @@ async fn process_message(
                         if let Err(e) = handle_new_token(
                             signature,
                             holdings,
+                            rpc_client,
                             is_real,
                             keypair,
                             simulate_keypair,
@@ -312,6 +453,8 @@ async fn process_message(
                             detect_time,
                             trades_map.clone(),
                             sub_map.clone(),
+                            detected_coins.clone(),
+                            trades_list.clone(),
                         )
                         .await
                         {
@@ -330,32 +473,65 @@ async fn process_message(
 async fn handle_new_token(
     signature: &str,
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
+    rpc_client: &Arc<RpcClient>,
     is_real: bool,
     keypair: Option<&Keypair>,
     simulate_keypair: Option<&Keypair>,
     price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
     ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
-    next_wss_sender: Arc<AtomicUsize>,
+    _next_wss_sender: Arc<AtomicUsize>,
     detect_time: chrono::DateTime<Utc>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
+    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+    trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::sync::oneshot;
-    let (creator, mint, curve_pda, holder_addr) = rpc::fetch_transaction_details(signature, settings).await?;
-    let (onchain_meta, offchain_meta, onchain_raw) = rpc::fetch_token_metadata(&mint, settings).await?;
+    let (creator, mint, curve_pda, holder_addr) = rpc::fetch_transaction_details(signature, rpc_client, settings).await?;
+    let (onchain_meta, offchain_meta, onchain_raw) = rpc::fetch_token_metadata(&mint, rpc_client, settings).await?;
     if let Some(m) = &onchain_meta {
         info!("Token {}: Creator={}, Curve={}, Holder={}, URI={}", mint, creator, curve_pda, holder_addr, m.uri.trim_end_matches('\u{0}'));
+        
+        // Log new token detection to API
+        let token_name = offchain_meta.as_ref()
+            .and_then(|off| off.name.clone())
+            .or_else(|| {
+                let name = m.name.trim_end_matches('\u{0}').to_string();
+                if name.is_empty() { None } else { Some(name) }
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+        bot_log!(
+            "info",
+            format!("New token detected: {}", token_name),
+            format!("Mint: {}, Creator: {}", mint, creator)
+        );
+        
+        // Add to detected coins list
+        {
+            let mut coins = detected_coins.lock().await;
+            coins.insert(0, api::DetectedCoin {
+                mint: mint.clone(),
+                name: offchain_meta.as_ref().and_then(|o| o.name.clone()),
+                symbol: offchain_meta.as_ref().and_then(|o| o.symbol.clone()),
+                image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                creator: creator.clone(),
+                bonding_curve: curve_pda.clone(),
+                detected_at: detect_time.to_rfc3339(),
+                metadata_uri: Some(m.uri.trim_end_matches('\u{0}').to_string()),
+                buy_price: None,
+                status: "detected".to_string(),
+            });
+            // Keep only last 100 detected coins
+            if coins.len() > 100 {
+                coins.truncate(100);
+            }
+        }
+        
         if let Some(off) = &offchain_meta {
             info!("Off-chain metadata for {}: name={:?}, symbol={:?}, image={:?}", mint, off.name, off.symbol, off.image);
         }
         if !m.uri.trim_end_matches('\u{0}').is_empty() && m.seller_fee_basis_points < 500 {
-            // Enforce max_holded_coins
-            if holdings.lock().await.len() >= settings.max_holded_coins {
-                info!("Max held coins reached ({}); skipping buy for {}", settings.max_holded_coins, mint);
-                return Ok(());
-            }
-
             // Try to get a fast WSS-provided price first depending on price_source.
             // If `price_source` == "rpc" we skip WSS and use RPC only.
             // If `price_source` == "wss" we attempt WSS and do NOT fall back to RPC.
@@ -384,7 +560,7 @@ async fn handle_new_token(
                             // fetching the curve once via RPC gives us an initial price
                             // we can act on while the WSS subscription delivers updates.
                             let mut price_opt: Option<f64> = None;
-                            match rpc::fetch_current_price(&mint, &price_cache, settings).await {
+                            match rpc::fetch_current_price(&mint, &price_cache, rpc_client, settings).await {
                                 Ok(p) => {
                                     debug!("Primed price cache for {} via RPC: {:.18} SOL/token", mint, p);
                                     price_opt = Some(p);
@@ -411,13 +587,19 @@ async fn handle_new_token(
                                 }
                             }
                             if let Some(_price) = price_opt {
-                                match rpc::buy_token(
+                                let mut holdings_guard = holdings.lock().await;
+                                if holdings_guard.len() >= settings.max_holded_coins {
+                                    info!("Max held coins reached ({}); skipping buy for {}", settings.max_holded_coins, mint);
+                                    return Ok(());
+                                }
+                                match buyer::buy_token(
                                     &mint,
                                     settings.buy_amount,
                                     is_real,
                                     keypair,
                                     simulate_keypair.as_ref().map(|a| &**a),
                                     price_cache.clone(),
+                                    rpc_client,
                                     settings,
                                 )
                                 .await {
@@ -474,15 +656,59 @@ async fn handle_new_token(
                                             buy_amount_tokens: holding.amount,
                                             buy_price: holding.buy_price,
                                         };
+                                        // Log successful buy to API (before moving holding)
+                                        bot_log!(
+                                            "info",
+                                            format!("Successfully bought token {}", mint),
+                                            format!("Amount: {} SOL, Price: {} SOL per token", settings.buy_amount, holding.buy_price)
+                                        );
+                                        
+                                        // Update detected coin status to "bought"
+                                        {
+                                            let mut coins = detected_coins.lock().await;
+                                            if let Some(coin) = coins.iter_mut().find(|c| c.mint == mint) {
+                                                coin.status = "bought".to_string();
+                                                coin.buy_price = Some(holding.buy_price);
+                                            }
+                                        }
+                                        
+                                        // Add buy trade record
+                                        {
+                                            let mut trades = trades_list.lock().await;
+                                            trades.insert(0, api::TradeRecord {
+                                                mint: mint.clone(),
+                                                symbol: offchain_meta.as_ref().and_then(|o| o.symbol.clone()),
+                                                name: offchain_meta.as_ref().and_then(|o| o.name.clone()),
+                                                image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                                                trade_type: "buy".to_string(),
+                                                timestamp: holding.buy_time.to_rfc3339(),
+                                                tx_signature: None, // TX signature not readily available here
+                                                amount_sol: settings.buy_amount,
+                                                amount_tokens: holding.amount as f64,
+                                                price_per_token: holding.buy_price,
+                                                profit_loss: None,
+                                                profit_loss_percent: None,
+                                                reason: None,
+                                            });
+                                            // Keep only last 200 trades
+                                            if trades.len() > 200 {
+                                                trades.truncate(200);
+                                            }
+                                        }
+                                        
                                         trades_map.lock().await.insert(mint.clone(), buy_record);
-                                        holdings.lock().await.insert(mint.clone(), holding);
+                                        holdings_guard.insert(mint.clone(), holding);
+                                        
                                         // Keep the subscription active for this mint
                                         keep_sub = true;
                                         // Persist the mapping of mint -> (wss_idx, sub_id)
                                         let mut map = sub_map.lock().await;
                                         map.insert(mint.clone(), (idx, sub_id));
                                     }
-                                    Err(e) => log::warn!("Failed to buy {}: {}", mint, e),
+                                    Err(e) => {
+                                        log::warn!("Failed to buy {}: {}", mint, e);
+                                        bot_log!("warn", format!("Failed to buy token {}", mint), format!("{}", e));
+                                    }
                                 }
                             } else {
                                 // Collect some diagnostic info so operator can manually
@@ -539,280 +765,4 @@ async fn handle_new_token(
     Ok(())
 }
 
-async fn monitor_holdings(
-    holdings: Arc<Mutex<HashMap<String, Holding>>>,
-    price_cache: Arc<Mutex<PriceCache>>,
-    is_real: bool,
-    keypair: Option<&Keypair>,
-    simulate_keypair: Option<&Keypair>,
-    settings: Arc<Settings>,
-    trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
-    ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
-    sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
-    _next_wss_sender: Arc<AtomicUsize>,
-) {
-    // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
-    static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-    const SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS: u64 = 30;
-    static PRICE_MISS_WARN_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-    const PRICE_MISS_WARN_DEBOUNCE_SECS: u64 = 60;
-    loop {
-        sleep(Duration::from_secs(5)).await;
-        let mut to_remove = Vec::new();
-        let holdings_snapshot = holdings.lock().await.clone();
 
-        for (mint, holding) in &holdings_snapshot {
-            // Prefer WSS-provided cached prices when configured to use WSS only.
-            // This avoids RPC polling and keeps the monitor reacting to real-time
-            // websocket updates. If `price_source` is not strict "wss", fall
-            // back to the RPC fetcher which itself will consult the same cache
-            // and only call RPC when needed.
-            let current_price_result: Result<f64, Box<dyn std::error::Error + Send + Sync>> = if settings.price_source == "wss" {
-                let mut cache_guard = price_cache.lock().await;
-                if let Some((ts, price)) = cache_guard.get(mint) {
-                    // honor the cache TTL
-                    if Instant::now().duration_since(*ts) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
-                        Ok(*price)
-                    } else {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("WSS cached price for {} expired", mint))))
-                    }
-                } else {
-                    Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("No WSS cached price for {}", mint))))
-                }
-            } else {
-                rpc::fetch_current_price(mint, &price_cache, &settings).await
-            };
-
-            let current_price = match current_price_result {
-                Ok(price) => price,
-                Err(e) => {
-                    // If we're using WSS as the source, try to ensure a subscription
-                    // exists and attempt a single RPC prime before giving up. Rate-
-                    // limit subscribe/prime attempts per-mint to avoid storms.
-                    if settings.price_source == "wss" {
-                        // Check if a subscription exists for this mint
-                        let has_sub = { sub_map.lock().await.get(mint).is_some() };
-                        let mut attempted_subscribe = false;
-                        if !has_sub {
-                            let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
-                            let now = Instant::now();
-                            let do_try = match attempts.get(mint) {
-                                Some(last) if now.duration_since(*last).as_secs() < SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS => false,
-                                _ => true,
-                            };
-                            if do_try {
-                                attempts.insert(mint.clone(), now);
-                                if !ws_control_senders.is_empty() {
-                                    let idx = _next_wss_sender.fetch_add(1, Ordering::Relaxed) % ws_control_senders.len();
-                                    let sender = &ws_control_senders[idx];
-                                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
-                                    let pump_prog = match solana_sdk::pubkey::Pubkey::from_str(&settings.pump_fun_program) {
-                                        Ok(pk) => pk,
-                                        Err(_) => {
-                                            debug!("Invalid pump_fun_program pubkey in settings");
-                                            solana_sdk::pubkey::Pubkey::default()
-                                        }
-                                    };
-                                    if let Ok(mint_pk) = solana_sdk::pubkey::Pubkey::from_str(mint) {
-                                        let (curve_pda, _) = solana_sdk::pubkey::Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
-                                        let _ = sender.send(WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.clone(), resp: resp_tx }).await;
-                                        match tokio::time::timeout(std::time::Duration::from_secs(settings.wss_subscribe_timeout_secs), resp_rx).await {
-                                            Ok(Ok(Ok(sub_id))) => {
-                                                // persist mapping
-                                                sub_map.lock().await.insert(mint.clone(), (idx, sub_id));
-                                                debug!("Monitor auto-subscribed {} on sub {} (idx={})", mint, sub_id, idx);
-                                                attempted_subscribe = true;
-                                            }
-                                            _ => {
-                                                debug!("Monitor subscribe attempt failed/timed out for {}", mint);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // If subscription exists or we attempted one, try one RPC prime
-                        // to populate the cache (rate-limited implicitly by subscribe debounce).
-                        if has_sub || attempted_subscribe {
-                            match rpc::fetch_current_price(mint, &price_cache, &settings).await {
-                                Ok(p) => {
-                                    debug!("Monitor primed price via RPC for {}: {:.18}", mint, p);
-                                    // Continue to compute using the newly-fetched price
-                                    p
-                                }
-                                Err(e2) => {
-                                    // Debounced warn
-                                    let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                                    let now = Instant::now();
-                                    let should_log = match warns.get(mint) {
-                                        Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS => false,
-                                        _ => true,
-                                    };
-                                    if should_log {
-                                        warns.insert(mint.clone(), now);
-                                        log::warn!("Price fetch failed for {}: {}", mint, e2);
-                                    } else {
-                                        debug!("Suppressed repeated price-miss warn for {}: {}", mint, e2);
-                                    }
-                                    // If migrated, schedule removal
-                                    if e2.to_string().contains("migrated") {
-                                        to_remove.push(mint.clone());
-                                    }
-                                    continue;
-                                }
-                            }
-                        } else {
-                            // No subscription and we didn't attempt one — debounced warn and continue
-                            let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                            let now = Instant::now();
-                            let should_log = match warns.get(mint) {
-                                Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS => false,
-                                _ => true,
-                            };
-                            if should_log {
-                                warns.insert(mint.clone(), now);
-                                log::warn!("Price fetch failed for {}: {}", mint, e);
-                            } else {
-                                debug!("Suppressed repeated price-miss warn for {}: {}", mint, e);
-                            }
-                            if e.to_string().contains("migrated") {
-                                to_remove.push(mint.clone());
-                            }
-                            continue;
-                        }
-                    } else {
-                        log::warn!("Price fetch failed for {}: {}", mint, e);
-                        // If the curve reports migrated, schedule removal of holding
-                        if e.to_string().contains("migrated") {
-                            to_remove.push(mint.clone());
-                        }
-                        continue;
-                    }
-                }
-            };
-            // current_price and holding.buy_price are SOL per token
-            let profit_percent = if holding.buy_price != 0.0 {
-                ((current_price - holding.buy_price) / holding.buy_price) * 100.0
-            } else { 0.0 };
-            let elapsed = Utc::now().signed_duration_since(holding.buy_time).num_seconds();
-
-            let should_sell = if profit_percent >= settings.tp_percent {
-                info!("TP hit for {}: +{:.6}% ({} SOL/token)", mint, profit_percent, format!("{:.18}", current_price));
-                true
-            } else if profit_percent <= settings.sl_percent {
-                info!("SL hit for {}: {:.6}% ({} SOL/token)", mint, profit_percent, format!("{:.18}", current_price));
-                true
-            } else if elapsed >= settings.timeout_secs {
-                info!("Timeout for {}: {}s ({} SOL/token)", mint, elapsed, format!("{:.18}", current_price));
-                true
-            } else {
-                false
-            };
-
-            if should_sell {
-                // Attempt sell
-                if let Err(e) = rpc::sell_token(
-                    mint,
-                    holding.amount,
-                    current_price,
-                    is_real,
-                    keypair,
-                    simulate_keypair.as_ref().map(|a| &**a),
-                    &settings,
-                )
-                .await
-                {
-                    error!("Sell error for {}: {}", mint, e);
-                }
-                // Prepare trade CSV row using buy record if available
-                let sell_time = Utc::now();
-                let sell_tokens = holding.amount;
-                // current_price is SOL per token; compute totals in SOL
-                let sell_sol = sell_tokens as f64 * current_price;
-                let profit_percent = if holding.buy_price != 0.0 { ((current_price - holding.buy_price) / holding.buy_price) * 100.0 } else { 0.0 };
-                // compute profit in SOL
-                let profit_sol = (sell_tokens as f64 * current_price) - (holding.buy_price * holding.amount as f64);
-                let _profit_lamports = profit_sol * 1_000_000_000.0;
-                let stop_reason = if profit_percent >= settings.tp_percent { "TP".to_string() } else if profit_percent <= settings.sl_percent { "SL".to_string() } else { "TIMEOUT".to_string() };
-                // Remove buy record and write CSV
-                if let Some(buy_rec) = trades_map.lock().await.remove(mint) {
-                    // Append CSV row
-                    let file_path = "trades.csv";
-                    // New clearer header (human-readable, consistent numeric formatting)
-                    let header = "mint,symbol,name,uri,image,creator,detect_time,buy_time,detect_to_buy_secs,buy_sol,buy_price_sol_per_token,buy_tokens,sell_time,stop_reason,sell_tokens,sell_sol,profit_percent,profit_sol\n";
-                    let needs_header = !std::path::Path::new(file_path).exists();
-                    if needs_header {
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
-                            let _ = f.write_all(header.as_bytes());
-                        }
-                    }
-
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
-                        let detect_to_buy = (buy_rec.buy_time - buy_rec.detect_time).num_seconds();
-                        // buy_rec.buy_price is SOL per token
-                        let buy_price_sol = buy_rec.buy_price;
-                        // Format numbers for readability: SOL amounts with 9 decimals, percents with 2 decimals
-                        let buy_sol_fmt = format!("{:.9}", buy_rec.buy_amount_sol);
-                        let buy_price_sol_fmt = format!("{:.9}", buy_price_sol);
-                        let sell_sol_fmt = format!("{:.9}", sell_sol);
-                        let profit_percent_fmt = format!("{:.2}", profit_percent);
-                        let profit_sol_fmt = format!("{:.9}", profit_sol);
-
-                        // CSV-quote text fields to avoid breaking on commas/newlines
-                        let q = |s: String| -> String {
-                            // Escape double-quotes by doubling them
-                            let escaped = s.replace('"', "\"\"");
-                            format!("\"{}\"", escaped)
-                        };
-
-                        let line = format!(
-                            "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol},{buy_price},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol},{profit_percent},{profit_sol}\n",
-                            mint = q(buy_rec.mint),
-                            symbol = q(buy_rec.symbol.unwrap_or_else(|| "".to_string())),
-                            name = q(buy_rec.name.unwrap_or_else(|| "".to_string())),
-                            uri = q(buy_rec.uri.unwrap_or_else(|| "".to_string())),
-                            image = q(buy_rec.image.unwrap_or_else(|| "".to_string())),
-                            creator = q(buy_rec.creator),
-                            detect_time = buy_rec.detect_time.format("%+"),
-                            buy_time = buy_rec.buy_time.format("%+"),
-                            detect_to_buy_secs = detect_to_buy,
-                            buy_sol = buy_sol_fmt,
-                            buy_price = buy_price_sol_fmt,
-                            buy_tokens = buy_rec.buy_amount_tokens,
-                            sell_time = sell_time.format("%+"),
-                            stop_reason = stop_reason,
-                            sell_tokens = sell_tokens,
-                            sell_sol = sell_sol_fmt,
-                            profit_percent = profit_percent_fmt,
-                            profit_sol = profit_sol_fmt
-                        );
-                        let _ = f.write_all(line.as_bytes());
-                    }
-                }
-                to_remove.push(mint.clone());
-            }
-        }
-
-        if !to_remove.is_empty() {
-            // Unsubscribe from WSS for removed holdings to free subscription slots.
-            let mut submap = sub_map.lock().await;
-            for mint in &to_remove {
-                if let Some((idx, sub_id)) = submap.remove(mint) {
-                    if idx < ws_control_senders.len() {
-                        let sender = &ws_control_senders[idx];
-                        let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-                        let _ = sender.send(WsRequest::Unsubscribe { sub_id, resp: u_tx }).await;
-                        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
-                        debug!("Unsubscribed {} sub {} after sell", mint, sub_id);
-                    }
-                }
-            }
-
-            let mut holdings_lock = holdings.lock().await;
-            for mint in to_remove {
-                holdings_lock.remove(&mint);
-            }
-        }
-    }
-}

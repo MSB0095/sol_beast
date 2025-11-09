@@ -1,0 +1,316 @@
+import { useState, useEffect } from 'react'
+import { TrendingUp, TrendingDown, ExternalLink, Search, Filter, Download } from 'lucide-react'
+
+interface Trade {
+  mint: string
+  symbol?: string
+  name?: string
+  image?: string
+  type: 'buy' | 'sell'
+  timestamp: string
+  tx_signature?: string
+  amount_sol: number
+  amount_tokens: number
+  price_per_token: number
+  profit_loss?: number
+  profit_loss_percent?: number
+  reason?: 'TP' | 'SL' | 'TIMEOUT' | 'MANUAL'
+}
+
+export default function TradingHistory() {
+  const [trades, setTrades] = useState<Trade[]>([])
+  const [filter, setFilter] = useState<'all' | 'buy' | 'sell'>('all')
+  const [searchTerm, setSearchTerm] = useState('')
+  const [sortBy, setSortBy] = useState<'time' | 'profit'>('time')
+
+  useEffect(() => {
+    const fetchTrades = async () => {
+      try {
+        const response = await fetch('http://localhost:8080/trades')
+        if (response.ok) {
+          const data = await response.json()
+          setTrades(data)
+        }
+      } catch (error) {
+        console.error('Failed to fetch trades:', error)
+      }
+    }
+    
+    // Fetch immediately
+    fetchTrades()
+    
+    // Poll every 2 seconds
+    const interval = setInterval(fetchTrades, 2000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const filteredTrades = trades
+    .filter(trade => {
+      if (filter !== 'all' && trade.type !== filter) return false
+      if (searchTerm && !trade.mint.includes(searchTerm) && !trade.symbol?.includes(searchTerm)) return false
+      return true
+    })
+    .sort((a, b) => {
+      if (sortBy === 'time') {
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      } else {
+        return (b.profit_loss || 0) - (a.profit_loss || 0)
+      }
+    })
+
+  const exportToCSV = () => {
+    const headers = ['Type', 'Time', 'Symbol', 'Mint', 'Amount SOL', 'Amount Tokens', 'Price', 'P/L', 'P/L %', 'Reason', 'TX']
+    const rows = filteredTrades.map(t => [
+      t.type,
+      t.timestamp,
+      t.symbol || '',
+      t.mint,
+      t.amount_sol,
+      t.amount_tokens,
+      t.price_per_token,
+      t.profit_loss || '',
+      t.profit_loss_percent || '',
+      t.reason || '',
+      t.tx_signature || ''
+    ])
+    
+    const csv = [headers, ...rows].map(row => row.join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `trades_${new Date().toISOString()}.csv`
+    a.click()
+  }
+
+  if (trades.length === 0) {
+    return (
+      <div className="bg-sol-dark rounded-lg border border-gray-700 p-12 text-center">
+        <TrendingUp size={48} className="mx-auto text-gray-500 mb-4 opacity-50" />
+        <p className="text-gray-400">No trading history yet</p>
+        <p className="text-gray-500 text-sm">Trades will appear here once executed</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Controls */}
+      <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+        <div className="flex flex-wrap gap-4 items-center justify-between">
+          {/* Filter Tabs */}
+          <div className="flex gap-2">
+            {(['all', 'buy', 'sell'] as const).map((type) => (
+              <button
+                key={type}
+                onClick={() => setFilter(type)}
+                className={`px-4 py-2 rounded-lg transition-colors capitalize ${
+                  filter === type
+                    ? 'bg-sol-purple text-white'
+                    : 'bg-sol-darker text-gray-400 hover:bg-gray-700'
+                }`}
+              >
+                {type} ({type === 'all' ? trades.length : trades.filter(t => t.type === type).length})
+              </button>
+            ))}
+          </div>
+
+          {/* Search */}
+          <div className="flex gap-2 flex-1 max-w-md">
+            <div className="relative flex-1">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Search by mint or symbol..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-sol-darker border border-gray-700 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:border-sol-purple"
+              />
+            </div>
+          </div>
+
+          {/* Sort & Export */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSortBy(sortBy === 'time' ? 'profit' : 'time')}
+              className="flex items-center gap-2 px-4 py-2 bg-sol-darker text-gray-400 rounded-lg hover:bg-gray-700 transition-colors"
+            >
+              <Filter size={16} />
+              Sort by {sortBy === 'time' ? 'Time' : 'Profit'}
+            </button>
+            <button
+              onClick={exportToCSV}
+              className="flex items-center gap-2 px-4 py-2 bg-sol-purple text-white rounded-lg hover:bg-sol-purple-light transition-colors"
+            >
+              <Download size={16} />
+              Export CSV
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Trades Table */}
+      <div className="bg-sol-dark rounded-lg border border-gray-700 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-gray-400 bg-sol-darker border-b border-gray-700">
+                <th className="text-left py-3 px-4">Type</th>
+                <th className="text-left py-3 px-4">Time</th>
+                <th className="text-left py-3 px-4">Token</th>
+                <th className="text-right py-3 px-4">Amount (SOL)</th>
+                <th className="text-right py-3 px-4">Price/Token</th>
+                <th className="text-right py-3 px-4">P/L</th>
+                <th className="text-center py-3 px-4">Reason</th>
+                <th className="text-center py-3 px-4">TX</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredTrades.map((trade, idx) => {
+                const isProfit = (trade.profit_loss || 0) >= 0
+                const isBuy = trade.type === 'buy'
+
+                return (
+                  <tr key={`${trade.mint}-${idx}`} className="border-b border-gray-700 hover:bg-sol-darker transition-colors">
+                    <td className="py-3 px-4">
+                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold ${
+                        isBuy 
+                          ? 'bg-green-900/30 text-green-400' 
+                          : 'bg-red-900/30 text-red-400'
+                      }`}>
+                        {isBuy ? (
+                          <>
+                            <TrendingUp size={12} />
+                            BUY
+                          </>
+                        ) : (
+                          <>
+                            <TrendingDown size={12} />
+                            SELL
+                          </>
+                        )}
+                      </span>
+                    </td>
+                    
+                    <td className="py-3 px-4 text-gray-400 text-xs">
+                      {new Date(trade.timestamp).toLocaleString()}
+                    </td>
+                    
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-2">
+                        {trade.image && (
+                          <img 
+                            src={trade.image} 
+                            alt={trade.symbol || ''} 
+                            className="w-6 h-6 rounded"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none'
+                            }}
+                          />
+                        )}
+                        <div>
+                          <div className="font-semibold">
+                            {trade.symbol ? `$${trade.symbol}` : 'Unknown'}
+                          </div>
+                          <div className="text-xs text-gray-500 font-mono">
+                            {trade.mint.slice(0, 8)}...
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    
+                    <td className="py-3 px-4 text-right font-mono">
+                      {trade.amount_sol.toFixed(4)}
+                    </td>
+                    
+                    <td className="py-3 px-4 text-right font-mono text-xs">
+                      {trade.price_per_token.toFixed(9)}
+                    </td>
+                    
+                    <td className="py-3 px-4 text-right">
+                      {trade.profit_loss !== undefined ? (
+                        <div>
+                          <div className={`font-semibold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
+                            {isProfit ? '+' : ''}{trade.profit_loss.toFixed(4)} SOL
+                          </div>
+                          <div className={`text-xs ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
+                            {isProfit ? '+' : ''}{trade.profit_loss_percent?.toFixed(2)}%
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-gray-500">-</span>
+                      )}
+                    </td>
+                    
+                    <td className="py-3 px-4 text-center">
+                      {trade.reason && (
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          trade.reason === 'TP' 
+                            ? 'bg-green-900/30 text-green-400' 
+                            : trade.reason === 'SL'
+                            ? 'bg-red-900/30 text-red-400'
+                            : 'bg-gray-700 text-gray-400'
+                        }`}>
+                          {trade.reason}
+                        </span>
+                      )}
+                    </td>
+                    
+                    <td className="py-3 px-4 text-center">
+                      {trade.tx_signature ? (
+                        <a
+                          href={`https://solscan.io/tx/${trade.tx_signature}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-sol-purple hover:text-sol-purple-light transition-colors"
+                          title="View on Solscan"
+                        >
+                          <ExternalLink size={16} />
+                        </a>
+                      ) : (
+                        <span className="text-gray-500">-</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Summary Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Total Trades</p>
+          <p className="text-2xl font-bold text-sol-purple mt-2">{trades.length}</p>
+        </div>
+        
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Total Buys</p>
+          <p className="text-2xl font-bold text-green-400 mt-2">
+            {trades.filter(t => t.type === 'buy').length}
+          </p>
+        </div>
+        
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Total Sells</p>
+          <p className="text-2xl font-bold text-red-400 mt-2">
+            {trades.filter(t => t.type === 'sell').length}
+          </p>
+        </div>
+        
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Total P/L</p>
+          <p className={`text-2xl font-bold mt-2 ${
+            trades.reduce((sum, t) => sum + (t.profit_loss || 0), 0) >= 0 
+              ? 'text-green-400' 
+              : 'text-red-400'
+          }`}>
+            {trades.reduce((sum, t) => sum + (t.profit_loss || 0), 0).toFixed(4)} SOL
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}

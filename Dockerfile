@@ -1,34 +1,42 @@
-# --- Étape 1 : Construction ---
-# On utilise l'image Rust officielle
-FROM rust:latest AS builder
+# Multi-stage build for sol_beast backend
+FROM rust:latest as builder
 
-# 1. On installe la cible "MUSL"
-# C'est ce qui nous permet de créer un binaire statique pour Alpine
-RUN rustup target add x86_64-unknown-linux-musl
+WORKDIR /usr/src/sol_beast
 
-WORKDIR /usr/src/app
-COPY . .
+# Copy manifests
+COPY Cargo.toml ./
+COPY Cargo.lock* ./
 
-# 2. On compile le bot pour la cible MUSL
-# (Le nom de votre projet 'sol_beast' est utilisé ici)
-RUN cargo build --release --target x86_64-unknown-linux-musl
+# Build dependencies in a separate layer for caching
+RUN mkdir -p src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
 
-# --- Étape 2 : L'image finale ---
-# On utilise Alpine, l'une des images les plus légères
-FROM alpine:latest
+# Copy source code
+COPY src ./src
 
-# On crée un répertoire de travail
+# Build the application
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# 3. On copie votre binaire 'sol_beast'
-# (Notez le chemin différent à cause de la cible MUSL)
-COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-musl/release/sol_beast /app/bot
+# Copy the binary from builder
+COPY --from=builder /usr/src/sol_beast/target/release/sol_beast /app/sol_beast
 
-# 4. (Important) On installe les certificats
-# Si votre bot fait des appels HTTPS vers le RPC Solana, vous AVEZ BESOIN de ça.
-# Sinon, Alpine est si 'nu' que les connexions SSL échoueront.
-RUN apk add --no-cache ca-certificates
+# Copy config and keypair (mount at runtime)
+# COPY config.toml ./
+# COPY keypair.json ./
 
-# 5. La commande de démarrage (Méthode 2)
-# Crée le fichier 'cargo.toml' à partir du secret, puis lance le bot.
-CMD ["sh", "-c", "echo \"$CONFIG_FILE_CONTENT\" > /app/cargo.toml && /app/bot"]
+EXPOSE 8080
+
+ENV RUST_LOG=info
+
+CMD ["./sol_beast"]

@@ -1,0 +1,35 @@
+[Unit]
+Description=Sol Beast - Solana Trading Bot
+After=network.target
+Documentation=file:///opt/sol_beast/DEPLOYMENT_COMPLETE.md
+
+[Service]
+Type=simple
+User=sol_beast
+WorkingDirectory=/opt/sol_beast
+Environment="RUST_LOG=info"
+Environment="PATH=/opt/sol_beast/target/release:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+# Security settings
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/sol_beast/config.toml /opt/sol_beast/trades.csv /opt/sol_beast/keypair.json
+
+# Startup
+ExecStart=/opt/sol_beast/target/release/sol_beast
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=300s
+StartLimitBurst=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sol-beast
+
+[Install]
+WantedBy=multi-user.target

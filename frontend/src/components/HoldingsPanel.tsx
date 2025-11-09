@@ -1,0 +1,136 @@
+import { useBotStore } from '../store/botStore'
+import { Clock } from 'lucide-react'
+
+export default function HoldingsPanel() {
+  const { stats } = useBotStore()
+
+  if (!stats?.current_holdings || stats.current_holdings.length === 0) {
+    return (
+      <div className="bg-sol-dark rounded-lg border border-gray-700 p-12 text-center">
+        <Clock size={48} className="mx-auto text-gray-500 mb-4 opacity-50" />
+        <p className="text-gray-400">No active holdings</p>
+        <p className="text-gray-500 text-sm">Trades will appear here when they're active</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-sol-dark rounded-lg border border-gray-700 p-6">
+        <h3 className="text-lg font-semibold mb-4">Current Holdings ({stats.current_holdings.length})</h3>
+        
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-gray-400 border-b border-gray-700">
+                <th className="text-left py-3 px-4">Token</th>
+                <th className="text-left py-3 px-4">Name/Symbol</th>
+                <th className="text-right py-3 px-4">Buy Price</th>
+                <th className="text-right py-3 px-4">Tokens</th>
+                <th className="text-right py-3 px-4">Hold Time</th>
+                <th className="text-center py-3 px-4">Link</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.current_holdings.map((holding) => {
+                const mint = holding.mint
+                const symbol = holding.metadata?.symbol || holding.onchain?.symbol
+                const name = holding.metadata?.name || holding.onchain?.name
+                const image = holding.metadata?.image
+                const holdTime = Math.floor((Date.now() - new Date(holding.buy_time).getTime()) / 1000)
+                const minutes = Math.floor(holdTime / 60)
+                const seconds = holdTime % 60
+
+                return (
+                  <tr key={mint} className="border-b border-gray-700 hover:bg-sol-darker transition-colors">
+                    <td className="py-3 px-4">
+                      <div className="flex items-center gap-2">
+                        {image ? (
+                          <img 
+                            src={image} 
+                            alt={symbol || name || 'Token'} 
+                            className="w-8 h-8 rounded"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none'
+                            }}
+                          />
+                        ) : (
+                          <div className="w-8 h-8 rounded bg-gray-700 flex items-center justify-center text-gray-500 text-xs">
+                            ?
+                          </div>
+                        )}
+                        <span className="font-mono text-xs text-gray-400">
+                          {mint.slice(0, 6)}...{mint.slice(-4)}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="py-3 px-4">
+                      {name || symbol ? (
+                        <div>
+                          <div className="font-semibold">{name || symbol}</div>
+                          {symbol && name && (
+                            <div className="text-xs text-gray-500">${symbol}</div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-gray-500">Unknown</span>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono text-xs">
+                      {holding.buy_price.toFixed(9)} SOL
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono">
+                      {(holding.amount / 1_000_000).toLocaleString()}
+                    </td>
+                    <td className="py-3 px-4 text-right text-gray-400 text-xs">
+                      {minutes}m {seconds}s
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      <a
+                        href={`https://solscan.io/token/${mint}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sol-purple hover:text-sol-purple-light transition-colors inline-flex items-center gap-1"
+                        title="View on Solscan"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                          <polyline points="15 3 21 3 21 9"></polyline>
+                          <line x1="10" y1="14" x2="21" y2="3"></line>
+                        </svg>
+                      </a>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Summary */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Total Holdings</p>
+          <p className="text-2xl font-bold text-sol-purple mt-2">
+            {stats.current_holdings.length} positions
+          </p>
+        </div>
+
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Avg Entry Price</p>
+          <p className="text-2xl font-bold text-blue-400 mt-2">
+            {(stats.current_holdings.reduce((sum, h) => sum + h.buy_price, 0) / stats.current_holdings.length).toFixed(9)} SOL
+          </p>
+        </div>
+
+        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+          <p className="text-gray-400 text-sm">Total Tokens</p>
+          <p className="text-2xl font-bold text-green-400 mt-2">
+            {(stats.current_holdings.reduce((sum, h) => sum + h.amount, 0) / 1_000_000).toLocaleString()}
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}

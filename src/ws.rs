@@ -239,8 +239,18 @@ pub async fn run_ws(
                                 continue;
                             }
                             let slice2 = &decoded[8..];
-                            let vtok = u64::from_le_bytes(slice2[0..8].try_into().unwrap());
-                            let vsol = u64::from_le_bytes(slice2[8..16].try_into().unwrap());
+                            let vtok = if let Ok(bytes) = slice2[0..8].try_into() {
+                                u64::from_le_bytes(bytes)
+                            } else {
+                                error!("Failed to convert slice to u64 for vtok");
+                                continue;
+                            };
+                            let vsol = if let Ok(bytes) = slice2[8..16].try_into() {
+                                u64::from_le_bytes(bytes)
+                            } else {
+                                error!("Failed to convert slice to u64 for vsol");
+                                continue;
+                            };
                             let complete = slice2[40] != 0;
 
                             if complete {

@@ -4,7 +4,7 @@
 // to tolerate trailing bytes and layout variations.
 use chrono::{DateTime, Utc};
 use lru::LruCache;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use solana_sdk::pubkey::Pubkey;
 use std::time::Instant;
@@ -48,7 +48,7 @@ impl BondingCurveState {
 }
 
 // Holdings and Price Cache
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Holding {
     pub amount: u64,
     pub buy_price: f64,
@@ -64,7 +64,7 @@ pub struct Holding {
 }
 pub type PriceCache = LruCache<String, (Instant, f64)>;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct OffchainTokenMetadata {
     pub name: Option<String>,
     pub symbol: Option<String>,
@@ -145,6 +145,8 @@ pub struct AccountInfoResult {
     pub data: Vec<String>,
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::BondingCurveState;
@@ -161,7 +163,7 @@ mod tests {
             creator: None,
         };
         let price_opt = state.spot_price_sol_per_token();
-        assert!(price_opt.is_some());
+        assert!(price_opt.is_some(), "spot_price_sol_per_token should not be None");
         let price = price_opt.unwrap();
         let expected = 30.0 / 1_073_000_191.0_f64; // ~2.795e-8
         let diff = (price - expected).abs();

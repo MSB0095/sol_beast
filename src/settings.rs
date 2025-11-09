@@ -1,9 +1,10 @@
-use serde::Deserialize;
+use crate::error::AppError;
+use serde::{Deserialize, Serialize};
 use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
 use std::env;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
     pub solana_ws_urls: Vec<String>,
     pub solana_rpc_urls: Vec<String>,
@@ -78,11 +79,17 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn from_file(path: &str) -> Self {
+    pub fn from_file(path: &str) -> Result<Self, AppError> {
         let builder = config::Config::builder()
             .add_source(config::File::with_name(path));
-        let cfg = builder.build().expect("Failed to build config");
-        cfg.try_deserialize().expect("Failed to load config")
+        let cfg = builder.build()?;
+        Ok(cfg.try_deserialize()?)
+    }
+
+    pub fn save_to_file(&self, path: &str) -> Result<(), AppError> {
+        let toml_string = toml::to_string(self)?;
+        std::fs::write(path, toml_string)?;
+        Ok(())
     }
 }
 
@@ -181,7 +188,7 @@ mod tests {
         // This test validates that `Settings::from_file` can load the example
         // config without panicking and that a couple of fields match expected
         // placeholder values from `config.example.toml`.
-        let s = Settings::from_file("config.example.toml");
+        let s = Settings::from_file("config.example.toml").unwrap();
         assert_eq!(s.tp_percent, 30.0);
         assert_eq!(s.sl_percent, -20.0);
         assert_eq!(s.cache_capacity, 1024);

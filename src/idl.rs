@@ -1,6 +1,10 @@
-use solana_program::{instruction::AccountMeta, pubkey::Pubkey};
+use std::collections::HashMap;
+use std::fs;
 use serde_json::Value;
-use std::{collections::HashMap, fs, str::FromStr};
+use solana_program::instruction::AccountMeta;
+use solana_program::pubkey::Pubkey;
+use std::str::FromStr;
+use std::vec::Vec;
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -93,7 +97,7 @@ impl SimpleIdl {
                                         .filter_map(|n| n.as_u64().map(|x| x as u8))
                                         .collect();
                                     if bytes.len() == 32 {
-                                        Pubkey::new_from_array(bytes.try_into().unwrap())
+                                        Pubkey::new_from_array(bytes.try_into().map_err(|_: Vec<u8>| "failed to convert vec to array")?)
                                     } else {
                                         return Err(format!("Program const value has wrong length: {}", bytes.len()).into());
                                     }

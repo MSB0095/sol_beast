@@ -31,25 +31,7 @@ pub struct SellArgs {
 pub const BUY_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 pub const SELL_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
 
-// Helper to add or merge an AccountMeta (merge writable/signer flags if pubkey already present)
-fn add_or_merge(accounts: &mut Vec<AccountMeta>, am: AccountMeta) {
-    for existing in accounts.iter_mut() {
-        if existing.pubkey == am.pubkey {
-            // merge flags
-            let writable = existing.is_writable || am.is_writable;
-            let signer = existing.is_signer || am.is_signer;
-            *existing = if signer {
-                AccountMeta::new(am.pubkey, true)
-            } else if writable {
-                AccountMeta::new(am.pubkey, false)
-            } else {
-                AccountMeta::new_readonly(am.pubkey, false)
-            };
-            return;
-        }
-    }
-    accounts.push(am);
-}
+
 
 pub fn build_buy_instruction(
     program_id: &Pubkey,

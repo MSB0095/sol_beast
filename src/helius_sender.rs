@@ -335,53 +335,7 @@ async fn is_blockhash_valid(
     Ok(current_height <= last_valid_block_height)
 }
 
-/// Confirm a transaction with polling and timeout
-pub async fn confirm_transaction(
-    signature: &str,
-    rpc_client: &RpcClient,
-    timeout_secs: u64,
-) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let timeout = std::time::Duration::from_secs(timeout_secs);
-    let interval = std::time::Duration::from_millis(3000);
-    let start_time = std::time::Instant::now();
-    
-    debug!("Waiting for transaction confirmation: {}", signature);
-    
-    while start_time.elapsed() < timeout {
-        match rpc_client.get_signature_statuses(&[signature.parse()?]) {
-            Ok(response) => {
-                if let Some(statuses) = response.value.first() {
-                    if let Some(status) = statuses {
-                        let confirmation = status.confirmation_status.as_ref()
-                            .map(|s| format!("{:?}", s))
-                            .unwrap_or_else(|| "pending".to_string());
-                        
-                        debug!("Transaction {} status: {}", signature, confirmation);
-                        
-                        // Check for confirmed or finalized (check the debug string)
-                        if confirmation == "Confirmed" || confirmation == "Finalized" {
-                            info!("Transaction confirmed: {}", signature);
-                            return Ok(signature.to_string());
-                        }
-                        
-                        // Check for errors
-                        if let Some(err) = &status.err {
-                            return Err(format!("Transaction failed: {:?}", err).into());
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Status check failed for {}: {}", signature, e);
-            }
-        }
-        
-        tokio::time::sleep(interval).await;
-    }
-    
-    warn!("Transaction confirmation timeout after {}s: {}", timeout_secs, signature);
-    Err(format!("Transaction confirmation timeout: {}", signature).into())
-}
+
 
 /// Retry logic for sending transactions via Helius Sender with blockhash validation
 /// Attempts up to max_retries times with exponential backoff

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { API_SETTINGS_URL } from '../config'
 
 export interface Settings {
   // RPC & WebSocket
@@ -124,7 +125,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   fetchSettings: async () => {
     set({ loading: true, error: null })
     try {
-      const response = await fetch('http://localhost:8080/settings')
+      const response = await fetch(API_SETTINGS_URL)
       if (response.ok) {
         const settings = await response.json()
         set({ settings, loading: false })
@@ -147,7 +148,7 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   saveSettings: async (updates) => {
     set({ saving: true, error: null })
     try {
-      const response = await fetch('http://localhost:8080/settings', {
+      const response = await fetch(API_SETTINGS_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),

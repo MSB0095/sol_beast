@@ -5,6 +5,8 @@ use thiserror::Error;
 pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(#[from] config::ConfigError),
+    #[error("Validation error: {0}")]
+    Validation(String),
     #[error("Invalid keypair: {0}")]
     InvalidKeypair(String),
     #[error("I/O error: {0}")]
@@ -17,8 +19,6 @@ pub enum AppError {
     IntConversion(#[from] TryFromIntError),
     #[error("Initialization error: {0}")]
     Init(String),
-    #[error("Network error: {0}")]
-    Network(String),
     #[error("Conversion error: {0}")]
     Conversion(String),
 }

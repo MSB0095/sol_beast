@@ -1,4 +1,13 @@
 import { create } from 'zustand'
+import {
+  API_HEALTH_URL,
+  API_BOT_STATE_URL,
+  API_STATS_URL,
+  API_LOGS_URL,
+  API_BOT_START_URL,
+  API_BOT_STOP_URL,
+  API_BOT_MODE_URL,
+} from '../config'
 
 export type BotStatus = 'connected' | 'disconnected' | 'error'
 export type BotRunningState = 'running' | 'stopped' | 'starting' | 'stopping'
@@ -35,6 +44,13 @@ export interface BotStats {
   mode?: BotMode
 }
 
+export interface HistoricalDataPoint {
+  timestamp: number
+  profit: number
+  trades: number
+  holdings: number
+}
+
 export interface LogEntry {
   timestamp: string
   level: 'info' | 'warn' | 'error'
@@ -50,7 +66,9 @@ interface BotStore {
   runningState: BotRunningState
   mode: BotMode
   pollInterval: number | null
-  initializeConnection: () => void
+  historicalData: HistoricalDataPoint[]
+  lastStatUpdate: number
+  initializeConnection: () => Promise<void>
   updateStatus: (status: BotStatus) => void
   updateStats: (stats: BotStats) => void
   setError: (error: string | null) => void
@@ -59,6 +77,7 @@ interface BotStore {
   setMode: (mode: BotMode) => Promise<void>
   addLog: (log: LogEntry) => void
   clearLogs: () => void
+  cleanup: () => void
 }
 
 export const useBotStore = create<BotStore>((set, get) => ({
@@ -69,16 +88,18 @@ export const useBotStore = create<BotStore>((set, get) => ({
   runningState: 'stopped',
   mode: 'dry-run',
   pollInterval: null,
+  historicalData: [],
+  lastStatUpdate: 0,
   
   initializeConnection: async () => {
     try {
-      const response = await fetch('http://localhost:8080/health')
+      const response = await fetch(API_HEALTH_URL)
       if (response.ok) {
         set({ status: 'connected', error: null })
         
         // Load initial state
         try {
-          const stateRes = await fetch('http://localhost:8080/bot/state')
+          const stateRes = await fetch(API_BOT_STATE_URL)
           if (stateRes.ok) {
             const stateData = await stateRes.json()
             set({ 
@@ -90,16 +111,43 @@ export const useBotStore = create<BotStore>((set, get) => ({
           console.error('Failed to fetch bot state:', err)
         }
         
-        // Start polling for stats
+        // Start polling for stats with proper interval
         const pollStats = async () => {
           try {
-            const res = await fetch('http://localhost:8080/stats')
+            const res = await fetch(API_STATS_URL)
             if (res.ok) {
               const stats = await res.json()
-              set({ 
-                stats,
-                runningState: stats.running_state || get().runningState,
-                mode: stats.mode || get().mode
+              const now = Date.now()
+              
+              // Add to historical data if enough time has passed (500ms minimum)
+              set((state) => {
+                const shouldAddToHistory = now - state.lastStatUpdate > 500
+                
+                if (shouldAddToHistory) {
+                  const newHistoricalData = [
+                    ...state.historicalData,
+                    {
+                      timestamp: now,
+                      profit: stats.total_profit || 0,
+                      trades: (stats.total_buys || 0) + (stats.total_sells || 0),
+                      holdings: (stats.current_holdings || []).length,
+                    }
+                  ].slice(-100) // Keep last 100 data points
+                  
+                  return {
+                    stats,
+                    historicalData: newHistoricalData,
+                    lastStatUpdate: now,
+                    runningState: stats.running_state || state.runningState,
+                    mode: stats.mode || state.mode
+                  }
+                }
+                
+                return {
+                  stats,
+                  runningState: stats.running_state || state.runningState,
+                  mode: stats.mode || state.mode
+                }
               })
             }
           } catch (err) {
@@ -110,7 +158,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
         // Poll logs
         const pollLogs = async () => {
           try {
-            const res = await fetch('http://localhost:8080/logs')
+            const res = await fetch(API_LOGS_URL)
             if (res.ok) {
               const logsData = await res.json()
               if (logsData.logs && Array.isArray(logsData.logs)) {
@@ -122,29 +170,44 @@ export const useBotStore = create<BotStore>((set, get) => ({
           }
         }
         
-        pollStats()
-        pollLogs()
+        // Initial poll
+        await pollStats()
+        await pollLogs()
+        
+        // Set up polling interval - 2 seconds is reasonable for dashboard updates
         const interval = setInterval(() => {
           pollStats()
           pollLogs()
         }, 2000)
         
-        set({ pollInterval: interval })
+        set({ pollInterval: interval as unknown as number })
       } else {
         set({ status: 'disconnected', error: 'Backend not available' })
+        // Stop polling if interval exists
+        const current = get()
+        if (current.pollInterval !== null) {
+          clearInterval(current.pollInterval)
+          set({ pollInterval: null })
+        }
       }
     } catch (err) {
       set({ 
         status: 'disconnected', 
         error: err instanceof Error ? err.message : 'Connection failed' 
       })
+      // Stop polling if interval exists
+      const current = get()
+      if (current.pollInterval !== null) {
+        clearInterval(current.pollInterval)
+        set({ pollInterval: null })
+      }
     }
   },
   
   startBot: async () => {
     set({ runningState: 'starting' })
     try {
-      const response = await fetch('http://localhost:8080/bot/start', {
+      const response = await fetch(API_BOT_START_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -179,7 +242,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
   stopBot: async () => {
     set({ runningState: 'stopping' })
     try {
-      const response = await fetch('http://localhost:8080/bot/stop', {
+      const response = await fetch(API_BOT_STOP_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
@@ -213,7 +276,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
   
   setMode: async (mode: BotMode) => {
     try {
-      const response = await fetch('http://localhost:8080/bot/mode', {
+      const response = await fetch(API_BOT_MODE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode }),
@@ -253,6 +316,19 @@ export const useBotStore = create<BotStore>((set, get) => ({
   },
   
   clearLogs: () => set({ logs: [] }),
+  
+  cleanup: () => {
+    const state = get()
+    if (state.pollInterval !== null) {
+      clearInterval(state.pollInterval)
+    }
+    set({ 
+      pollInterval: null, 
+      status: 'disconnected',
+      historicalData: [],
+      lastStatUpdate: 0
+    })
+  },
   
   updateStatus: (status) => set({ status }),
   updateStats: (stats) => set({ stats }),

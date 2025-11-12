@@ -2,7 +2,7 @@ use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
     rpc,
-    api::TradeRecord,
+    api::{TradeRecord, BotControl},
     state::BuyRecord,
 };
 use solana_client::rpc_client::RpcClient;
@@ -34,6 +34,7 @@ pub async fn monitor_holdings(
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
     _next_wss_sender: Arc<AtomicUsize>,
     trades_list: Arc<tokio::sync::Mutex<Vec<TradeRecord>>>,
+    bot_control: Arc<BotControl>,
 ) {
     // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
     static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
@@ -42,6 +43,16 @@ pub async fn monitor_holdings(
     const PRICE_MISS_WARN_DEBOUNCE_SECS: u64 = 60;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        
+        // Check if bot is still running before processing trades
+        let running_state = bot_control.running_state.lock().await;
+        if format!("{:?}", *running_state).to_lowercase() != "running" {
+            debug!("Monitor exiting: bot is not in running state");
+            drop(running_state);
+            break;
+        }
+        drop(running_state);
+        
         let mut to_remove = Vec::new();
         let holdings_snapshot = holdings.lock().await.clone();
 
@@ -221,11 +232,13 @@ pub async fn monitor_holdings(
                 // Prepare trade CSV row using buy record if available
                 let sell_time = Utc::now();
                 let sell_tokens = holding.amount;
+                // amount is in microtokens (10^6), so convert to tokens
+                let sell_tokens_amount = sell_tokens as f64 / 1_000_000.0;
                 // current_price is SOL per token; compute totals in SOL
-                let sell_sol = sell_tokens as f64 * current_price;
+                let sell_sol = sell_tokens_amount * current_price;
                 let profit_percent = if holding.buy_price != 0.0 { ((current_price - holding.buy_price) / holding.buy_price) * 100.0 } else { 0.0 };
                 // compute profit in SOL
-                let profit_sol = (sell_tokens as f64 * current_price) - (holding.buy_price * holding.amount as f64);
+                let profit_sol = sell_sol - (holding.buy_price * sell_tokens_amount);
                 let _profit_lamports = profit_sol * 1_000_000_000.0;
                 let stop_reason = if profit_percent >= settings.tp_percent { "TP".to_string() } else if profit_percent <= settings.sl_percent { "SL".to_string() } else { "TIMEOUT".to_string() };
                 
@@ -243,7 +256,7 @@ pub async fn monitor_holdings(
                         timestamp: sell_time.to_rfc3339(),
                         tx_signature: None,
                         amount_sol: sell_sol,
-                        amount_tokens: sell_tokens as f64,
+                        amount_tokens: sell_tokens_amount,
                         price_per_token: current_price,
                         profit_loss: Some(profit_sol),
                         profit_loss_percent: Some(profit_percent),
@@ -302,7 +315,7 @@ pub async fn monitor_holdings(
                             buy_tokens = buy_rec.buy_amount_tokens,
                             sell_time = sell_time.format("%+"),
                             stop_reason = stop_reason,
-                            sell_tokens = sell_tokens,
+                            sell_tokens = format!("{:.6}", sell_tokens_amount),
                             sell_sol = sell_sol_fmt,
                             profit_percent = profit_percent_fmt,
                             profit_sol = profit_sol_fmt
@@ -333,6 +346,25 @@ pub async fn monitor_holdings(
             for mint in to_remove {
                 holdings_lock.remove(&mint);
             }
+        }
+
+        // Clean up old entries from debounce maps (every 10 minutes) to prevent unbounded growth
+        static LAST_CLEANUP: Lazy<tokio::sync::Mutex<Option<Instant>>> = 
+            Lazy::new(|| tokio::sync::Mutex::new(None));
+        let mut last_cleanup = LAST_CLEANUP.lock().await;
+        let now = Instant::now();
+        if last_cleanup.is_none() || now.duration_since(last_cleanup.unwrap()) > std::time::Duration::from_secs(600) {
+            *last_cleanup = Some(now);
+            
+            // Clean up SUBSCRIBE_ATTEMPT_TIMES
+            let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
+            let cutoff = now - std::time::Duration::from_secs(SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS * 2);
+            attempts.retain(|_, last_time| *last_time > cutoff);
+            
+            // Clean up PRICE_MISS_WARN_TIMES  
+            let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
+            let cutoff = now - std::time::Duration::from_secs(PRICE_MISS_WARN_DEBOUNCE_SECS * 2);
+            warns.retain(|_, last_time| *last_time > cutoff);
         }
     }
 }

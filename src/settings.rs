@@ -91,6 +91,137 @@ impl Settings {
         std::fs::write(path, toml_string)?;
         Ok(())
     }
+
+    /// Merge another Settings struct, only updating fields that differ
+    /// This is used for partial updates from API requests
+    pub fn merge(&mut self, other: &Settings) {
+        // Only update non-default values; use serde_json to detect changes
+        if other.solana_rpc_urls != self.solana_rpc_urls {
+            self.solana_rpc_urls = other.solana_rpc_urls.clone();
+        }
+        if other.solana_ws_urls != self.solana_ws_urls {
+            self.solana_ws_urls = other.solana_ws_urls.clone();
+        }
+        if other.pump_fun_program != self.pump_fun_program {
+            self.pump_fun_program = other.pump_fun_program.clone();
+        }
+        if other.metadata_program != self.metadata_program {
+            self.metadata_program = other.metadata_program.clone();
+        }
+        if other.buy_amount != self.buy_amount {
+            self.buy_amount = other.buy_amount;
+        }
+        if other.tp_percent != self.tp_percent {
+            self.tp_percent = other.tp_percent;
+        }
+        if other.sl_percent != self.sl_percent {
+            self.sl_percent = other.sl_percent;
+        }
+        if other.timeout_secs != self.timeout_secs {
+            self.timeout_secs = other.timeout_secs;
+        }
+        if other.price_cache_ttl_secs != self.price_cache_ttl_secs {
+            self.price_cache_ttl_secs = other.price_cache_ttl_secs;
+        }
+        if other.cache_capacity != self.cache_capacity {
+            self.cache_capacity = other.cache_capacity;
+        }
+        if other.max_holded_coins != self.max_holded_coins {
+            self.max_holded_coins = other.max_holded_coins;
+        }
+        if other.price_source != self.price_source {
+            self.price_source = other.price_source.clone();
+        }
+        if other.rpc_rotate_interval_secs != self.rpc_rotate_interval_secs {
+            self.rpc_rotate_interval_secs = other.rpc_rotate_interval_secs;
+        }
+        if other.helius_sender_enabled != self.helius_sender_enabled {
+            self.helius_sender_enabled = other.helius_sender_enabled;
+        }
+        if other.helius_api_key != self.helius_api_key {
+            self.helius_api_key = other.helius_api_key.clone();
+        }
+        if other.helius_sender_endpoint != self.helius_sender_endpoint {
+            self.helius_sender_endpoint = other.helius_sender_endpoint.clone();
+        }
+        if other.helius_use_swqos_only != self.helius_use_swqos_only {
+            self.helius_use_swqos_only = other.helius_use_swqos_only;
+        }
+        if other.helius_use_dynamic_tips != self.helius_use_dynamic_tips {
+            self.helius_use_dynamic_tips = other.helius_use_dynamic_tips;
+        }
+        if other.helius_min_tip_sol != self.helius_min_tip_sol {
+            self.helius_min_tip_sol = other.helius_min_tip_sol;
+        }
+        if other.helius_priority_fee_multiplier != self.helius_priority_fee_multiplier {
+            self.helius_priority_fee_multiplier = other.helius_priority_fee_multiplier;
+        }
+        if other.enable_safer_sniping != self.enable_safer_sniping {
+            self.enable_safer_sniping = other.enable_safer_sniping;
+        }
+        if other.min_tokens_threshold != self.min_tokens_threshold {
+            self.min_tokens_threshold = other.min_tokens_threshold;
+        }
+        if other.max_sol_per_token != self.max_sol_per_token {
+            self.max_sol_per_token = other.max_sol_per_token;
+        }
+        if other.min_liquidity_sol != self.min_liquidity_sol {
+            self.min_liquidity_sol = other.min_liquidity_sol;
+        }
+        if other.max_liquidity_sol != self.max_liquidity_sol {
+            self.max_liquidity_sol = other.max_liquidity_sol;
+        }
+        if other.bonding_curve_strict != self.bonding_curve_strict {
+            self.bonding_curve_strict = other.bonding_curve_strict;
+        }
+        if other.bonding_curve_log_debounce_secs != self.bonding_curve_log_debounce_secs {
+            self.bonding_curve_log_debounce_secs = other.bonding_curve_log_debounce_secs;
+        }
+        if other.slippage_bps != self.slippage_bps {
+            self.slippage_bps = other.slippage_bps;
+        }
+        if other.wallet_keypair_path != self.wallet_keypair_path {
+            self.wallet_keypair_path = other.wallet_keypair_path.clone();
+        }
+        if other.wallet_keypair_json != self.wallet_keypair_json {
+            self.wallet_keypair_json = other.wallet_keypair_json.clone();
+        }
+        if other.wallet_private_key_string != self.wallet_private_key_string {
+            self.wallet_private_key_string = other.wallet_private_key_string.clone();
+        }
+        if other.simulate_wallet_keypair_json != self.simulate_wallet_keypair_json {
+            self.simulate_wallet_keypair_json = other.simulate_wallet_keypair_json.clone();
+        }
+        if other.simulate_wallet_private_key_string != self.simulate_wallet_private_key_string {
+            self.simulate_wallet_private_key_string = other.simulate_wallet_private_key_string.clone();
+        }
+    }
+
+    /// Validate settings ranges and constraints
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.tp_percent <= 0.0 {
+            return Err(AppError::Validation("tp_percent must be > 0".to_string()));
+        }
+        if self.sl_percent >= 0.0 {
+            return Err(AppError::Validation("sl_percent must be < 0".to_string()));
+        }
+        if self.buy_amount <= 0.0 {
+            return Err(AppError::Validation("buy_amount must be > 0".to_string()));
+        }
+        if self.timeout_secs <= 0 {
+            return Err(AppError::Validation("timeout_secs must be > 0".to_string()));
+        }
+        if self.cache_capacity == 0 {
+            return Err(AppError::Validation("cache_capacity must be > 0".to_string()));
+        }
+        if self.max_holded_coins == 0 {
+            return Err(AppError::Validation("max_holded_coins must be > 0".to_string()));
+        }
+        if self.max_liquidity_sol < self.min_liquidity_sol {
+            return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
+        }
+        Ok(())
+    }
 }
 
 /// Try to read a base64-encoded keypair from the given env var. Returns

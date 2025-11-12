@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, ExternalLink, Search, Filter, Download } from 'lucide-react'
+import { API_TRADES_URL } from '../config'
 
 interface Trade {
   mint: string
@@ -26,7 +27,7 @@ export default function TradingHistory() {
   useEffect(() => {
     const fetchTrades = async () => {
       try {
-        const response = await fetch('http://localhost:8080/trades')
+        const response = await fetch(API_TRADES_URL)
         if (response.ok) {
           const data = await response.json()
           setTrades(data)
@@ -39,8 +40,8 @@ export default function TradingHistory() {
     // Fetch immediately
     fetchTrades()
     
-    // Poll every 2 seconds
-    const interval = setInterval(fetchTrades, 2000)
+    // Poll every 100ms for near-instant updates
+    const interval = setInterval(fetchTrades, 100)
     return () => clearInterval(interval)
   }, [])
 
@@ -220,21 +221,21 @@ export default function TradingHistory() {
                     </td>
                     
                     <td className="py-3 px-4 text-right font-mono">
-                      {trade.amount_sol.toFixed(4)}
+                      {trade.amount_sol ? trade.amount_sol.toFixed(4) : '-'}
                     </td>
                     
                     <td className="py-3 px-4 text-right font-mono text-xs">
-                      {trade.price_per_token.toFixed(9)}
+                      {trade.price_per_token ? trade.price_per_token.toFixed(9) : '-'}
                     </td>
                     
                     <td className="py-3 px-4 text-right">
-                      {trade.profit_loss !== undefined ? (
+                      {trade.profit_loss !== undefined && trade.profit_loss !== null ? (
                         <div>
                           <div className={`font-semibold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
                             {isProfit ? '+' : ''}{trade.profit_loss.toFixed(4)} SOL
                           </div>
                           <div className={`text-xs ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
-                            {isProfit ? '+' : ''}{trade.profit_loss_percent?.toFixed(2)}%
+                            {isProfit ? '+' : ''}{trade.profit_loss_percent !== null && trade.profit_loss_percent !== undefined ? trade.profit_loss_percent.toFixed(2) : '0'}%
                           </div>
                         </div>
                       ) : (

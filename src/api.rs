@@ -209,115 +209,28 @@ async fn update_settings_handler(
         }
     };
     
-    // Apply updates to current settings
-    // This is a basic merge; for more complex scenarios, consider a dedicated merge logic
-    // For simplicity, we'll just replace fields that are present in the partial_settings
-    // This requires manually updating each field. A better approach would be to use a crate
-    // like `serde_merge` or implement a custom `merge` method on `Settings`.
+    // Merge settings
+    current_settings.merge(&partial_settings);
     
-    // Example of merging:
-    if partial_settings.solana_rpc_urls != current_settings.solana_rpc_urls {
-        current_settings.solana_rpc_urls = partial_settings.solana_rpc_urls;
+    // Validate merged settings
+    if let Err(e) = current_settings.validate() {
+        let error_msg = format!("Settings validation failed: {}", e);
+        warn!("{}", error_msg);
+        bot_control.add_log("error", error_msg.clone(), None).await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": error_msg
+            }))
+        );
     }
-    if partial_settings.solana_ws_urls != current_settings.solana_ws_urls {
-        current_settings.solana_ws_urls = partial_settings.solana_ws_urls;
-    }
-    if partial_settings.pump_fun_program != current_settings.pump_fun_program {
-        current_settings.pump_fun_program = partial_settings.pump_fun_program;
-    }
-    if partial_settings.metadata_program != current_settings.metadata_program {
-        current_settings.metadata_program = partial_settings.metadata_program;
-    }
-    if partial_settings.buy_amount != current_settings.buy_amount {
-        current_settings.buy_amount = partial_settings.buy_amount;
-    }
-    if partial_settings.tp_percent != current_settings.tp_percent {
-        current_settings.tp_percent = partial_settings.tp_percent;
-    }
-    if partial_settings.sl_percent != current_settings.sl_percent {
-        current_settings.sl_percent = partial_settings.sl_percent;
-    }
-    if partial_settings.timeout_secs != current_settings.timeout_secs {
-        current_settings.timeout_secs = partial_settings.timeout_secs;
-    }
-    if partial_settings.price_cache_ttl_secs != current_settings.price_cache_ttl_secs {
-        current_settings.price_cache_ttl_secs = partial_settings.price_cache_ttl_secs;
-    }
-    if partial_settings.cache_capacity != current_settings.cache_capacity {
-        current_settings.cache_capacity = partial_settings.cache_capacity;
-    }
-    if partial_settings.max_holded_coins != current_settings.max_holded_coins {
-        current_settings.max_holded_coins = partial_settings.max_holded_coins;
-    }
-    if partial_settings.price_source != current_settings.price_source {
-        current_settings.price_source = partial_settings.price_source;
-    }
-    if partial_settings.rpc_rotate_interval_secs != current_settings.rpc_rotate_interval_secs {
-        current_settings.rpc_rotate_interval_secs = partial_settings.rpc_rotate_interval_secs;
-    }
-    if partial_settings.helius_sender_enabled != current_settings.helius_sender_enabled {
-        current_settings.helius_sender_enabled = partial_settings.helius_sender_enabled;
-    }
-    if partial_settings.helius_api_key != current_settings.helius_api_key {
-        current_settings.helius_api_key = partial_settings.helius_api_key;
-    }
-    if partial_settings.helius_sender_endpoint != current_settings.helius_sender_endpoint {
-        current_settings.helius_sender_endpoint = partial_settings.helius_sender_endpoint;
-    }
-    if partial_settings.helius_use_swqos_only != current_settings.helius_use_swqos_only {
-        current_settings.helius_use_swqos_only = partial_settings.helius_use_swqos_only;
-    }
-    if partial_settings.helius_use_dynamic_tips != current_settings.helius_use_dynamic_tips {
-        current_settings.helius_use_dynamic_tips = partial_settings.helius_use_dynamic_tips;
-    }
-    if partial_settings.helius_min_tip_sol != current_settings.helius_min_tip_sol {
-        current_settings.helius_min_tip_sol = partial_settings.helius_min_tip_sol;
-    }
-    if partial_settings.helius_priority_fee_multiplier != current_settings.helius_priority_fee_multiplier {
-        current_settings.helius_priority_fee_multiplier = partial_settings.helius_priority_fee_multiplier;
-    }
-    if partial_settings.enable_safer_sniping != current_settings.enable_safer_sniping {
-        current_settings.enable_safer_sniping = partial_settings.enable_safer_sniping;
-    }
-    if partial_settings.min_tokens_threshold != current_settings.min_tokens_threshold {
-        current_settings.min_tokens_threshold = partial_settings.min_tokens_threshold;
-    }
-    if partial_settings.max_sol_per_token != current_settings.max_sol_per_token {
-        current_settings.max_sol_per_token = partial_settings.max_sol_per_token;
-    }
-    if partial_settings.min_liquidity_sol != current_settings.min_liquidity_sol {
-        current_settings.min_liquidity_sol = partial_settings.min_liquidity_sol;
-    }
-    if partial_settings.max_liquidity_sol != current_settings.max_liquidity_sol {
-        current_settings.max_liquidity_sol = partial_settings.max_liquidity_sol;
-    }
-    if partial_settings.bonding_curve_strict != current_settings.bonding_curve_strict {
-        current_settings.bonding_curve_strict = partial_settings.bonding_curve_strict;
-    }
-    if partial_settings.bonding_curve_log_debounce_secs != current_settings.bonding_curve_log_debounce_secs {
-        current_settings.bonding_curve_log_debounce_secs = partial_settings.bonding_curve_log_debounce_secs;
-    }
-    if partial_settings.slippage_bps != current_settings.slippage_bps {
-        current_settings.slippage_bps = partial_settings.slippage_bps;
-    }
-    if partial_settings.wallet_keypair_path != current_settings.wallet_keypair_path {
-        current_settings.wallet_keypair_path = partial_settings.wallet_keypair_path;
-    }
-    if partial_settings.wallet_keypair_json != current_settings.wallet_keypair_json {
-        current_settings.wallet_keypair_json = partial_settings.wallet_keypair_json;
-    }
-    if partial_settings.wallet_private_key_string != current_settings.wallet_private_key_string {
-        current_settings.wallet_private_key_string = partial_settings.wallet_private_key_string;
-    }
-    if partial_settings.simulate_wallet_keypair_json != current_settings.simulate_wallet_keypair_json {
-        current_settings.simulate_wallet_keypair_json = partial_settings.simulate_wallet_keypair_json;
-    }
-    if partial_settings.simulate_wallet_private_key_string != current_settings.simulate_wallet_private_key_string {
-        current_settings.simulate_wallet_private_key_string = partial_settings.simulate_wallet_private_key_string;
-    }
+    
+    // Get config path from environment or use default
+    let config_path = std::env::var("SOL_BEAST_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string());
     
     // Save updated settings to config.toml
-    if let Err(e) = (*current_settings).save_to_file("config.toml") {
+    if let Err(e) = current_settings.save_to_file(&config_path) {
         let error_msg = format!("Failed to save settings to file: {}", e);
         warn!("{}", error_msg);
         bot_control.add_log("error", error_msg.clone(), None).await;
@@ -541,3 +454,4 @@ async fn get_trades_handler(
     let trades = state.trades.lock().await;
     Json(trades.clone())
 }
+

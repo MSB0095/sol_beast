@@ -9,16 +9,22 @@ import LogsPanel from './components/LogsPanel'
 import BotControl from './components/BotControl'
 import NewCoinsPanel from './components/NewCoinsPanel'
 import TradingHistory from './components/TradingHistory'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import './App.css'
 
 function App() {
-  const { initializeConnection, status, mode, runningState } = useBotStore()
+  const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
 
   useEffect(() => {
     initializeConnection()
     fetchSettings()
-  }, [initializeConnection, fetchSettings])
+
+    // Cleanup on unmount
+    return () => {
+      cleanup()
+    }
+  }, [initializeConnection, cleanup, fetchSettings])
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-sol-darker via-sol-dark to-sol-darker">
@@ -47,12 +53,36 @@ function App() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Content Area */}
           <div className="lg:col-span-2">
-            {activeTab === 'dashboard' && <Dashboard />}
-            {activeTab === 'configuration' && <ConfigurationPanel />}
-            {activeTab === 'holdings' && <HoldingsPanel />}
-            {activeTab === 'logs' && <LogsPanel />}
-            {activeTab === 'newcoins' && <NewCoinsPanel />}
-            {activeTab === 'trades' && <TradingHistory />}
+            {activeTab === 'dashboard' && (
+              <ErrorBoundary>
+                <Dashboard />
+              </ErrorBoundary>
+            )}
+            {activeTab === 'configuration' && (
+              <ErrorBoundary>
+                <ConfigurationPanel />
+              </ErrorBoundary>
+            )}
+            {activeTab === 'holdings' && (
+              <ErrorBoundary>
+                <HoldingsPanel />
+              </ErrorBoundary>
+            )}
+            {activeTab === 'logs' && (
+              <ErrorBoundary>
+                <LogsPanel />
+              </ErrorBoundary>
+            )}
+            {activeTab === 'newcoins' && (
+              <ErrorBoundary>
+                <NewCoinsPanel />
+              </ErrorBoundary>
+            )}
+            {activeTab === 'trades' && (
+              <ErrorBoundary>
+                <TradingHistory />
+              </ErrorBoundary>
+            )}
           </div>
 
           {/* Sidebar */}

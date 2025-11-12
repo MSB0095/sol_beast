@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Coins, ExternalLink, TrendingUp, Clock, User } from 'lucide-react'
+import { API_DETECTED_COINS_URL } from '../config'
 
 interface DetectedCoin {
   mint: string
@@ -21,7 +22,7 @@ export default function NewCoinsPanel() {
   useEffect(() => {
     const fetchCoins = async () => {
       try {
-        const response = await fetch('http://localhost:8080/detected-coins')
+        const response = await fetch(API_DETECTED_COINS_URL)
         if (response.ok) {
           const data = await response.json()
           setCoins(data)

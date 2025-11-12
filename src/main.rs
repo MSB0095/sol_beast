@@ -54,6 +54,8 @@ use std::str::FromStr;
 static LAST_MAX_HELD_LOG: Lazy<tokio::sync::Mutex<Option<Instant>>> =
     Lazy::new(|| tokio::sync::Mutex::new(None));
 const MAX_HELD_LOG_DEBOUNCE_SECS: u64 = 60;
+const API_PORT: u16 = 8080;
+const API_HOST: &str = "0.0.0.0";
 use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
@@ -118,7 +120,11 @@ async fn main() -> Result<(), AppError> {
         std::process::id(),
         std::env::var("RUST_LOG").ok()
     );
-    let settings = Arc::new(Settings::from_file("config.toml")?);
+    
+    let config_path = std::env::var("SOL_BEAST_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string());
+    let settings = Arc::new(Settings::from_file(&config_path)?);
+    settings.validate()?;
+    
     let rpc_client = Arc::new(RpcClient::new(settings.solana_rpc_urls[0].clone()));
     // Touch these settings here so they are used by the binary (avoid warnings)
     let price_source_cfg = settings.price_source.clone();
@@ -203,13 +209,28 @@ async fn main() -> Result<(), AppError> {
         None
     };
 
+    // Create bot control early so it can be used by all tasks
+    let initial_mode = if is_real {
+        api::BotMode::Real
+    } else {
+        api::BotMode::DryRun
+    };
+    let bot_control = Arc::new(api::BotControl::new_with_mode(initial_mode));
+
+    // Set global bot control for logging across the application
+    if BOT_CONTROL.set(bot_control.clone()).is_err() {
+        return Err(AppError::Init(
+            "Failed to set global bot control".to_string(),
+        ));
+    }
+
     // Spawn price monitoring
-    let _holdings_clone = holdings.clone();
-    let _price_cache_clone = price_cache.clone();
-    let _settings_clone = settings.clone();
-    let _keypair_clone = keypair.clone();
+    let holdings_clone_monitor = holdings.clone();
+    let price_cache_clone_monitor = price_cache.clone();
+    let settings_clone_monitor = settings.clone();
+    let keypair_clone_monitor = keypair.clone();
     let simulate_keypair_clone = simulate_keypair.clone();
-    let _trades_map_clone = trades_map.clone();
+    let trades_map_clone_monitor = trades_map.clone();
 
     // Spawn WSS tasks and keep control senders so we can request subscriptions
     let mut ws_control_senders: Vec<mpsc::Sender<WsRequest>> = Vec::new();
@@ -253,55 +274,34 @@ async fn main() -> Result<(), AppError> {
 
     // Now spawn price monitoring (after ws_control_senders exists so monitor
     // can unsubscribe subscriptions on sell).
-    let holdings_clone = holdings.clone();
-    let price_cache_clone = price_cache.clone();
     let rpc_client_clone = rpc_client.clone();
-    let settings_clone = settings.clone();
-    let keypair_clone = keypair
-        .as_ref()
-        .map(|kp| {
-            Keypair::try_from(kp.to_bytes().as_ref())
-                .map_err(|e| AppError::InvalidKeypair(e.to_string()))
-        })
-        .transpose()?;
-    let trades_map_clone = trades_map.clone();
     let ws_control_senders_clone_for_monitor = ws_control_senders.clone();
     let sub_map_clone_for_monitor = sub_map.clone();
     let next_wss_sender_clone_for_monitor = next_wss_sender.clone();
     let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();
     let trades_list_clone_for_monitor = trades_list.clone();
+    let bot_control_for_monitor = bot_control.clone();
+    
     let monitor_handle = tokio::spawn(async move {
         monitor::monitor_holdings(
-            holdings_clone,
-            price_cache_clone,
+            holdings_clone_monitor,
+            price_cache_clone_monitor,
             rpc_client_clone,
             is_real,
-            keypair_clone.as_ref(),
+            keypair_clone_monitor.as_deref(),
             simulate_keypair_clone_for_monitor.as_deref(),
-            settings_clone,
-            trades_map_clone,
+            settings_clone_monitor,
+            trades_map_clone_monitor,
             ws_control_senders_clone_for_monitor,
             sub_map_clone_for_monitor,
             next_wss_sender_clone_for_monitor,
             trades_list_clone_for_monitor,
+            bot_control_for_monitor,
         )
         .await
     });
 
     // Start REST API server
-    let initial_mode = if is_real {
-        api::BotMode::Real
-    } else {
-        api::BotMode::DryRun
-    };
-    let bot_control = Arc::new(api::BotControl::new_with_mode(initial_mode));
-
-    // Set global bot control for logging across the application
-    if BOT_CONTROL.set(bot_control.clone()).is_err() {
-        return Err(AppError::Init(
-            "Failed to set global bot control".to_string(),
-        ));
-    }
 
     let api_stats = Arc::new(tokio::sync::Mutex::new(BotStats {
         total_buys: 0,
@@ -364,6 +364,7 @@ async fn main() -> Result<(), AppError> {
     let holdings_for_sync = holdings.clone();
     let api_stats_for_sync = api_stats.clone();
     let bot_control_for_sync = bot_control.clone();
+    let trades_for_sync = trades_list.clone();
     let start_time = Instant::now();
     let api_sync_handle = tokio::spawn(async move {
         loop {
@@ -381,8 +382,33 @@ async fn main() -> Result<(), AppError> {
                     .collect()
             };
 
+            // Calculate trade stats from trades list
+            let (total_buys, total_sells, total_profit) = {
+                let trades = trades_for_sync.lock().await;
+                let mut buys = 0u64;
+                let mut sells = 0u64;
+                let mut profit = 0.0f64;
+                
+                for trade in trades.iter() {
+                    if trade.trade_type == "buy" {
+                        buys += 1;
+                    } else if trade.trade_type == "sell" {
+                        sells += 1;
+                        // Add profit from sell trades
+                        if let Some(pl) = trade.profit_loss {
+                            profit += pl;
+                        }
+                    }
+                }
+                
+                (buys, sells, profit)
+            };
+
             let mut stats = api_stats_for_sync.lock().await;
             stats.current_holdings = holdings_vec;
+            stats.total_buys = total_buys;
+            stats.total_sells = total_sells;
+            stats.total_profit = total_profit;
             stats.uptime_secs = start_time.elapsed().as_secs();
             stats.last_activity = chrono::Utc::now().to_rfc3339();
 
@@ -404,17 +430,18 @@ async fn main() -> Result<(), AppError> {
 
     let api_router = create_router(api_state);
     let api_server_handle = tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await;
+        let bind_addr = format!("{}:{}", API_HOST, API_PORT);
+        let listener = tokio::net::TcpListener::bind(&bind_addr).await;
         match listener {
             Ok(l) => {
-                info!("API server listening on 0.0.0.0:8080");
+                info!("API server listening on {}", bind_addr);
                 if let Err(e) = axum::serve(l, api_router).await {
                     error!("API server failed: {}", e);
                     bot_log!("error", "API server failed", format!("{}", e));
                 }
             }
             Err(e) => {
-                error!("Failed to bind API server to 0.0.0.0:8080: {}", e);
+                error!("Failed to bind API server to {}: {}", bind_addr, e);
                 bot_log!("error", "Failed to bind API server", format!("{}", e));
             }
         }
@@ -904,6 +931,8 @@ async fn handle_new_token(
                                             // Add buy trade record
                                             {
                                                 let mut trades = trades_list.lock().await;
+                                                // Convert amount from microtokens to tokens
+                                                let amount_tokens = holding.amount as f64 / 1_000_000.0;
                                                 trades.insert(
                                                     0,
                                                     api::TradeRecord {
@@ -921,7 +950,7 @@ async fn handle_new_token(
                                                         timestamp: holding.buy_time.to_rfc3339(),
                                                         tx_signature: None, // TX signature not readily available here
                                                         amount_sol: settings.buy_amount,
-                                                        amount_tokens: holding.amount as f64,
+                                                        amount_tokens,
                                                         price_per_token: holding.buy_price,
                                                         profit_loss: None,
                                                         profit_loss_percent: None,

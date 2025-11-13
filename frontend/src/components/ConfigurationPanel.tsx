@@ -91,7 +91,7 @@ export default function ConfigurationPanel() {
   return (
     <div className="space-y-8">
       {error && (
-        <div className="bg-red-900/20 border border-red-500 rounded-lg p-4 flex gap-3">
+        <div className="bg-red-900/20 border border-red-500/50 rounded-xl p-4 flex gap-3 backdrop-blur-sm shadow-card">
           <AlertCircle size={20} className="text-red-400 flex-shrink-0 mt-0.5" />
           <div>
             <p className="text-red-200 font-semibold">Error</p>
@@ -101,15 +101,15 @@ export default function ConfigurationPanel() {
       )}
 
       {successMessage && (
-        <div className="bg-green-900/20 border border-green-500 rounded-lg p-4 flex gap-3">
+        <div className="bg-green-900/20 border border-green-500/50 rounded-xl p-4 flex gap-3 backdrop-blur-sm shadow-card">
           <CheckCircle size={20} className="text-green-400 flex-shrink-0 mt-0.5" />
           <p className="text-green-200">{successMessage}</p>
         </div>
       )}
 
       {sections.map((section, idx) => (
-        <div key={idx} className="bg-sol-dark rounded-lg border border-gray-700 p-6">
-          <h3 className="text-lg font-semibold mb-6 text-sol-purple">{section.title}</h3>
+        <div key={idx} className="card-enhanced rounded-xl p-6">
+          <h3 className="text-lg font-semibold mb-6 gradient-text">{section.title}</h3>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {section.settings.map((setting) => (
@@ -133,7 +133,7 @@ export default function ConfigurationPanel() {
                     type="number"
                     value={settings[setting.key] as any}
                     onChange={(e) => handleChange(setting.key, parseFloat(e.target.value))}
-                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-lg text-white focus:border-sol-purple focus:outline-none"
+                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-xl text-white focus:border-sol-purple focus:outline-none focus:shadow-glow transition-all"
                     step="any"
                   />
                 )}
@@ -142,7 +142,7 @@ export default function ConfigurationPanel() {
                   <textarea
                     value={(settings[setting.key] as string[]).join('\n')}
                     onChange={(e) => handleChange(setting.key, e.target.value.split('\n').filter(Boolean))}
-                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-lg text-white focus:border-sol-purple focus:outline-none min-h-20 font-mono text-sm"
+                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-xl text-white focus:border-sol-purple focus:outline-none focus:shadow-glow min-h-20 font-mono text-sm transition-all"
                   />
                 )}
 
@@ -150,7 +150,7 @@ export default function ConfigurationPanel() {
                   <select
                     value={settings[setting.key] as string}
                     onChange={(e) => handleChange(setting.key, e.target.value)}
-                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-lg text-white focus:border-sol-purple focus:outline-none"
+                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-xl text-white focus:border-sol-purple focus:outline-none focus:shadow-glow transition-all"
                   >
                     {(setting as any).options?.map((opt: string) => (
                       <option key={opt} value={opt}>{opt}</option>
@@ -164,11 +164,11 @@ export default function ConfigurationPanel() {
       ))}
 
       {/* Save Button */}
-      <div className="flex justify-end gap-3 sticky bottom-0 bg-sol-dark py-4 px-6 rounded-lg border border-gray-700">
+      <div className="flex justify-end gap-3 sticky bottom-0 card-enhanced py-4 px-6 rounded-xl">
         <button
           onClick={handleSave}
           disabled={saving}
-          className="flex items-center gap-2 px-6 py-2 bg-sol-purple text-black font-semibold rounded-lg hover:bg-opacity-90 disabled:opacity-50 transition-all"
+          className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-sol-purple to-sol-cyan text-black font-semibold rounded-xl hover:shadow-glow disabled:opacity-50 transition-all hover:scale-105 shadow-card"
         >
           <Save size={18} />
           {saving ? 'Saving...' : 'Save Settings'}

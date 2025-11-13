@@ -86,7 +86,7 @@ export default function TradingHistory() {
 
   if (trades.length === 0) {
     return (
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-12 text-center">
+      <div className="card-enhanced rounded-xl p-12 text-center">
         <TrendingUp size={48} className="mx-auto text-gray-500 mb-4 opacity-50" />
         <p className="text-gray-400">No trading history yet</p>
         <p className="text-gray-500 text-sm">Trades will appear here once executed</p>
@@ -97,7 +97,7 @@ export default function TradingHistory() {
   return (
     <div className="space-y-4">
       {/* Controls */}
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+      <div className="card-enhanced rounded-xl p-4">
         <div className="flex flex-wrap gap-4 items-center justify-between">
           {/* Filter Tabs */}
           <div className="flex gap-2">
@@ -107,7 +107,7 @@ export default function TradingHistory() {
                 onClick={() => setFilter(type)}
                 className={`px-4 py-2 rounded-lg transition-colors capitalize ${
                   filter === type
-                    ? 'bg-sol-purple text-white'
+                    ? 'bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow'
                     : 'bg-sol-darker text-gray-400 hover:bg-gray-700'
                 }`}
               >
@@ -141,7 +141,7 @@ export default function TradingHistory() {
             </button>
             <button
               onClick={exportToCSV}
-              className="flex items-center gap-2 px-4 py-2 bg-sol-purple text-white rounded-lg hover:bg-sol-purple-light transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow rounded-lg hover:bg-sol-purple-light transition-colors"
             >
               <Download size={16} />
               Export CSV
@@ -151,7 +151,7 @@ export default function TradingHistory() {
       </div>
 
       {/* Trades Table */}
-      <div className="bg-sol-dark rounded-lg border border-gray-700 overflow-hidden">
+      <div className="card-enhanced rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -282,26 +282,26 @@ export default function TradingHistory() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+        <div className="card-enhanced rounded-xl p-4">
           <p className="text-gray-400 text-sm">Total Trades</p>
           <p className="text-2xl font-bold text-sol-purple mt-2">{trades.length}</p>
         </div>
         
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+        <div className="card-enhanced rounded-xl p-4">
           <p className="text-gray-400 text-sm">Total Buys</p>
           <p className="text-2xl font-bold text-green-400 mt-2">
             {trades.filter(t => t.type === 'buy').length}
           </p>
         </div>
         
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+        <div className="card-enhanced rounded-xl p-4">
           <p className="text-gray-400 text-sm">Total Sells</p>
           <p className="text-2xl font-bold text-red-400 mt-2">
             {trades.filter(t => t.type === 'sell').length}
           </p>
         </div>
         
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+        <div className="card-enhanced rounded-xl p-4">
           <p className="text-gray-400 text-sm">Total P/L</p>
           <p className={`text-2xl font-bold mt-2 ${
             trades.reduce((sum, t) => sum + (t.profit_loss || 0), 0) >= 0 

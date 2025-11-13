@@ -23,11 +23,11 @@ export default function BotControl() {
   }
 
   return (
-    <div className="bg-sol-dark rounded-lg border border-gray-700 p-6">
-      <h3 className="text-lg font-semibold mb-4 text-white">Bot Control</h3>
+    <div className="card-enhanced rounded-xl p-6">
+      <h3 className="text-lg font-semibold mb-4 gradient-text">Bot Control</h3>
       
       {/* Status indicator */}
-      <div className="mb-6 p-4 rounded-lg bg-gradient-to-r from-gray-800 to-gray-900 border border-gray-700">
+      <div className="mb-6 p-4 rounded-xl bg-gradient-to-r from-sol-darker to-gray-900 border border-gray-700/50">
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-gray-400 mb-1">Status</p>
@@ -46,7 +46,7 @@ export default function BotControl() {
             <Loader2 size={24} className="text-yellow-400 animate-spin" />
           )}
           {isRunning && (
-            <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+            <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse shadow-glow"></div>
           )}
         </div>
       </div>
@@ -56,10 +56,10 @@ export default function BotControl() {
         <label className="text-sm text-gray-400 mb-2 block">Trading Mode</label>
         <div className="grid grid-cols-2 gap-2">
           <div
-            className={`p-3 rounded-lg border transition-all ${
+            className={`p-3 rounded-xl border transition-all ${
               mode === 'dry-run'
-                ? 'bg-blue-500/20 border-blue-500 text-blue-300'
-                : 'bg-gray-800 border-gray-700 text-gray-500'
+                ? 'bg-blue-500/20 border-blue-500/50 text-blue-300 shadow-card'
+                : 'bg-gray-800/50 border-gray-700 text-gray-500'
             }`}
           >
             <div className="flex items-center justify-center gap-2">
@@ -70,10 +70,10 @@ export default function BotControl() {
           </div>
           
           <div
-            className={`p-3 rounded-lg border transition-all ${
+            className={`p-3 rounded-xl border transition-all ${
               mode === 'real'
-                ? 'bg-orange-500/20 border-orange-500 text-orange-300'
-                : 'bg-gray-800 border-gray-700 text-gray-500'
+                ? 'bg-orange-500/20 border-orange-500/50 text-orange-300 shadow-card'
+                : 'bg-gray-800/50 border-gray-700 text-gray-500'
             }`}
           >
             <div className="flex items-center justify-center gap-2">
@@ -90,7 +90,7 @@ export default function BotControl() {
 
       {/* Warning for real mode */}
       {mode === 'real' && (
-        <div className="mb-6 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
+        <div className="mb-6 p-3 bg-orange-500/10 border border-orange-500/30 rounded-xl backdrop-blur-sm">
           <p className="text-orange-300 text-sm flex items-start gap-2">
             <Zap size={16} className="flex-shrink-0 mt-0.5" />
             <span>Real trading mode is active. Trades will use actual SOL.</span>
@@ -103,7 +103,7 @@ export default function BotControl() {
         <button
           onClick={handleStart}
           disabled={!isStopped || isTransitioning}
-          className="flex-1 py-3 px-4 bg-green-500 hover:bg-green-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+          className="flex-1 py-3 px-4 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 shadow-card hover:shadow-card-hover hover:scale-105"
         >
           {isStarting ? (
             <>
@@ -121,7 +121,7 @@ export default function BotControl() {
         <button
           onClick={handleStop}
           disabled={!isRunning || isTransitioning}
-          className="flex-1 py-3 px-4 bg-red-500 hover:bg-red-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+          className="flex-1 py-3 px-4 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 shadow-card hover:shadow-card-hover hover:scale-105"
         >
           {isStopping ? (
             <>

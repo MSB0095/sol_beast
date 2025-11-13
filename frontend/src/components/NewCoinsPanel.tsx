@@ -46,7 +46,7 @@ export default function NewCoinsPanel() {
 
   if (coins.length === 0) {
     return (
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-12 text-center">
+      <div className="card-enhanced rounded-xl p-12 text-center">
         <Coins size={48} className="mx-auto text-gray-500 mb-4 opacity-50" />
         <p className="text-gray-400">No new coins detected yet</p>
         <p className="text-gray-500 text-sm">Bot is monitoring for new token launches</p>
@@ -57,7 +57,7 @@ export default function NewCoinsPanel() {
   return (
     <div className="space-y-4">
       {/* Filter Tabs */}
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+      <div className="card-enhanced rounded-xl p-4">
         <div className="flex gap-2">
           {(['all', 'detected', 'bought', 'skipped'] as const).map((status) => (
             <button
@@ -65,7 +65,7 @@ export default function NewCoinsPanel() {
               onClick={() => setFilter(status)}
               className={`px-4 py-2 rounded-lg transition-colors capitalize ${
                 filter === status
-                  ? 'bg-sol-purple text-white'
+                  ? 'bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow'
                   : 'bg-sol-darker text-gray-400 hover:bg-gray-700'
               }`}
             >
@@ -80,7 +80,7 @@ export default function NewCoinsPanel() {
         {filteredCoins.map((coin) => (
           <div 
             key={coin.mint} 
-            className="bg-sol-dark rounded-lg border border-gray-700 p-6 hover:border-sol-purple transition-colors"
+            className="card-enhanced rounded-xl p-6 hover:border-sol-purple transition-colors"
           >
             <div className="flex gap-4">
               {/* Token Image */}

@@ -2,12 +2,67 @@
   max-width: 1400px;
 }
 
-/* Smooth transitions */
+/* Smooth transitions with enhanced properties */
 * {
-  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+  transition: background-color 0.3s ease, 
+              color 0.3s ease, 
+              border-color 0.3s ease,
+              box-shadow 0.3s ease,
+              transform 0.3s ease;
 }
 
 /* Disable transition on important state changes */
 .no-transition {
   transition: none !important;
+}
+
+/* Enhanced card styling */
+.card-enhanced {
+  background: linear-gradient(135deg, rgba(11, 14, 17, 0.9) 0%, rgba(8, 10, 13, 0.95) 100%);
+  border: 1px solid rgba(20, 241, 149, 0.15);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.24);
+  transition: all 0.3s ease;
+}
+
+.card-enhanced:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.4), 0 4px 8px -2px rgba(0, 0, 0, 0.3);
+  border-color: rgba(20, 241, 149, 0.3);
+}
+
+/* Button enhancement */
+.btn-primary {
+  background: linear-gradient(135deg, #14F195 0%, #10d882 100%);
+  transition: all 0.3s ease;
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, #10d882 0%, #0ec874 100%);
+  box-shadow: 0 0 20px rgba(20, 241, 149, 0.4);
+  transform: translateY(-1px);
+}
+
+/* Status indicators with glow */
+.status-online {
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.5);
+}
+
+.status-offline {
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+
+/* Animated shimmer effect */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.shimmer {
+  animation: shimmer 2s infinite linear;
+  background: linear-gradient(90deg, transparent, rgba(20, 241, 149, 0.1), transparent);
+  background-size: 1000px 100%;
 }

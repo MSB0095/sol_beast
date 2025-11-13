@@ -27,24 +27,30 @@ function App() {
   }, [initializeConnection, cleanup, fetchSettings])
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sol-darker via-sol-dark to-sol-darker">
+    <div className="min-h-screen bg-gradient-to-br from-sol-darker via-sol-dark to-sol-darker animate-gradient">
       <Header />
       
       <main className="container mx-auto px-4 py-8">
         {status === 'disconnected' && (
-          <div className="mb-4 p-4 bg-red-900/20 border border-red-500 rounded-lg text-red-200">
-            <p className="font-semibold">Connection Status: Disconnected</p>
-            <p className="text-sm">Trying to connect to backend at http://localhost:8080...</p>
+          <div className="mb-4 p-4 bg-red-900/20 border border-red-500/50 rounded-xl text-red-200 backdrop-blur-sm shadow-card">
+            <p className="font-semibold flex items-center gap-2">
+              <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+              Connection Status: Disconnected
+            </p>
+            <p className="text-sm mt-2 text-red-300/80">Trying to connect to backend at http://localhost:8080...</p>
           </div>
         )}
 
         {status === 'connected' && (
-          <div className="mb-4 p-4 bg-green-900/20 border border-green-500 rounded-lg text-green-200 flex items-center justify-between">
+          <div className="mb-4 p-4 bg-green-900/20 border border-green-500/50 rounded-xl text-green-200 flex items-center justify-between backdrop-blur-sm shadow-card glow-on-hover">
             <div>
-              <p className="font-semibold">✓ Connected to Trading Bot</p>
-              <p className="text-sm mt-1">
-                Mode: <span className="font-mono">{mode}</span> • 
-                Status: <span className="font-mono">{runningState}</span>
+              <p className="font-semibold flex items-center gap-2">
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse shadow-glow"></span>
+                ✓ Connected to Trading Bot
+              </p>
+              <p className="text-sm mt-2 text-green-300/80">
+                Mode: <span className="font-mono bg-green-950/30 px-2 py-0.5 rounded">{mode}</span> • 
+                Status: <span className="font-mono bg-green-950/30 px-2 py-0.5 rounded">{runningState}</span>
               </p>
             </div>
           </div>
@@ -91,24 +97,24 @@ function App() {
             <BotControl />
             
             {/* Quick Stats */}
-            <div className="bg-sol-dark rounded-lg border border-gray-700 p-6 sticky top-24">
-              <h3 className="text-lg font-semibold mb-4 text-sol-purple">Quick Stats</h3>
-              <div className="space-y-3 text-sm">
-                <div className="flex justify-between">
+            <div className="card-enhanced rounded-xl p-6 sticky top-24">
+              <h3 className="text-lg font-semibold mb-4 gradient-text">Quick Stats</h3>
+              <div className="space-y-4 text-sm">
+                <div className="flex justify-between items-center p-2 rounded-lg bg-sol-darker/50">
                   <span className="text-gray-400">Connection:</span>
-                  <span className={status === 'connected' ? 'text-green-400' : 'text-red-400'}>
-                    {status === 'connected' ? 'Online' : 'Offline'}
+                  <span className={`font-semibold ${status === 'connected' ? 'text-green-400' : 'text-red-400'}`}>
+                    {status === 'connected' ? '● Online' : '○ Offline'}
                   </span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center p-2 rounded-lg bg-sol-darker/50">
                   <span className="text-gray-400">Bot State:</span>
-                  <span className={runningState === 'running' ? 'text-green-400' : 'text-gray-400'}>
+                  <span className={`font-semibold ${runningState === 'running' ? 'text-green-400' : 'text-gray-400'}`}>
                     {runningState}
                   </span>
                 </div>
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center p-2 rounded-lg bg-sol-darker/50">
                   <span className="text-gray-400">Trading Mode:</span>
-                  <span className={mode === 'real' ? 'text-orange-400' : 'text-blue-400'}>
+                  <span className={`font-semibold ${mode === 'real' ? 'text-orange-400' : 'text-blue-400'}`}>
                     {mode === 'real' ? '⚡ Real' : '🛡️ Dry-Run'}
                   </span>
                 </div>

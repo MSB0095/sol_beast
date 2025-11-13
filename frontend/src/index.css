@@ -14,26 +14,75 @@ body {
     'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: #080A0D;
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
 }
 
+/* Custom Scrollbar with gradient accent */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1a1d20;
+  background: #0B0E11;
+  border-radius: 8px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #404b5c;
-  border-radius: 4px;
+  background: linear-gradient(135deg, #14F195 0%, #10d882 100%);
+  border-radius: 8px;
+  border: 2px solid #0B0E11;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #505a6c;
+  background: linear-gradient(135deg, #10d882 0%, #0ec874 100%);
+  box-shadow: 0 0 10px rgba(20, 241, 149, 0.4);
+}
+
+/* Glass morphism utility class */
+.glass-card {
+  background: rgba(11, 14, 17, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(20, 241, 149, 0.1);
+  box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+}
+
+/* Animated gradient background */
+@keyframes gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: gradient-shift 15s ease infinite;
+}
+
+/* Glow effect on hover */
+.glow-on-hover {
+  transition: all 0.3s ease;
+}
+
+.glow-on-hover:hover {
+  box-shadow: 0 0 20px rgba(20, 241, 149, 0.4);
+  border-color: rgba(20, 241, 149, 0.5);
+}
+
+/* Smooth gradient text */
+.gradient-text {
+  background: linear-gradient(135deg, #14F195 0%, #06B6D4 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }

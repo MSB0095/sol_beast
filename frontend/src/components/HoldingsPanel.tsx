@@ -6,18 +6,18 @@ export default function HoldingsPanel() {
 
   if (!stats?.current_holdings || stats.current_holdings.length === 0) {
     return (
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-12 text-center">
+      <div className="card-enhanced rounded-xl p-12 text-center">
         <Clock size={48} className="mx-auto text-gray-500 mb-4 opacity-50" />
-        <p className="text-gray-400">No active holdings</p>
-        <p className="text-gray-500 text-sm">Trades will appear here when they're active</p>
+        <p className="text-gray-400 font-semibold">No active holdings</p>
+        <p className="text-gray-500 text-sm mt-2">Trades will appear here when they're active</p>
       </div>
     )
   }
 
   return (
     <div className="space-y-4">
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-6">
-        <h3 className="text-lg font-semibold mb-4">Current Holdings ({stats.current_holdings.length})</h3>
+      <div className="card-enhanced rounded-xl p-6">
+        <h3 className="text-lg font-semibold mb-4 gradient-text">Current Holdings ({stats.current_holdings.length})</h3>
         
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -42,7 +42,7 @@ export default function HoldingsPanel() {
                 const seconds = holdTime % 60
 
                 return (
-                  <tr key={mint} className="border-b border-gray-700 hover:bg-sol-darker transition-colors">
+                  <tr key={mint} className="border-b border-gray-700/50 hover:bg-sol-darker/50 transition-colors">
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         {image ? (
@@ -110,23 +110,23 @@ export default function HoldingsPanel() {
 
       {/* Summary */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
-          <p className="text-gray-400 text-sm">Total Holdings</p>
-          <p className="text-2xl font-bold text-sol-purple mt-2">
+        <div className="card-enhanced rounded-xl p-4 hover:scale-105">
+          <p className="text-gray-400 text-sm font-medium mb-2">Total Holdings</p>
+          <p className="text-2xl font-bold gradient-text">
             {stats.current_holdings.length} positions
           </p>
         </div>
 
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
-          <p className="text-gray-400 text-sm">Avg Entry Price</p>
-          <p className="text-2xl font-bold text-blue-400 mt-2">
+        <div className="card-enhanced rounded-xl p-4 hover:scale-105">
+          <p className="text-gray-400 text-sm font-medium mb-2">Avg Entry Price</p>
+          <p className="text-2xl font-bold text-blue-400">
             {(stats.current_holdings.reduce((sum, h) => sum + h.buy_price, 0) / stats.current_holdings.length).toFixed(9)} SOL
           </p>
         </div>
 
-        <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
-          <p className="text-gray-400 text-sm">Total Tokens</p>
-          <p className="text-2xl font-bold text-green-400 mt-2">
+        <div className="card-enhanced rounded-xl p-4 hover:scale-105">
+          <p className="text-gray-400 text-sm font-medium mb-2">Total Tokens</p>
+          <p className="text-2xl font-bold text-green-400">
             {(stats.current_holdings.reduce((sum, h) => sum + h.amount, 0) / 1_000_000).toLocaleString()}
           </p>
         </div>

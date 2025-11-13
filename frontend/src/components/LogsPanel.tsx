@@ -61,14 +61,14 @@ export default function LogsPanel() {
   return (
     <div className="space-y-4">
       {/* Header with controls */}
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-4">
+      <div className="card-enhanced rounded-xl p-4">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold">Bot Logs</h3>
+          <h3 className="text-lg font-semibold gradient-text">Bot Logs</h3>
           <div className="flex gap-2">
             <button
               onClick={exportLogs}
               disabled={filteredLogs.length === 0}
-              className="px-3 py-1.5 bg-sol-purple/20 hover:bg-sol-purple/30 border border-sol-purple rounded text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 bg-sol-purple/20 hover:bg-sol-purple/30 border border-sol-purple/50 rounded-lg text-sm flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105"
             >
               <Download size={14} />
               Export
@@ -76,7 +76,7 @@ export default function LogsPanel() {
             <button
               onClick={clearLogs}
               disabled={logs.length === 0}
-              className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 border border-red-500 rounded text-sm flex items-center gap-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 border border-red-500/50 rounded-lg text-sm flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105"
             >
               <Trash2 size={14} />
               Clear
@@ -90,9 +90,9 @@ export default function LogsPanel() {
             <button
               key={level}
               onClick={() => setFilter(level)}
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
                 filter === level
-                  ? 'bg-sol-purple text-white'
+                  ? 'bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow'
                   : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
               }`}
             >
@@ -108,7 +108,7 @@ export default function LogsPanel() {
       </div>
 
       {/* Logs display */}
-      <div className="bg-sol-dark rounded-lg border border-gray-700 p-4 max-h-[600px] overflow-y-auto">
+      <div className="card-enhanced rounded-xl p-4 max-h-[600px] overflow-y-auto">
         {filteredLogs.length === 0 ? (
           <div className="text-center py-12 text-gray-400">
             <Info size={48} className="mx-auto mb-3 opacity-30" />
@@ -162,30 +162,30 @@ export default function LogsPanel() {
 
       {/* Stats summary */}
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-sol-dark rounded-lg border border-blue-500/20 p-4">
+        <div className="card-enhanced rounded-xl border-blue-500/20 p-4 hover:scale-105">
           <div className="flex items-center gap-2 mb-2">
             <Info size={16} className="text-blue-400" />
-            <span className="text-sm text-gray-400">Info</span>
+            <span className="text-sm text-gray-400 font-medium">Info</span>
           </div>
           <p className="text-2xl font-bold text-blue-400">
             {logs.filter(l => l.level === 'info').length}
           </p>
         </div>
         
-        <div className="bg-sol-dark rounded-lg border border-yellow-500/20 p-4">
+        <div className="card-enhanced rounded-xl border-yellow-500/20 p-4 hover:scale-105">
           <div className="flex items-center gap-2 mb-2">
             <AlertTriangle size={16} className="text-yellow-400" />
-            <span className="text-sm text-gray-400">Warnings</span>
+            <span className="text-sm text-gray-400 font-medium">Warnings</span>
           </div>
           <p className="text-2xl font-bold text-yellow-400">
             {logs.filter(l => l.level === 'warn').length}
           </p>
         </div>
         
-        <div className="bg-sol-dark rounded-lg border border-red-500/20 p-4">
+        <div className="card-enhanced rounded-xl border-red-500/20 p-4 hover:scale-105">
           <div className="flex items-center gap-2 mb-2">
             <AlertCircle size={16} className="text-red-400" />
-            <span className="text-sm text-gray-400">Errors</span>
+            <span className="text-sm text-gray-400 font-medium">Errors</span>
           </div>
           <p className="text-2xl font-bold text-red-400">
             {logs.filter(l => l.level === 'error').length}

@@ -19,6 +19,4 @@ pub enum AppError {
     IntConversion(#[from] TryFromIntError),
     #[error("Initialization error: {0}")]
     Init(String),
-    #[error("Conversion error: {0}")]
-    Conversion(String),
 }

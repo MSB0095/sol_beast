@@ -86,10 +86,10 @@ export default function TradingHistory() {
 
   if (trades.length === 0) {
     return (
-      <div className="card-enhanced rounded-xl p-12 text-center">
-        <TrendingUp size={48} className="mx-auto text-gray-500 mb-4 opacity-50" />
-        <p className="text-gray-400">No trading history yet</p>
-        <p className="text-gray-500 text-sm">Trades will appear here once executed</p>
+      <div className="cyber-card rounded-xl p-12 text-center" style={{ backgroundColor: 'var(--theme-bg-card)' }}>
+        <TrendingUp size={48} className="mx-auto mb-4 opacity-50" style={{ color: 'var(--theme-text-muted)' }} />
+        <p className="uppercase tracking-wider" style={{ color: 'var(--theme-text-secondary)' }}>No trading history yet</p>
+        <p className="text-sm font-mono" style={{ color: 'var(--theme-text-muted)' }}>Trades will appear here once executed</p>
       </div>
     )
   }
@@ -97,7 +97,7 @@ export default function TradingHistory() {
   return (
     <div className="space-y-4">
       {/* Controls */}
-      <div className="card-enhanced rounded-xl p-4">
+      <div className="cyber-card rounded-xl p-4" style={{ backgroundColor: 'var(--theme-bg-card)' }}>
         <div className="flex flex-wrap gap-4 items-center justify-between">
           {/* Filter Tabs */}
           <div className="flex gap-2">
@@ -105,11 +105,17 @@ export default function TradingHistory() {
               <button
                 key={type}
                 onClick={() => setFilter(type)}
-                className={`px-4 py-2 rounded-lg transition-colors capitalize ${
-                  filter === type
-                    ? 'bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow'
-                    : 'bg-sol-darker text-gray-400 hover:bg-gray-700'
-                }`}
+                className="px-4 py-2 rounded-lg transition-colors uppercase tracking-wider font-semibold"
+                style={filter === type ? {
+                  backgroundColor: 'var(--theme-button-bg)',
+                  color: 'var(--theme-button-text)',
+                  border: '2px solid var(--theme-accent)',
+                  boxShadow: '0 0 15px var(--glow-color)'
+                } : {
+                  backgroundColor: 'var(--theme-bg-secondary)',
+                  color: 'var(--theme-text-muted)',
+                  border: '2px solid transparent'
+                }}
               >
                 {type} ({type === 'all' ? trades.length : trades.filter(t => t.type === type).length})
               </button>
@@ -119,13 +125,13 @@ export default function TradingHistory() {
           {/* Search */}
           <div className="flex gap-2 flex-1 max-w-md">
             <div className="relative flex-1">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--theme-text-muted)' }} />
               <input
                 type="text"
                 placeholder="Search by mint or symbol..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full bg-sol-darker border border-gray-700 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:border-sol-purple"
+                className="w-full rounded-lg pl-10 pr-4 py-2 text-sm"
               />
             </div>
           </div>
@@ -134,14 +140,19 @@ export default function TradingHistory() {
           <div className="flex gap-2">
             <button
               onClick={() => setSortBy(sortBy === 'time' ? 'profit' : 'time')}
-              className="flex items-center gap-2 px-4 py-2 bg-sol-darker text-gray-400 rounded-lg hover:bg-gray-700 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg transition-colors uppercase tracking-wide"
+              style={{
+                backgroundColor: 'var(--theme-bg-secondary)',
+                color: 'var(--theme-text-secondary)',
+                border: '1px solid var(--theme-accent)'
+              }}
             >
               <Filter size={16} />
               Sort by {sortBy === 'time' ? 'Time' : 'Profit'}
             </button>
             <button
               onClick={exportToCSV}
-              className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow rounded-lg hover:bg-sol-purple-light transition-colors"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg transition-colors uppercase tracking-wide"
             >
               <Download size={16} />
               Export CSV
@@ -151,11 +162,15 @@ export default function TradingHistory() {
       </div>
 
       {/* Trades Table */}
-      <div className="card-enhanced rounded-xl overflow-hidden">
+      <div className="cyber-card rounded-xl overflow-hidden" style={{ backgroundColor: 'var(--theme-bg-card)' }}>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-gray-400 bg-sol-darker border-b border-gray-700">
+              <tr className="border-b-2 uppercase tracking-wider font-semibold" style={{ 
+                color: 'var(--theme-text-secondary)',
+                backgroundColor: 'var(--theme-bg-secondary)',
+                borderColor: 'var(--theme-accent)'
+              }}>
                 <th className="text-left py-3 px-4">Type</th>
                 <th className="text-left py-3 px-4">Time</th>
                 <th className="text-left py-3 px-4">Token</th>

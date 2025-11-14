@@ -91,41 +91,55 @@ export default function ConfigurationPanel() {
   return (
     <div className="space-y-8">
       {error && (
-        <div className="bg-red-900/20 border border-red-500/50 rounded-xl p-4 flex gap-3 backdrop-blur-sm shadow-card">
-          <AlertCircle size={20} className="text-red-400 flex-shrink-0 mt-0.5" />
+        <div className="alert-error rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
+          <AlertCircle size={24} className="flex-shrink-0 mt-0.5 animate-pulse" />
           <div>
-            <p className="text-red-200 font-semibold">Error</p>
-            <p className="text-red-300 text-sm">{error}</p>
+            <p className="font-bold uppercase tracking-widest text-sm mb-1">SYSTEM ERROR</p>
+            <p className="text-sm opacity-90">{error}</p>
           </div>
         </div>
       )}
 
       {successMessage && (
-        <div className="bg-green-900/20 border border-green-500/50 rounded-xl p-4 flex gap-3 backdrop-blur-sm shadow-card">
-          <CheckCircle size={20} className="text-green-400 flex-shrink-0 mt-0.5" />
-          <p className="text-green-200">{successMessage}</p>
+        <div className="alert-success rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
+          <CheckCircle size={24} className="flex-shrink-0 mt-0.5" />
+          <p className="uppercase tracking-widest font-bold text-sm">{successMessage}</p>
         </div>
       )}
 
       {sections.map((section, idx) => (
-        <div key={idx} className="card-enhanced rounded-xl p-6">
-          <h3 className="text-lg font-semibold mb-6 gradient-text">{section.title}</h3>
+        <div key={idx} className="glass-card rounded-2xl p-6 animate-fade-in-up" style={{ 
+          animationDelay: `${idx * 0.1}s`
+        }}>
+          <h3 className="text-xl font-black mb-6 glow-text uppercase tracking-wider flex items-center gap-3">
+            <span className="w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse" style={{ boxShadow: '0 0 10px var(--theme-accent)' }}></span>
+            {section.title}
+          </h3>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {section.settings.map((setting) => (
               <div key={setting.key}>
-                <label className="block text-sm font-medium text-gray-300 mb-2">
+                <label className="block text-sm font-medium mb-2">
                   {setting.label}
-                  {(setting as any).help && <span className="text-gray-500 text-xs ml-2">({(setting as any).help})</span>}
+                  {(setting as any).help && <span className="text-xs ml-2" style={{ color: 'var(--theme-text-muted)' }}>({(setting as any).help})</span>}
                 </label>
 
                 {setting.type === 'checkbox' && (
-                  <input
-                    type="checkbox"
-                    checked={settings[setting.key] as any}
-                    onChange={(e) => handleChange(setting.key, e.target.checked)}
-                    className="w-5 h-5 rounded border-gray-600 bg-sol-dark cursor-pointer"
-                  />
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={settings[setting.key] as any}
+                      onChange={(e) => handleChange(setting.key, e.target.checked)}
+                      className="w-5 h-5 rounded cursor-pointer accent-[var(--theme-accent)]"
+                      style={{
+                        backgroundColor: 'var(--theme-bg-input)',
+                        borderColor: 'var(--theme-input-border)'
+                      }}
+                    />
+                    <span style={{ color: 'var(--theme-text-secondary)' }} className="text-sm">
+                      {settings[setting.key] ? 'ENABLED' : 'DISABLED'}
+                    </span>
+                  </div>
                 )}
 
                 {setting.type === 'number' && (
@@ -133,7 +147,7 @@ export default function ConfigurationPanel() {
                     type="number"
                     value={settings[setting.key] as any}
                     onChange={(e) => handleChange(setting.key, parseFloat(e.target.value))}
-                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-xl text-white focus:border-sol-purple focus:outline-none focus:shadow-glow transition-all"
+                    className="w-full px-3 py-2 rounded-xl transition-all"
                     step="any"
                   />
                 )}
@@ -142,7 +156,7 @@ export default function ConfigurationPanel() {
                   <textarea
                     value={(settings[setting.key] as string[]).join('\n')}
                     onChange={(e) => handleChange(setting.key, e.target.value.split('\n').filter(Boolean))}
-                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-xl text-white focus:border-sol-purple focus:outline-none focus:shadow-glow min-h-20 font-mono text-sm transition-all"
+                    className="w-full px-3 py-2 rounded-xl min-h-20 text-sm transition-all"
                   />
                 )}
 
@@ -150,10 +164,15 @@ export default function ConfigurationPanel() {
                   <select
                     value={settings[setting.key] as string}
                     onChange={(e) => handleChange(setting.key, e.target.value)}
-                    className="w-full px-3 py-2 bg-sol-darker border border-gray-600 rounded-xl text-white focus:border-sol-purple focus:outline-none focus:shadow-glow transition-all"
+                    className="w-full px-3 py-2 rounded-xl transition-all uppercase"
                   >
                     {(setting as any).options?.map((opt: string) => (
-                      <option key={opt} value={opt}>{opt}</option>
+                      <option key={opt} value={opt} style={{ 
+                        backgroundColor: 'var(--theme-bg-input)',
+                        color: 'var(--theme-input-text)'
+                      }}>
+                        {opt.toUpperCase()}
+                      </option>
                     ))}
                   </select>
                 )}
@@ -164,14 +183,18 @@ export default function ConfigurationPanel() {
       ))}
 
       {/* Save Button */}
-      <div className="flex justify-end gap-3 sticky bottom-0 card-enhanced py-4 px-6 rounded-xl">
+      <div className="flex justify-end gap-3 sticky bottom-0 py-4 px-6 rounded-xl" style={{
+        backgroundColor: 'var(--theme-bg-card)',
+        borderTop: '2px solid var(--theme-accent)',
+        boxShadow: '0 -5px 20px var(--glow-color)'
+      }}>
         <button
           onClick={handleSave}
           disabled={saving}
-          className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-sol-purple to-sol-cyan text-black font-semibold rounded-xl hover:shadow-glow disabled:opacity-50 transition-all hover:scale-105 shadow-card"
+          className="flex items-center gap-2 px-6 py-3 rounded-xl disabled:opacity-50 transition-all hover:scale-105"
         >
           <Save size={18} />
-          {saving ? 'Saving...' : 'Save Settings'}
+          {saving ? 'SAVING...' : 'SAVE SETTINGS'}
         </button>
       </div>
     </div>

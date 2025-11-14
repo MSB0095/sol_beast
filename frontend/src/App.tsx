@@ -27,30 +27,39 @@ function App() {
   }, [initializeConnection, cleanup, fetchSettings])
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sol-darker via-sol-dark to-sol-darker animate-gradient">
+    <div className="min-h-screen bg-black transition-colors duration-500 relative overflow-hidden">
+      {/* Electric grid background */}
+      <div className="fixed inset-0 opacity-10 pointer-events-none" style={{
+        backgroundImage: `linear-gradient(var(--theme-accent) 1px, transparent 1px), linear-gradient(90deg, var(--theme-accent) 1px, transparent 1px)`,
+        backgroundSize: '50px 50px'
+      }}></div>
+      
       <Header />
       
-      <main className="container mx-auto px-4 py-8">
+      <main className="container mx-auto px-4 py-8 relative z-10">
         {status === 'disconnected' && (
-          <div className="mb-4 p-4 bg-red-900/20 border border-red-500/50 rounded-xl text-red-200 backdrop-blur-sm shadow-card">
-            <p className="font-semibold flex items-center gap-2">
-              <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
-              Connection Status: Disconnected
+          <div className="alert-error mb-6 p-6 rounded-2xl relative overflow-hidden animate-fade-in-up">
+            <p className="font-mono-tech font-black flex items-center gap-3 uppercase tracking-widest text-base mb-3">
+              <span className="status-offline"></span>
+              [CONNECTION LOST]
             </p>
-            <p className="text-sm mt-2 text-red-300/80">Trying to connect to backend at http://localhost:8080...</p>
+            <p className="font-mono-tech text-sm opacity-90">ATTEMPTING RECONNECT TO BACKEND @ http://localhost:8080...</p>
+            <div className="mt-4 h-1 bg-black/30 rounded-full overflow-hidden">
+              <div className="h-full bg-[var(--theme-error)] rounded-full animate-pulse" style={{ width: '60%' }}></div>
+            </div>
           </div>
         )}
 
         {status === 'connected' && (
-          <div className="mb-4 p-4 bg-green-900/20 border border-green-500/50 rounded-xl text-green-200 flex items-center justify-between backdrop-blur-sm shadow-card glow-on-hover">
+          <div className="mb-6 p-5 bg-black electric-border flex items-center justify-between relative overflow-hidden cyber-card">
             <div>
-              <p className="font-semibold flex items-center gap-2">
-                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse shadow-glow"></span>
-                ✓ Connected to Trading Bot
+              <p className="font-mono-tech font-bold flex items-center gap-3 uppercase tracking-wider text-sm">
+                <span className="w-3 h-3 bg-[var(--theme-accent)] animate-pulse" style={{ boxShadow: '0 0 15px var(--glow-color-strong)' }}></span>
+                <span className="glow-text">[CONNECTED] TRADING BOT ACTIVE</span>
               </p>
-              <p className="text-sm mt-2 text-green-300/80">
-                Mode: <span className="font-mono bg-green-950/30 px-2 py-0.5 rounded">{mode}</span> • 
-                Status: <span className="font-mono bg-green-950/30 px-2 py-0.5 rounded">{runningState}</span>
+              <p className="font-mono-tech text-xs mt-3 text-[var(--theme-text-secondary)]">
+                MODE: <span className="text-[var(--theme-accent)] font-bold px-2 py-1 bg-[var(--theme-bg-card)]">{mode.toUpperCase()}</span> • 
+                STATUS: <span className="text-[var(--theme-accent)] font-bold px-2 py-1 bg-[var(--theme-bg-card)] ml-2">{runningState.toUpperCase()}</span>
               </p>
             </div>
           </div>
@@ -97,25 +106,25 @@ function App() {
             <BotControl />
             
             {/* Quick Stats */}
-            <div className="card-enhanced rounded-xl p-6 sticky top-24">
-              <h3 className="text-lg font-semibold mb-4 gradient-text">Quick Stats</h3>
-              <div className="space-y-4 text-sm">
-                <div className="flex justify-between items-center p-2 rounded-lg bg-sol-darker/50">
-                  <span className="text-gray-400">Connection:</span>
-                  <span className={`font-semibold ${status === 'connected' ? 'text-green-400' : 'text-red-400'}`}>
-                    {status === 'connected' ? '● Online' : '○ Offline'}
+            <div className="cyber-card p-6">
+              <h3 className="font-display text-xl font-black mb-5 glow-text uppercase tracking-wider">Quick Stats</h3>
+              <div className="space-y-3 font-mono-tech text-xs">
+                <div className="flex justify-between items-center gap-3 p-3 bg-black electric-border">
+                  <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Connection:</span>
+                  <span className={`font-bold uppercase tracking-widest whitespace-nowrap ${status === 'connected' ? 'text-[var(--theme-accent)]' : 'text-red-400'}`}>
+                    {status === 'connected' ? '[ONLINE]' : '[OFFLINE]'}
                   </span>
                 </div>
-                <div className="flex justify-between items-center p-2 rounded-lg bg-sol-darker/50">
-                  <span className="text-gray-400">Bot State:</span>
-                  <span className={`font-semibold ${runningState === 'running' ? 'text-green-400' : 'text-gray-400'}`}>
-                    {runningState}
+                <div className="flex justify-between items-center gap-3 p-3 bg-black electric-border">
+                  <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Bot State:</span>
+                  <span className={`font-bold uppercase tracking-widest whitespace-nowrap ${runningState === 'running' ? 'text-[var(--theme-accent)]' : 'text-[var(--theme-text-secondary)]'}`}>
+                    [{runningState.toUpperCase()}]
                   </span>
                 </div>
-                <div className="flex justify-between items-center p-2 rounded-lg bg-sol-darker/50">
-                  <span className="text-gray-400">Trading Mode:</span>
-                  <span className={`font-semibold ${mode === 'real' ? 'text-orange-400' : 'text-blue-400'}`}>
-                    {mode === 'real' ? '⚡ Real' : '🛡️ Dry-Run'}
+                <div className="flex justify-between items-center gap-3 p-3 bg-black electric-border">
+                  <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Mode:</span>
+                  <span className={`font-bold uppercase tracking-widest whitespace-nowrap ${mode === 'real' ? 'text-orange-400' : 'text-blue-400'}`}>
+                    {mode === 'real' ? '[REAL]' : '[DRY-RUN]'}
                   </span>
                 </div>
               </div>

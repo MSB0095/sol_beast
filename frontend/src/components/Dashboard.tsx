@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { useBotStore } from '../store/botStore'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts'
-import { TrendingUp, TrendingDown, Target, Loader } from 'lucide-react'
+import { TrendingUp, TrendingDown, Target, Loader, Wallet } from 'lucide-react'
 
 export default function Dashboard() {
   const { stats, historicalData } = useBotStore()
@@ -30,8 +30,8 @@ export default function Dashboard() {
   if (!stats) {
     return (
       <div className="flex items-center justify-center py-12">
-        <Loader size={32} className="animate-spin text-sol-purple" />
-        <span className="ml-3 text-gray-400">Loading statistics...</span>
+        <Loader size={32} className="animate-spin glow-text" />
+        <span className="ml-3 uppercase tracking-wider font-mono" style={{ color: 'var(--theme-text-secondary)' }}>Loading statistics...</span>
       </div>
     )
   }
@@ -39,51 +39,74 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       {/* Key Metrics */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="card-enhanced rounded-xl p-6 group hover:scale-105">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
+        <div className="stat-card animate-fade-in-up" style={{ animationDelay: '0.1s' }}>
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-400 text-sm font-medium mb-2">Total Profit</p>
-              <h3 className={`text-3xl font-bold ${(stats?.total_profit || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            <div className="flex-1 min-w-0">
+              <p className="font-mono-tech text-[10px] sm:text-xs mb-2 sm:mb-3 uppercase tracking-widest" style={{ color: 'var(--theme-text-secondary)' }}>Total Profit</p>
+              <h3 className={`text-3xl sm:text-4xl md:text-5xl font-display font-black break-all ${(stats?.total_profit || 0) >= 0 ? 'glow-text' : ''}`} 
+                  style={(stats?.total_profit || 0) >= 0 ? { color: 'var(--theme-success)' } : { color: 'var(--theme-error)', textShadow: '0 0 20px var(--theme-error)' }}>
                 ◎{(stats?.total_profit || 0).toFixed(9)}
               </h3>
             </div>
             {(stats?.total_profit || 0) >= 0 ? (
-              <div className="p-3 rounded-xl bg-green-500/10 border border-green-500/20">
-                <TrendingUp size={32} className="text-green-400" />
+              <div className="p-4 rounded-2xl animate-float" style={{ 
+                background: 'var(--glass-bg)',
+                border: '2px solid var(--theme-success)',
+                boxShadow: '0 0 30px var(--theme-success)'
+              }}>
+                <TrendingUp size={40} style={{ color: 'var(--theme-success)' }} />
               </div>
             ) : (
-              <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20">
-                <TrendingDown size={32} className="text-red-400" />
+              <div className="p-4 rounded-2xl" style={{ 
+                background: 'var(--glass-bg)',
+                border: '2px solid var(--theme-error)',
+                boxShadow: '0 0 30px var(--theme-error)'
+              }}>
+                <TrendingDown size={40} style={{ color: 'var(--theme-error)' }} />
               </div>
             )}
           </div>
         </div>
 
-        <div className="card-enhanced rounded-xl p-6 group hover:scale-105">
+        <div className="stat-card animate-fade-in-up" style={{ animationDelay: '0.2s' }}>
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-400 text-sm font-medium mb-2">Total Trades</p>
-              <h3 className="text-3xl font-bold gradient-text">
+            <div className="flex-1 min-w-0">
+              <p className="font-mono-tech text-[10px] sm:text-xs mb-2 sm:mb-3 uppercase tracking-widest" style={{ color: 'var(--theme-text-secondary)' }}>Total Trades</p>
+              <h3 className="text-3xl sm:text-4xl md:text-5xl font-display font-black glow-text">
                 {(stats?.total_buys || 0) + (stats?.total_sells || 0)}
               </h3>
             </div>
-            <div className="p-3 rounded-xl bg-sol-purple/10 border border-sol-purple/20">
-              <Target size={32} className="text-sol-purple" />
+            <div className="p-4 rounded-2xl animate-float flex-shrink-0" style={{ 
+              animationDelay: '0.5s',
+              background: 'var(--glass-bg)',
+              border: '2px solid var(--theme-accent)',
+              boxShadow: '0 0 30px var(--glow-color)'
+            }}>
+              <Target size={40} style={{ color: 'var(--theme-accent)' }} />
             </div>
           </div>
         </div>
 
-        <div className="card-enhanced rounded-xl p-6 group hover:scale-105">
+        <div className="stat-card animate-fade-in-up" style={{ animationDelay: '0.3s' }}>
           <div className="flex items-center justify-between">
-            <div>
-              <p className="text-gray-400 text-sm font-medium mb-2">Active Holdings</p>
-              <h3 className="text-3xl font-bold text-blue-400">
+            <div className="flex-1 min-w-0">
+              <p className="font-mono-tech text-[10px] sm:text-xs mb-2 sm:mb-3 uppercase tracking-widest" style={{ color: 'var(--theme-text-secondary)' }}>Active Holdings</p>
+              <h3 className="text-3xl sm:text-4xl md:text-5xl font-display font-black" style={{ color: 'var(--theme-info)', textShadow: '0 0 20px var(--theme-info)' }}>
                 {stats?.current_holdings?.length || 0}
               </h3>
-              <p className="text-xs text-gray-500 mt-2 font-medium">
-                Buys: {stats?.total_buys || 0} | Sells: {stats?.total_sells || 0}
-              </p>
+              <div className="flex gap-3 mt-3">
+                <span className="badge-success">BUYS: {stats?.total_buys || 0}</span>
+                <span className="badge-error">SELLS: {stats?.total_sells || 0}</span>
+              </div>
+            </div>
+            <div className="p-4 rounded-2xl animate-float flex-shrink-0" style={{ 
+              animationDelay: '0.7s',
+              background: 'var(--glass-bg)',
+              border: '2px solid var(--theme-info)',
+              boxShadow: '0 0 30px var(--theme-info)'
+            }}>
+              <Wallet size={40} style={{ color: 'var(--theme-info)' }} />
             </div>
           </div>
         </div>
@@ -91,28 +114,33 @@ export default function Dashboard() {
 
       {/* Charts */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card-enhanced rounded-xl p-6">
-          <h3 className="text-lg font-semibold mb-4 gradient-text">Profit Over Time</h3>
+        <div className="glass-card p-6 rounded-2xl animate-slide-in-left">
+          <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Profit Over Time</h3>
           <ResponsiveContainer width="100%" height={300}>
             <LineChart data={chartData.length > 0 ? chartData : [{ time: 0, profit: 0, trades: 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--theme-accent)" opacity={0.1} />
               <XAxis 
                 dataKey="time" 
-                stroke="#9CA3AF"
+                stroke="var(--theme-text-secondary)"
                 tick={{ fontSize: 12 }}
               />
-              <YAxis stroke="#9CA3AF" />
+              <YAxis stroke="var(--theme-text-secondary)" />
               <Tooltip 
-                contentStyle={{ backgroundColor: '#1a1d20', border: '1px solid #374151', borderRadius: '0.5rem' }}
-                cursor={{ stroke: '#14F195' }}
+                contentStyle={{ 
+                  backgroundColor: 'var(--theme-bg-secondary)', 
+                  border: '1px solid var(--theme-accent)', 
+                  borderRadius: '0.75rem',
+                  backdropFilter: 'blur(12px)'
+                }}
+                cursor={{ stroke: 'var(--theme-accent)' }}
                 formatter={(value: any) => value.toFixed(9)}
                 labelFormatter={(label) => `Point ${label}`}
               />
               <Line 
                 type="monotone" 
                 dataKey="profit" 
-                stroke="#14F195" 
-                strokeWidth={2} 
+                stroke="var(--theme-accent)" 
+                strokeWidth={3} 
                 dot={false}
                 isAnimationActive={false}
               />
@@ -120,48 +148,53 @@ export default function Dashboard() {
           </ResponsiveContainer>
         </div>
 
-        <div className="card-enhanced rounded-xl p-6">
-          <h3 className="text-lg font-semibold mb-4 gradient-text">Trade Activity</h3>
+        <div className="glass-card p-6 rounded-2xl animate-slide-in-right">
+          <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Trade Activity</h3>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={chartData.length > 0 ? chartData : [{ time: 0, profit: 0, trades: 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--theme-accent)" opacity={0.1} />
               <XAxis 
                 dataKey="time" 
-                stroke="#9CA3AF"
+                stroke="var(--theme-text-secondary)"
                 tick={{ fontSize: 12 }}
               />
-              <YAxis stroke="#9CA3AF" />
+              <YAxis stroke="var(--theme-text-secondary)" />
               <Tooltip 
-                contentStyle={{ backgroundColor: '#1a1d20', border: '1px solid #374151', borderRadius: '0.5rem' }}
+                contentStyle={{ 
+                  backgroundColor: 'var(--theme-bg-secondary)', 
+                  border: '1px solid var(--theme-accent)', 
+                  borderRadius: '0.75rem',
+                  backdropFilter: 'blur(12px)'
+                }}
                 labelFormatter={(label) => `Point ${label}`}
               />
-              <Bar dataKey="trades" fill="#14F195" radius={[8, 8, 0, 0]} isAnimationActive={false} />
+              <Bar dataKey="trades" fill="var(--theme-accent)" radius={[8, 8, 0, 0]} isAnimationActive={false} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
 
       {/* Status Info */}
-      <div className="card-enhanced rounded-xl p-6">
-        <h3 className="text-lg font-semibold mb-4 gradient-text">Bot Information</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-          <div className="p-4 rounded-xl bg-sol-darker/50 border border-gray-700/30">
-            <p className="text-gray-400 font-medium mb-2">Buys Executed</p>
-            <p className="text-2xl font-bold gradient-text">{stats?.total_buys || 0}</p>
+      <div className="cyber-card p-6">
+        <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Bot Information</h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono-tech">
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Buys Executed</p>
+            <p className="text-3xl font-black glow-text">{stats?.total_buys || 0}</p>
           </div>
-          <div className="p-4 rounded-xl bg-sol-darker/50 border border-gray-700/30">
-            <p className="text-gray-400 font-medium mb-2">Sells Executed</p>
-            <p className="text-2xl font-bold gradient-text">{stats?.total_sells || 0}</p>
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Sells Executed</p>
+            <p className="text-3xl font-black glow-text">{stats?.total_sells || 0}</p>
           </div>
-          <div className="p-4 rounded-xl bg-sol-darker/50 border border-gray-700/30">
-            <p className="text-gray-400 font-medium mb-2">Win Rate</p>
-            <p className="text-2xl font-bold gradient-text">
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Win Rate</p>
+            <p className="text-3xl font-black glow-text">
               {stats?.total_buys && stats.total_buys > 0 ? Math.round((stats.total_sells / stats.total_buys) * 100) : 0}%
             </p>
           </div>
-          <div className="p-4 rounded-xl bg-sol-darker/50 border border-gray-700/30">
-            <p className="text-gray-400 font-medium mb-2">Uptime</p>
-            <p className="text-2xl font-bold gradient-text">
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Uptime</p>
+            <p className="text-3xl font-black glow-text">
               {stats?.uptime_secs ? (stats.uptime_secs / 3600).toFixed(1) : 0}h
             </p>
           </div>

@@ -23,77 +23,96 @@ export default function BotControl() {
   }
 
   return (
-    <div className="card-enhanced rounded-xl p-6">
-      <h3 className="text-lg font-semibold mb-4 gradient-text">Bot Control</h3>
+    <div className="cyber-card p-6">
+      <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Bot Control</h3>
       
       {/* Status indicator */}
-      <div className="mb-6 p-4 rounded-xl bg-gradient-to-r from-sol-darker to-gray-900 border border-gray-700/50">
+      <div className="mb-6 p-6 glass-card rounded-2xl relative overflow-hidden">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm text-gray-400 mb-1">Status</p>
-            <p className={`text-lg font-bold ${
-              isRunning ? 'text-green-400' : 
-              isTransitioning ? 'text-yellow-400' : 
-              'text-gray-400'
-            }`}>
-              {isStarting && 'Starting...'}
-              {isStopping && 'Stopping...'}
-              {isRunning && 'Running'}
-              {isStopped && 'Stopped'}
+            <p className="font-mono-tech text-xs mb-3 uppercase tracking-widest" style={{ color: 'var(--theme-text-secondary)' }}>System Status</p>
+            <p className={`font-display text-2xl font-black uppercase tracking-wider flex items-center gap-3 ${
+              isRunning ? 'glow-text' : 
+              isTransitioning ? '' : 
+              ''
+            }`} style={
+              isRunning ? { color: 'var(--theme-success)' } : 
+              isTransitioning ? { color: 'var(--theme-warning)' } :
+              { color: 'var(--theme-text-muted)' }
+            }>
+              {isRunning && <span className="status-online"></span>}
+              {isTransitioning && <span className="status-warning"></span>}
+              {isStopped && <span className="status-offline"></span>}
+              {isStarting && '[INITIALIZING...]'}
+              {isStopping && '[SHUTTING DOWN...]'}
+              {isRunning && '[ACTIVE]'}
+              {isStopped && '[INACTIVE]'}
             </p>
           </div>
           {isTransitioning && (
-            <Loader2 size={24} className="text-yellow-400 animate-spin" />
-          )}
-          {isRunning && (
-            <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse shadow-glow"></div>
+            <Loader2 size={32} className="animate-spin" style={{ color: 'var(--theme-warning)', filter: 'drop-shadow(0 0 10px var(--theme-warning))' }} />
           )}
         </div>
       </div>
 
       {/* Mode Display (read-only) */}
       <div className="mb-6">
-        <label className="text-sm text-gray-400 mb-2 block">Trading Mode</label>
+        <label className="text-sm mb-2 block uppercase tracking-wider" style={{ color: 'var(--theme-text-secondary)' }}>Trading Mode</label>
         <div className="grid grid-cols-2 gap-2">
           <div
-            className={`p-3 rounded-xl border transition-all ${
-              mode === 'dry-run'
-                ? 'bg-blue-500/20 border-blue-500/50 text-blue-300 shadow-card'
-                : 'bg-gray-800/50 border-gray-700 text-gray-500'
-            }`}
+            className="p-3 rounded-xl border-2 transition-all"
+            style={mode === 'dry-run' ? {
+              backgroundColor: 'var(--theme-bg-card)',
+              borderColor: 'var(--theme-accent)',
+              color: 'var(--theme-accent)',
+              boxShadow: '0 0 20px var(--glow-color)'
+            } : {
+              backgroundColor: 'var(--theme-bg-secondary)',
+              borderColor: 'var(--theme-text-muted)',
+              color: 'var(--theme-text-muted)'
+            }}
           >
             <div className="flex items-center justify-center gap-2">
               <Shield size={18} />
-              <span className="font-semibold">Dry Run</span>
+              <span className="font-semibold uppercase tracking-wide">Dry Run</span>
             </div>
-            <p className="text-xs mt-1 opacity-70">Simulation only</p>
+            <p className="text-xs mt-1 opacity-70 text-center">Simulation only</p>
           </div>
           
           <div
-            className={`p-3 rounded-xl border transition-all ${
-              mode === 'real'
-                ? 'bg-orange-500/20 border-orange-500/50 text-orange-300 shadow-card'
-                : 'bg-gray-800/50 border-gray-700 text-gray-500'
-            }`}
+            className="p-3 rounded-xl border-2 transition-all"
+            style={mode === 'real' ? {
+              backgroundColor: 'var(--theme-bg-card)',
+              borderColor: '#ff6b00',
+              color: '#ff6b00',
+              boxShadow: '0 0 20px rgba(255, 107, 0, 0.6)'
+            } : {
+              backgroundColor: 'var(--theme-bg-secondary)',
+              borderColor: 'var(--theme-text-muted)',
+              color: 'var(--theme-text-muted)'
+            }}
           >
             <div className="flex items-center justify-center gap-2">
               <Zap size={18} />
-              <span className="font-semibold">Real Trading</span>
+              <span className="font-semibold uppercase tracking-wide">Real Trading</span>
             </div>
-            <p className="text-xs mt-1 opacity-70">Live trades</p>
+            <p className="text-xs mt-1 opacity-70 text-center">Live trades</p>
           </div>
         </div>
-        <p className="text-xs text-gray-500 mt-2">
-          Mode is set at startup with <code className="bg-gray-800 px-1 rounded">--real</code> flag. Restart the bot to change mode.
+        <p className="text-xs mt-2 font-mono" style={{ color: 'var(--theme-text-muted)' }}>
+          Mode is set at startup with <code className="px-1 rounded" style={{ 
+            backgroundColor: 'var(--theme-bg-secondary)',
+            color: 'var(--theme-accent)'
+          }}>--real</code> flag. Restart the bot to change mode.
         </p>
       </div>
 
       {/* Warning for real mode */}
       {mode === 'real' && (
-        <div className="mb-6 p-3 bg-orange-500/10 border border-orange-500/30 rounded-xl backdrop-blur-sm">
-          <p className="text-orange-300 text-sm flex items-start gap-2">
-            <Zap size={16} className="flex-shrink-0 mt-0.5" />
-            <span>Real trading mode is active. Trades will use actual SOL.</span>
+        <div className="alert-warning mb-6 p-4 rounded-xl relative overflow-hidden animate-fade-in-up">
+          <p className="text-sm flex items-center gap-3 uppercase tracking-widest font-bold">
+            <Zap size={20} className="flex-shrink-0 animate-pulse" />
+            <span>REAL TRADING MODE ACTIVE • LIVE SOL TRANSACTIONS</span>
           </p>
         </div>
       )}
@@ -103,17 +122,23 @@ export default function BotControl() {
         <button
           onClick={handleStart}
           disabled={!isStopped || isTransitioning}
-          className="flex-1 py-3 px-4 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 shadow-card hover:shadow-card-hover hover:scale-105"
+          className="flex-1 py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          style={!isStopped || isTransitioning ? {} : {
+            background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+            color: '#000000',
+            border: '2px solid #10b981',
+            boxShadow: '0 0 20px rgba(16, 185, 129, 0.5)'
+          }}
         >
           {isStarting ? (
             <>
               <Loader2 size={20} className="animate-spin" />
-              Starting...
+              STARTING...
             </>
           ) : (
             <>
               <Play size={20} />
-              Start Bot
+              START BOT
             </>
           )}
         </button>
@@ -121,27 +146,33 @@ export default function BotControl() {
         <button
           onClick={handleStop}
           disabled={!isRunning || isTransitioning}
-          className="flex-1 py-3 px-4 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 shadow-card hover:shadow-card-hover hover:scale-105"
+          className="flex-1 py-3 px-4 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          style={!isRunning || isTransitioning ? {} : {
+            background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+            color: '#ffffff',
+            border: '2px solid #ef4444',
+            boxShadow: '0 0 20px rgba(239, 68, 68, 0.5)'
+          }}
         >
           {isStopping ? (
             <>
               <Loader2 size={20} className="animate-spin" />
-              Stopping...
+              STOPPING...
             </>
           ) : (
             <>
               <Square size={20} />
-              Stop Bot
+              STOP BOT
             </>
           )}
         </button>
       </div>
 
       {/* Info text */}
-      <div className="mt-4 text-xs text-gray-500">
-        <p>• Start the bot to begin monitoring and trading</p>
-        <p>• Stop the bot to pause all operations</p>
-        <p>• Switch mode only when bot is stopped</p>
+      <div className="mt-4 text-xs font-mono" style={{ color: 'var(--theme-text-muted)' }}>
+        <p>• START THE BOT TO BEGIN MONITORING AND TRADING</p>
+        <p>• STOP THE BOT TO PAUSE ALL OPERATIONS</p>
+        <p>• SWITCH MODE ONLY WHEN BOT IS STOPPED</p>
       </div>
     </div>
   )

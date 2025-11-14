@@ -163,7 +163,6 @@ pub async fn buy_token(
                 &payer_pubkey,
                 &fee_recipient,
                 creator_opt,
-                settings,
             )?
         };
         // ALWAYS create user's ATA when buying (even if exists, instruction will succeed idempotently)
@@ -283,7 +282,6 @@ pub async fn buy_token(
                 &sim_payer_pubkey,
                 &fee_recipient,
                 creator_opt,
-                settings,
             )?
         };
     // include any pre_instructions in the simulated tx (e.g., ATA creation)

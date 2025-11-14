@@ -299,6 +299,9 @@ pub async fn monitor_holdings(
                             format!("\"{}\"", escaped)
                         };
 
+                        // Pre-format sell_tokens to avoid nested format! macro
+                        let sell_tokens_formatted = format!("{:.6}", sell_tokens_amount);
+
                         let line = format!(
                             "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol},{buy_price},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol},{profit_percent},{profit_sol}\n",
                             mint = q(buy_rec.mint),
@@ -315,7 +318,7 @@ pub async fn monitor_holdings(
                             buy_tokens = buy_rec.buy_amount_tokens,
                             sell_time = sell_time.format("%+"),
                             stop_reason = stop_reason,
-                            sell_tokens = format!("{:.6}", sell_tokens_amount),
+                            sell_tokens = sell_tokens_formatted,
                             sell_sol = sell_sol_fmt,
                             profit_percent = profit_percent_fmt,
                             profit_sol = profit_sol_fmt

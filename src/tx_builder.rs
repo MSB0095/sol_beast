@@ -2,7 +2,6 @@ use borsh::BorshSerialize;
 use solana_program::{instruction::{Instruction, AccountMeta}, pubkey::Pubkey};
 use spl_associated_token_account::get_associated_token_address;
 use std::str::FromStr;
-use crate::settings::Settings;
 use crate::idl::load_all_idls;
 use std::collections::HashMap;
 
@@ -42,7 +41,6 @@ pub fn build_buy_instruction(
     user: &Pubkey,
     fee_recipient: &Pubkey,
     creator_pubkey: Option<Pubkey>,
-    _settings: &Settings,
 ) -> Result<Instruction, Box<dyn std::error::Error + Send + Sync>> {
     
     // For now we only build instruction.data (discriminator + borsh args).
@@ -135,7 +133,6 @@ pub fn build_sell_instruction(
     user: &Pubkey,
     fee_recipient: &Pubkey,
     creator_pubkey: Option<Pubkey>,
-    _settings: &Settings,
 ) -> Result<Instruction, Box<dyn std::error::Error + Send + Sync>> {
     let args = SellArgs {
         amount,

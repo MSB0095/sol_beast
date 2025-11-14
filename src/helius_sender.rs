@@ -231,7 +231,7 @@ pub async fn send_transaction_via_helius(
     
     debug!(
         "Building final transaction with compute_units={}, priority_fee={}, tip={} SOL",
-        compute_units, priority_fee, settings.helius_min_tip_sol
+        compute_units, priority_fee, tip_amount_sol
     );
     
     // Build final transaction with optimized compute budget

@@ -1,5 +1,4 @@
 use crate::{
-    error::AppError,
     models::{
     
     BondingCurveState,
@@ -594,12 +593,12 @@ pub async fn fetch_current_price(
         return Err(format!("Bonding curve post-discriminator too short for {}", mint).into());
     }
 
-    // Safe to index because we checked length
-    let virtual_token_reserves = u64::from_le_bytes(slice[0..8].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?);
-    let virtual_sol_reserves = u64::from_le_bytes(slice[8..16].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?);
-    let real_token_reserves = u64::from_le_bytes(slice[16..24].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?);
-    let real_sol_reserves = u64::from_le_bytes(slice[24..32].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?);
-    let token_total_supply = u64::from_le_bytes(slice[32..40].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?);
+    // Safe to index because we checked length above - these unwraps cannot fail
+    let virtual_token_reserves = u64::from_le_bytes(slice[0..8].try_into().expect("slice length verified"));
+    let virtual_sol_reserves = u64::from_le_bytes(slice[8..16].try_into().expect("slice length verified"));
+    let real_token_reserves = u64::from_le_bytes(slice[16..24].try_into().expect("slice length verified"));
+    let real_sol_reserves = u64::from_le_bytes(slice[24..32].try_into().expect("slice length verified"));
+    let token_total_supply = u64::from_le_bytes(slice[32..40].try_into().expect("slice length verified"));
     let complete = slice[40] != 0;
 
     // Parse creator (32 bytes after complete bool)
@@ -744,12 +743,13 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
                     None
                 };
                 
+                // Safe to parse because we verified discriminator and length above
                 let state = BondingCurveState {
-                    virtual_token_reserves: u64::from_le_bytes(slice[0..8].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
-                    virtual_sol_reserves: u64::from_le_bytes(slice[8..16].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
-                    real_token_reserves: u64::from_le_bytes(slice[16..24].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
-                    real_sol_reserves: u64::from_le_bytes(slice[24..32].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
-                    token_total_supply: u64::from_le_bytes(slice[32..40].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
+                    virtual_token_reserves: u64::from_le_bytes(slice[0..8].try_into().expect("slice length verified")),
+                    virtual_sol_reserves: u64::from_le_bytes(slice[8..16].try_into().expect("slice length verified")),
+                    real_token_reserves: u64::from_le_bytes(slice[16..24].try_into().expect("slice length verified")),
+                    real_sol_reserves: u64::from_le_bytes(slice[24..32].try_into().expect("slice length verified")),
+                    token_total_supply: u64::from_le_bytes(slice[32..40].try_into().expect("slice length verified")),
                     complete: slice[40] != 0,
                     creator,
                 };
@@ -1063,7 +1063,6 @@ pub async fn sell_token(
                 &user_pubkey,
                 &fee_recipient,
                 creator_opt,
-                settings,
             )?
         };
         // Ensure ATA exists for user (sell path may not need it but check)
@@ -1139,7 +1138,6 @@ pub async fn sell_token(
             &sim_payer_pubkey,
             &fee_recipient,
             creator_opt,
-            settings,
         )?;
         debug!("Preparing simulated sell TX for mint {} amount {} tokens (dry run)", mint, amount);
         

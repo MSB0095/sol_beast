@@ -291,6 +291,7 @@ pub async fn monitor_holdings(
                         let sell_sol_fmt = format!("{:.9}", sell_sol);
                         let profit_percent_fmt = format!("{:.2}", profit_percent);
                         let profit_sol_fmt = format!("{:.9}", profit_sol);
+                        let sell_tokens_fmt = format!("{:.6}", sell_tokens_amount);
 
                         // CSV-quote text fields to avoid breaking on commas/newlines
                         let q = |s: String| -> String {
@@ -302,10 +303,10 @@ pub async fn monitor_holdings(
                         let line = format!(
                             "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol},{buy_price},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol},{profit_percent},{profit_sol}\n",
                             mint = q(buy_rec.mint),
-                            symbol = q(buy_rec.symbol.unwrap_or_else(|| "".to_string())),
-                            name = q(buy_rec.name.unwrap_or_else(|| "".to_string())),
-                            uri = q(buy_rec.uri.unwrap_or_else(|| "".to_string())),
-                            image = q(buy_rec.image.unwrap_or_else(|| "".to_string())),
+                            symbol = q(buy_rec.symbol.unwrap_or_default()),
+                            name = q(buy_rec.name.unwrap_or_default()),
+                            uri = q(buy_rec.uri.unwrap_or_default()),
+                            image = q(buy_rec.image.unwrap_or_default()),
                             creator = q(buy_rec.creator),
                             detect_time = buy_rec.detect_time.format("%+"),
                             buy_time = buy_rec.buy_time.format("%+"),
@@ -315,7 +316,7 @@ pub async fn monitor_holdings(
                             buy_tokens = buy_rec.buy_amount_tokens,
                             sell_time = sell_time.format("%+"),
                             stop_reason = stop_reason,
-                            sell_tokens = format!("{:.6}", sell_tokens_amount),
+                            sell_tokens = sell_tokens_fmt,
                             sell_sol = sell_sol_fmt,
                             profit_percent = profit_percent_fmt,
                             profit_sol = profit_sol_fmt
@@ -353,7 +354,8 @@ pub async fn monitor_holdings(
             Lazy::new(|| tokio::sync::Mutex::new(None));
         let mut last_cleanup = LAST_CLEANUP.lock().await;
         let now = Instant::now();
-        if last_cleanup.is_none() || now.duration_since(last_cleanup.unwrap()) > std::time::Duration::from_secs(600) {
+        let should_cleanup = last_cleanup.map_or(true, |last| now.duration_since(last) > std::time::Duration::from_secs(600));
+        if should_cleanup {
             *last_cleanup = Some(now);
             
             // Clean up SUBSCRIBE_ATTEMPT_TIMES

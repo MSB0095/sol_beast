@@ -354,7 +354,7 @@ pub async fn monitor_holdings(
             Lazy::new(|| tokio::sync::Mutex::new(None));
         let mut last_cleanup = LAST_CLEANUP.lock().await;
         let now = Instant::now();
-        let should_cleanup = last_cleanup.map_or(true, |last| now.duration_since(last) > std::time::Duration::from_secs(600));
+        let should_cleanup = last_cleanup.is_none_or(|last| now.duration_since(last) > std::time::Duration::from_secs(600));
         if should_cleanup {
             *last_cleanup = Some(now);
             

@@ -121,7 +121,7 @@ async fn main() -> Result<(), AppError> {
         std::env::var("RUST_LOG").ok()
     );
     
-    let config_path = std::env::var("SOL_BEAST_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string());
+    let config_path = std::env::var("SOL_BEAST_CONFIG_PATH").unwrap_or_else(|_| "config.toml".into());
     let settings = Arc::new(Settings::from_file(&config_path)?);
     settings.validate()?;
     

@@ -3,6 +3,7 @@ import { useBotStore } from '../store/botStore'
 import { useSettingsStore } from '../store/settingsStore'
 import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft } from 'lucide-react'
 import { ThemeSwitcher } from './ThemeSwitcher'
+import BeastLogo from './BeastLogo'
 
 export default function Header() {
   const { status } = useBotStore()
@@ -48,15 +49,28 @@ export default function Header() {
       <div className="container mx-auto px-4 relative">
         <div className="flex items-center justify-between py-4">
           <div className="flex items-center gap-4">
-            <div className="w-12 h-12 electric-border flex items-center justify-center bg-black relative group cursor-pointer">
-              <span className="text-2xl animate-pulse">⚡</span>
+            <div className="w-14 h-14 electric-border flex items-center justify-center bg-black relative group cursor-pointer overflow-hidden">
+              <BeastLogo size={48} animated={true} />
               <div className="absolute inset-0 bg-[var(--theme-accent)] opacity-0 group-hover:opacity-20 transition-opacity"></div>
+              {/* Animated border scan */}
+              <div className="absolute inset-0 pointer-events-none">
+                <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-[var(--theme-accent)] to-transparent animate-scan-horizontal"></div>
+                <div className="absolute left-0 top-0 w-[2px] h-full bg-gradient-to-b from-transparent via-[var(--theme-accent)] to-transparent animate-scan-vertical"></div>
+              </div>
             </div>
             <div>
-              <h1 className="text-3xl font-display font-black tracking-wider text-[var(--theme-text-primary)]">
-                <span className="glow-text">SOL BEAST</span>
+              <h1 className="text-3xl md:text-4xl font-display font-black tracking-wider text-[var(--theme-text-primary)] relative">
+                <span className="glow-text relative inline-block">
+                  SOL BEAST
+                  {/* Glitch effect overlay */}
+                  <span className="absolute top-0 left-0 w-full h-full text-[var(--theme-error)] opacity-0 animate-glitch-1" aria-hidden="true">SOL BEAST</span>
+                  <span className="absolute top-0 left-0 w-full h-full text-[var(--theme-info)] opacity-0 animate-glitch-2" aria-hidden="true">SOL BEAST</span>
+                </span>
               </h1>
-              <p className="text-xs font-mono-tech text-[var(--theme-accent)] uppercase tracking-widest">Trading Bot // v2.0</p>
+              <p className="text-xs font-mono-tech text-[var(--theme-accent)] uppercase tracking-widest flex items-center gap-2">
+                <span className="inline-block w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse"></span>
+                Trading Bot // v2.0 // <span className="text-[var(--theme-info)]">NEURAL</span>
+              </p>
             </div>
           </div>
 

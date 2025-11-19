@@ -28,11 +28,29 @@ function App() {
 
   return (
     <div className="min-h-screen bg-black transition-colors duration-500 relative overflow-hidden">
-      {/* Electric grid background */}
-      <div className="fixed inset-0 opacity-10 pointer-events-none" style={{
+      {/* Animated electric grid background */}
+      <div className="fixed inset-0 opacity-10 pointer-events-none animate-pulse" style={{
         backgroundImage: `linear-gradient(var(--theme-accent) 1px, transparent 1px), linear-gradient(90deg, var(--theme-accent) 1px, transparent 1px)`,
-        backgroundSize: '50px 50px'
+        backgroundSize: '50px 50px',
+        animation: 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite'
       }}></div>
+      
+      {/* Radial gradient overlay for depth */}
+      <div className="fixed inset-0 pointer-events-none" style={{
+        background: 'radial-gradient(circle at 50% 50%, transparent 0%, rgba(0, 0, 0, 0.8) 100%)'
+      }}></div>
+      
+      {/* Animated scanline */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div 
+          className="absolute w-full h-[2px] animate-scan-down"
+          style={{
+            background: 'linear-gradient(90deg, transparent, var(--theme-accent), transparent)',
+            boxShadow: '0 0 20px var(--glow-color-strong)',
+            opacity: 0.3
+          }}
+        />
+      </div>
       
       <Header />
       

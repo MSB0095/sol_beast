@@ -40,16 +40,26 @@ else
     LICENSE_TYPE=2
 fi
 
-# Note: This is a simplified example. In production, you would:
-# 1. Use a secure key derivation function
-# 2. Store licenses in a database
-# 3. Implement hardware locking if desired
-# 4. Add revocation capability
+# ⚠️  IMPORTANT: This is a DEMO license generator for development/testing only
+# 
+# In production, you MUST implement a secure license generation system:
+# 1. Use cryptographically secure random number generators (e.g., /dev/urandom)
+# 2. Store licenses in a secure database with audit logging
+# 3. Implement proper structure: version + type + timestamp + hash + checksum
+# 4. Add hardware locking if desired (MAC address, CPU ID, etc.)
+# 5. Add revocation capability via online validation
+# 6. Use proper key derivation functions (KDF) with strong secrets
+#
+# The current implementation uses predictable hashing and is NOT cryptographically secure.
+# It serves only as a template for understanding the license structure.
 
-# For demonstration, generate a pseudo-random license key
-# The actual validation is in src/license.rs
+# DEMO: Generate a pseudo-random license key (REPLACE IN PRODUCTION)
 RANDOM_SEED=$(echo -n "${CLIENT_ID}$(date +%s)" | sha256sum | cut -d' ' -f1)
 LICENSE_KEY=$(echo -n "${RANDOM_SEED}" | base64 | tr '+/' '-_' | cut -c1-64)
+
+echo ""
+echo "⚠️  WARNING: This is a DEMO license key generator"
+echo "   Replace with a secure production implementation before deploying"
 
 echo ""
 echo "════════════════════════════════════════════════════════════════"

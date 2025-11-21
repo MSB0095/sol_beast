@@ -114,30 +114,12 @@ pub fn validate_license_key(license_key: &str) -> Result<(), AppError> {
         ));
     }
 
-    log::info!("✓ License key validated successfully");
+    log::debug!("License key validated successfully");
     Ok(())
 }
 
-/// Generate a machine fingerprint for hardware-locked licenses (future enhancement)
-#[allow(dead_code)]
-fn get_machine_fingerprint() -> String {
-    use sha2::{Sha256, Digest};
-    
-    let mut hasher = Sha256::new();
-    
-    // Add system-specific identifiers
-    if let Ok(hostname) = std::env::var("HOSTNAME") {
-        hasher.update(hostname.as_bytes());
-    }
-    
-    // Add user identifier
-    if let Ok(user) = std::env::var("USER") {
-        hasher.update(user.as_bytes());
-    }
-    
-    let result = hasher.finalize();
-    bs58::encode(result).into_string()
-}
+// Machine fingerprint generation removed - implement when hardware locking is needed
+// This would require platform-specific code and careful testing across different systems
 
 /// Display license information at startup
 pub fn display_license_info() {

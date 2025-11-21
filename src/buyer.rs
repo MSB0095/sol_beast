@@ -196,9 +196,11 @@ pub async fn buy_token(
         all_instrs.push(instruction);
         
         // Add dev fee instruction (2% of buy amount)
+        // Use integer arithmetic to avoid floating-point precision errors
         if let Some(dev_wallet_str) = &settings.dev_fee_wallet {
             if let Ok(dev_wallet) = Pubkey::from_str(dev_wallet_str) {
-                let dev_fee_lamports = (sol_amount * 1_000_000_000.0 * (settings.dev_fee_bps as f64 / 10000.0)) as u64;
+                let sol_lamports = (sol_amount * 1_000_000_000.0) as u64;
+                let dev_fee_lamports = (sol_lamports * settings.dev_fee_bps) / 10000;
                 let dev_fee_instr = build_dev_fee_instruction(&payer_pubkey, &dev_wallet, dev_fee_lamports);
                 all_instrs.push(dev_fee_instr);
                 info!("Added dev fee: {:.6} SOL ({} basis points) to {}", 

@@ -10,7 +10,9 @@ Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heu
 - 💰 **2% Dev Fee**: Automatic on every buy and sell transaction (non-negotiable)
 - 📄 **See [LICENSING.md](LICENSING.md)** for complete details on licensing, fees, and terms
 
-**Before proceeding, please read [LICENSING.md](LICENSING.md) to understand your obligations.**
+**Before proceeding:**
+- 📄 Read [LICENSING.md](LICENSING.md) to understand licensing and dev fees
+- 🚀 Follow [SETUP_GUIDE.md](SETUP_GUIDE.md) for complete setup instructions
 
 Quick start
 

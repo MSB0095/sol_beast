@@ -1,3 +1,7 @@
 /target
 config.toml
 trades.csv
+.env
+*.json
+!pumpfun*.json
+Cargo.lock

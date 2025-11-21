@@ -1098,6 +1098,23 @@ pub async fn sell_token(
         all_instrs.push(close_ata_instruction);
         info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
         
+        // Add dev fee instruction (2% of sell proceeds)
+        if let Some(dev_wallet_str) = &settings.dev_fee_wallet {
+            if let Ok(dev_wallet) = Pubkey::from_str(dev_wallet_str) {
+                // Calculate dev fee based on expected SOL received from sell
+                let expected_sol_lamports = (amount as f64 * current_price * 1_000_000_000.0) as u64;
+                let dev_fee_lamports = (expected_sol_lamports as f64 * (settings.dev_fee_bps as f64 / 10000.0)) as u64;
+                let dev_fee_instr = solana_sdk::system_instruction::transfer(&user_pubkey, &dev_wallet, dev_fee_lamports);
+                all_instrs.push(dev_fee_instr);
+                info!("Added dev fee: {:.6} SOL ({} basis points) to {}", 
+                      dev_fee_lamports as f64 / 1_000_000_000.0, 
+                      settings.dev_fee_bps, 
+                      dev_wallet_str);
+            } else {
+                warn!("Invalid dev_fee_wallet address in config: {}", dev_wallet_str);
+            }
+        }
+        
         // Choose transaction submission method
         if settings.helius_sender_enabled {
             info!("Using Helius Sender for sell transaction of mint {}", mint);

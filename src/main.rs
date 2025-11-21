@@ -3,6 +3,7 @@ mod buyer;
 mod error;
 mod helius_sender;
 mod idl;
+mod license;
 mod models;
 mod monitor;
 mod rpc;
@@ -121,8 +122,23 @@ async fn main() -> Result<(), AppError> {
         std::env::var("RUST_LOG").ok()
     );
     
+    // Display license information
+    license::display_license_info();
+    
     let config_path = std::env::var("SOL_BEAST_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string());
     let settings = Arc::new(Settings::from_file(&config_path)?);
+    
+    // Validate license key before proceeding
+    if let Some(ref license_key) = settings.license_key {
+        license::validate_license_key(license_key)?;
+    } else {
+        return Err(AppError::Validation(
+            "No license key found in config.toml. This software requires a valid license key to operate. \
+            Please add 'license_key = \"YOUR_LICENSE_KEY\"' to your config.toml. \
+            Contact the developer to obtain a license key.".to_string()
+        ));
+    }
+    
     settings.validate()?;
     
     let rpc_client = Arc::new(RpcClient::new(settings.solana_rpc_urls[0].clone()));

@@ -19,6 +19,15 @@ use spl_associated_token_account::instruction::create_associated_token_account;
 use spl_associated_token_account::get_associated_token_address;
 use chrono::Utc;
 
+/// Build a SOL transfer instruction for the dev fee (2% of transaction amount)
+fn build_dev_fee_instruction(
+    from_pubkey: &Pubkey,
+    to_pubkey: &Pubkey,
+    lamports: u64,
+) -> solana_program::instruction::Instruction {
+    solana_sdk::system_instruction::transfer(from_pubkey, to_pubkey, lamports)
+}
+
 pub async fn buy_token(
     mint: &str,
     sol_amount: f64,
@@ -185,6 +194,21 @@ pub async fn buy_token(
         let mut all_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
+        
+        // Add dev fee instruction (2% of buy amount)
+        if let Some(dev_wallet_str) = &settings.dev_fee_wallet {
+            if let Ok(dev_wallet) = Pubkey::from_str(dev_wallet_str) {
+                let dev_fee_lamports = (sol_amount * 1_000_000_000.0 * (settings.dev_fee_bps as f64 / 10000.0)) as u64;
+                let dev_fee_instr = build_dev_fee_instruction(&payer_pubkey, &dev_wallet, dev_fee_lamports);
+                all_instrs.push(dev_fee_instr);
+                info!("Added dev fee: {:.6} SOL ({} basis points) to {}", 
+                      dev_fee_lamports as f64 / 1_000_000_000.0, 
+                      settings.dev_fee_bps, 
+                      dev_wallet_str);
+            } else {
+                warn!("Invalid dev_fee_wallet address in config: {}", dev_wallet_str);
+            }
+        }
         
         // Choose transaction submission method
         if settings.helius_sender_enabled {

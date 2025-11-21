@@ -2,14 +2,30 @@
 
 Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heuristics and manage holdings (TP/SL/timeout).
 
+## ⚠️ LICENSE REQUIRED
+
+**sol_beast is licensed proprietary software with a 2% developer fee on all transactions.**
+
+- 🔑 **License Key Required**: You must have a valid license key to run the bot
+- 💰 **2% Dev Fee**: Automatic on every buy and sell transaction (non-negotiable)
+- 📄 **See [LICENSING.md](LICENSING.md)** for complete details on licensing, fees, and terms
+
+**Before proceeding, please read [LICENSING.md](LICENSING.md) to understand your obligations.**
+
 Quick start
 
-1. Copy the example config and edit values (RPC/WS URLs and program IDs):
+1. Copy the example config and edit values (RPC/WS URLs, license key, and dev fee wallet):
 
 ```bash
 cp config.example.toml config.toml
-# edit config.toml and set wallet_keypair_path before using --real
+# REQUIRED: Set your license_key and dev_fee_wallet in config.toml
+# Also set wallet_keypair_path before using --real mode
 ```
+
+**Important:** You MUST configure:
+- `license_key` - Obtain from developer (see [LICENSING.md](LICENSING.md))
+- `dev_fee_wallet` - Your Solana wallet for receiving dev fees
+- `wallet_keypair_path` - Your trading wallet (for --real mode only)
 
 2. Run in dry (safe) mode — this will NOT use any wallet or send transactions:
 

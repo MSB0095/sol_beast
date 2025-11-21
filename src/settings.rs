@@ -76,6 +76,14 @@ pub struct Settings {
     pub helius_use_dynamic_tips: bool,
     #[serde(default = "default_helius_confirm_timeout_secs")]
     pub helius_confirm_timeout_secs: u64,
+    // Dev fee configuration (2% per trade)
+    #[serde(default)]
+    pub dev_fee_wallet: Option<String>,
+    #[serde(default = "default_dev_fee_bps")]
+    pub dev_fee_bps: u64,
+    // License key for code protection
+    #[serde(default)]
+    pub license_key: Option<String>,
 }
 
 impl Settings {
@@ -195,6 +203,15 @@ impl Settings {
         if other.simulate_wallet_private_key_string != self.simulate_wallet_private_key_string {
             self.simulate_wallet_private_key_string = other.simulate_wallet_private_key_string.clone();
         }
+        if other.dev_fee_wallet != self.dev_fee_wallet {
+            self.dev_fee_wallet = other.dev_fee_wallet.clone();
+        }
+        if other.dev_fee_bps != self.dev_fee_bps {
+            self.dev_fee_bps = other.dev_fee_bps;
+        }
+        if other.license_key != self.license_key {
+            self.license_key = other.license_key.clone();
+        }
     }
 
     /// Validate settings ranges and constraints
@@ -219,6 +236,25 @@ impl Settings {
         }
         if self.max_liquidity_sol < self.min_liquidity_sol {
             return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
+        }
+        // Validate dev fee configuration
+        if self.dev_fee_bps > 10000 {
+            return Err(AppError::Validation("dev_fee_bps cannot exceed 10000 (100%)".to_string()));
+        }
+        // Validate license key
+        if self.license_key.is_none() || self.license_key.as_ref().map(|s| s.trim()).unwrap_or("").is_empty() {
+            return Err(AppError::Validation(
+                "LICENSE KEY REQUIRED! This software requires a valid license_key in config.toml. \
+                Contact the developer to obtain a license key.".to_string()
+            ));
+        }
+        // Basic license key format validation (must be at least 32 chars)
+        if let Some(key) = &self.license_key {
+            if key.len() < 32 {
+                return Err(AppError::Validation(
+                    "Invalid license key format. License key must be at least 32 characters.".to_string()
+                ));
+            }
         }
         Ok(())
     }
@@ -294,6 +330,7 @@ fn default_helius_min_tip_sol() -> f64 { 0.001 }
 fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
 fn default_helius_use_dynamic_tips() -> bool { true }
 fn default_helius_confirm_timeout_secs() -> u64 { 15 }
+fn default_dev_fee_bps() -> u64 { 200 } // 2% in basis points
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode

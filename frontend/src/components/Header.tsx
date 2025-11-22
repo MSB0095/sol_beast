@@ -69,7 +69,7 @@ export default function Header() {
               </h1>
               <p className="text-xs font-mono-tech text-[var(--theme-accent)] uppercase tracking-widest flex items-center gap-2">
                 <span className="inline-block w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse"></span>
-                Trading Bot // v1.0 // <span className="text-[var(--theme-info)]">NEURAL</span>
+                Memecoins Sniper // v1.0 <span className="text-[var(--theme-info)]"></span>
               </p>
             </div>
           </div>

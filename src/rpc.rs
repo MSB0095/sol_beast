@@ -1098,6 +1098,13 @@ pub async fn sell_token(
         all_instrs.push(close_ata_instruction);
         info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
         
+        // Add dev fee if enabled
+        if settings.dev_fee_enabled {
+            let balance = client.get_balance(&user_pubkey)?;
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, balance, 1)?;
+            info!("Added 2% dev fee to sell transaction");
+        }
+        
         // Choose transaction submission method
         if settings.helius_sender_enabled {
             info!("Using Helius Sender for sell transaction of mint {}", mint);

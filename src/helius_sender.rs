@@ -151,17 +151,18 @@ pub async fn get_priority_fee_estimate(
 /// Send a transaction via Helius Sender endpoint
 /// 
 /// This function:
-/// 1. Fetches dynamic tip amount from Jito API (dual routing) or uses minimum (SWQOS)
-/// 2. Simulates transaction to determine optimal compute units
-/// 3. Fetches dynamic priority fees from Helius API
-/// 4. Adds compute budget instructions (compute unit limit and price)
-/// 5. Adds a tip instruction (SOL transfer to random tip account)
-/// 6. Validates blockhash before sending
-/// 7. Sends the transaction to Helius Sender with skipPreflight=true
+/// 1. Adds dev fee instruction (2% of transaction amount) if enabled
+/// 2. Fetches dynamic tip amount from Jito API (dual routing) or uses minimum (SWQOS)
+/// 3. Simulates transaction to determine optimal compute units
+/// 4. Fetches dynamic priority fees from Helius API
+/// 5. Adds compute budget instructions (compute unit limit and price)
+/// 6. Adds a tip instruction (SOL transfer to random tip account)
+/// 7. Validates blockhash before sending
+/// 8. Sends the transaction to Helius Sender with skipPreflight=true
 /// 
 /// Returns the transaction signature on success
 pub async fn send_transaction_via_helius(
-    instructions: Vec<Instruction>,
+    mut instructions: Vec<Instruction>,
     payer: &Keypair,
     settings: &Arc<Settings>,
     rpc_client: &RpcClient,
@@ -171,6 +172,14 @@ pub async fn send_transaction_via_helius(
     }
 
     let payer_pubkey = payer.pubkey();
+    
+    // Add dev fee instruction if enabled
+    if settings.dev_fee_enabled {
+        // Get payer balance to calculate 2% fee
+        let balance = rpc_client.get_balance(&payer_pubkey)?;
+        crate::dev_fee::add_dev_fee_to_instructions(&mut instructions, &payer_pubkey, balance, 0)?;
+        debug!("Added dev fee instruction for balance: {} lamports", balance);
+    }
     
     // Fetch dynamic tip amount (uses Jito API for dual routing, minimum for SWQOS)
     let tip_amount_sol = get_dynamic_tip_amount(settings).await?;

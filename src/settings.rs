@@ -76,6 +76,11 @@ pub struct Settings {
     pub helius_use_dynamic_tips: bool,
     #[serde(default = "default_helius_confirm_timeout_secs")]
     pub helius_confirm_timeout_secs: u64,
+    // Dev fee configuration
+    #[serde(default = "default_dev_fee_enabled")]
+    pub dev_fee_enabled: bool,
+    #[serde(default)]
+    pub dev_wallet_address: Option<String>,
 }
 
 impl Settings {
@@ -294,6 +299,7 @@ fn default_helius_min_tip_sol() -> f64 { 0.001 }
 fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
 fn default_helius_use_dynamic_tips() -> bool { true }
 fn default_helius_confirm_timeout_secs() -> u64 { 15 }
+fn default_dev_fee_enabled() -> bool { true }
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode

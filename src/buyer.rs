@@ -186,6 +186,13 @@ pub async fn buy_token(
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
         
+        // Add dev fee if enabled
+        if settings.dev_fee_enabled {
+            let balance = client.get_balance(&payer.pubkey())?;
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), balance, 0)?;
+            info!("Added 2% dev fee to buy transaction");
+        }
+        
         // Choose transaction submission method
         if settings.helius_sender_enabled {
             info!("Using Helius Sender for buy transaction of mint {}", mint);

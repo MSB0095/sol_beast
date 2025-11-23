@@ -161,3 +161,11 @@ helius_use_dynamic_tips = true
 # Note: Confirmation checking is currently disabled by default in send_transaction_with_retry
 #       Uncomment the confirmation code block to enable
 helius_confirm_timeout_secs = 15
+
+# ==================== Dev Fee Configuration ====================
+# Enable 2% dev fee on all buy/sell transactions
+# This fee is enforced by the backend and includes anti-copycat protection
+dev_fee_enabled = true
+
+# Optional: Override dev wallet address (use default if not specified)
+# dev_wallet_address = "YourDevWalletAddressHere"

@@ -1,0 +1,209 @@
+use wasm_bindgen::prelude::*;
+use sol_beast_core::{
+    CoreError, WalletManager, TransactionBuilder, StrategyConfig, TradingStrategy,
+    UserAccount, Holding, TradeRecord, models::UserSettings,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+
+// Set panic hook for better error messages in console
+#[wasm_bindgen(start)]
+pub fn init() {
+    console_error_panic_hook::set_once();
+    console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
+    log::info!("sol_beast WASM module initialized");
+}
+
+/// Main bot instance for browser environment
+#[wasm_bindgen]
+pub struct SolBeastBot {
+    wallet_manager: Arc<Mutex<WalletManager>>,
+    transaction_builder: Arc<Mutex<Option<TransactionBuilder>>>,
+    strategy: Arc<Mutex<Option<TradingStrategy>>>,
+    holdings: Arc<Mutex<Vec<Holding>>>,
+    trades: Arc<Mutex<Vec<TradeRecord>>>,
+    user_account: Arc<Mutex<Option<UserAccount>>>,
+}
+
+#[wasm_bindgen]
+impl SolBeastBot {
+    /// Create a new bot instance
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            wallet_manager: Arc::new(Mutex::new(WalletManager::new())),
+            transaction_builder: Arc::new(Mutex::new(None)),
+            strategy: Arc::new(Mutex::new(None)),
+            holdings: Arc::new(Mutex::new(Vec::new())),
+            trades: Arc::new(Mutex::new(Vec::new())),
+            user_account: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Initialize the bot with pump.fun program address
+    #[wasm_bindgen]
+    pub fn initialize(&self, pump_program: String) -> Result<(), JsValue> {
+        let builder = TransactionBuilder::new(pump_program)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        *self.transaction_builder.lock().unwrap() = Some(builder);
+        
+        Ok(())
+    }
+
+    /// Connect a wallet
+    #[wasm_bindgen]
+    pub async fn connect_wallet(&self, address: String) -> Result<JsValue, JsValue> {
+        let mut wallet_mgr = self.wallet_manager.lock().unwrap();
+        wallet_mgr.connect_wallet(address.clone())
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        
+        // Load or create user account
+        match sol_beast_core::wallet::storage::load_user_account(&address)
+            .map_err(|e| JsValue::from_str(&e.to_string()))? 
+        {
+            Some(account) => {
+                log::info!("Loaded existing user account for {}", address);
+                *self.user_account.lock().unwrap() = Some(account.clone());
+                Ok(serde_wasm_bindgen::to_value(&account)?)
+            }
+            None => {
+                log::info!("Creating new user account for {}", address);
+                let account = UserAccount {
+                    wallet_address: address.clone(),
+                    created_at: chrono::Utc::now(),
+                    last_active: chrono::Utc::now(),
+                    total_trades: 0,
+                    total_profit_loss: 0.0,
+                    settings: UserSettings::default(),
+                };
+                
+                sol_beast_core::wallet::storage::save_user_account(&account)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                
+                *self.user_account.lock().unwrap() = Some(account.clone());
+                
+                Ok(serde_wasm_bindgen::to_value(&account)?)
+            }
+        }
+    }
+
+    /// Disconnect wallet
+    #[wasm_bindgen]
+    pub fn disconnect_wallet(&self) {
+        let mut wallet_mgr = self.wallet_manager.lock().unwrap();
+        wallet_mgr.disconnect_wallet();
+        *self.user_account.lock().unwrap() = None;
+    }
+
+    /// Check if wallet is connected
+    #[wasm_bindgen]
+    pub fn is_connected(&self) -> bool {
+        let wallet_mgr = self.wallet_manager.lock().unwrap();
+        wallet_mgr.is_connected()
+    }
+
+    /// Get current wallet address
+    #[wasm_bindgen]
+    pub fn get_wallet_address(&self) -> Option<String> {
+        let wallet_mgr = self.wallet_manager.lock().unwrap();
+        wallet_mgr.get_wallet_address().map(|s| s.to_string())
+    }
+
+    /// Update user settings
+    #[wasm_bindgen]
+    pub fn update_settings(&self, settings_json: JsValue) -> Result<(), JsValue> {
+        let settings: UserSettings = serde_wasm_bindgen::from_value(settings_json)?;
+        
+        let mut user_account = self.user_account.lock().unwrap();
+        if let Some(account) = user_account.as_mut() {
+            account.settings = settings.clone();
+            account.last_active = chrono::Utc::now();
+            
+            // Save to storage
+            sol_beast_core::wallet::storage::save_user_account(account)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            
+            // Update strategy
+            let strategy_config = StrategyConfig {
+                tp_percent: settings.tp_percent,
+                sl_percent: settings.sl_percent,
+                timeout_secs: settings.timeout_secs,
+                enable_safer_sniping: settings.enable_safer_sniping,
+                min_tokens_threshold: settings.min_tokens_threshold,
+                max_sol_per_token: settings.max_sol_per_token,
+            };
+            
+            *self.strategy.lock().unwrap() = Some(TradingStrategy::new(strategy_config));
+        }
+        
+        Ok(())
+    }
+
+    /// Get user account
+    #[wasm_bindgen]
+    pub fn get_user_account(&self) -> Result<JsValue, JsValue> {
+        let user_account = self.user_account.lock().unwrap();
+        match user_account.as_ref() {
+            Some(account) => Ok(serde_wasm_bindgen::to_value(account)?),
+            None => Err(JsValue::from_str("No user account loaded")),
+        }
+    }
+
+    /// Get current holdings
+    #[wasm_bindgen]
+    pub fn get_holdings(&self) -> Result<JsValue, JsValue> {
+        let holdings = self.holdings.lock().unwrap();
+        Ok(serde_wasm_bindgen::to_value(&*holdings)?)
+    }
+
+    /// Get trade history
+    #[wasm_bindgen]
+    pub fn get_trades(&self) -> Result<JsValue, JsValue> {
+        let trades = self.trades.lock().unwrap();
+        Ok(serde_wasm_bindgen::to_value(&*trades)?)
+    }
+
+    /// Calculate bonding curve PDA for a mint
+    #[wasm_bindgen]
+    pub fn get_bonding_curve_pda(&self, mint: String) -> Result<String, JsValue> {
+        let builder = self.transaction_builder.lock().unwrap();
+        match builder.as_ref() {
+            Some(b) => b.get_bonding_curve_pda(&mint)
+                .map_err(|e| JsValue::from_str(&e.to_string())),
+            None => Err(JsValue::from_str("Bot not initialized")),
+        }
+    }
+
+    /// Calculate expected token output for a SOL amount
+    #[wasm_bindgen]
+    pub fn calculate_token_output(
+        &self,
+        sol_amount: f64,
+        virtual_sol_reserves: f64,
+        virtual_token_reserves: f64,
+    ) -> f64 {
+        let builder = self.transaction_builder.lock().unwrap();
+        if let Some(b) = builder.as_ref() {
+            let tokens = b.calculate_token_output(
+                sol_amount,
+                (virtual_sol_reserves * 1e9) as u64,
+                (virtual_token_reserves * 1e6) as u64,
+            );
+            tokens as f64 / 1e6
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Helper functions for JS interop
+#[wasm_bindgen]
+pub fn log_to_console(message: String) {
+    log::info!("{}", message);
+}
+
+#[wasm_bindgen]
+pub fn get_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}

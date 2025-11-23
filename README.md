@@ -1,41 +1,151 @@
 # sol_beast
 
-Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heuristics and manage holdings (TP/SL/timeout).
+**A dual-mode Solana trading bot** for monitoring pump.fun token launches with automated buy/sell strategies.
 
-Quick start
+## 🚀 Two Ways to Run
 
-1. Copy the example config and edit values (RPC/WS URLs and program IDs):
+### 🌐 Browser Mode (New!)
+Trade directly from your browser using WebAssembly (WASM) and your Solana wallet:
+- ✅ No server needed - fully decentralized
+- ✅ Your keys, your control (wallet extension)
+- ✅ Cross-platform (any device with a browser)
+- ✅ Settings saved per wallet address
+- ✅ Local trade history and holdings
+
+### 🖥️ CLI/Server Mode
+Traditional automated trading bot for power users:
+- ✅ Fully automated 24/7 trading
+- ✅ Lower latency (direct server ↔ Solana)
+- ✅ Advanced features (Helius Sender, etc.)
+- ✅ REST API + Web dashboard
+- ✅ Enterprise-grade reliability
+
+## Quick Start
+
+### Browser Mode (5 minutes)
 
 ```bash
+# 1. Install wasm-pack
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# 2. Build WASM module
+cd sol_beast_wasm && ./wasm-pack-build.sh && cd ..
+
+# 3. Start frontend
+cd frontend && npm install && npm run dev
+
+# 4. Open http://localhost:5173 and connect your wallet!
+```
+
+### CLI Mode (Traditional)
+
+```bash
+# 1. Copy and configure settings
 cp config.example.toml config.toml
-# edit config.toml and set wallet_keypair_path before using --real
-```
+# Edit config.toml and set your wallet
 
-2. Run in dry (safe) mode — this will NOT use any wallet or send transactions:
-
-```bash
+# 2. Test in dry-run mode (no real transactions)
 RUST_LOG=info cargo run
-```
 
-3. Run in real mode (ONLY after you set `wallet_keypair_path` in `config.toml` to a secure keypair file):
-
-```bash
+# 3. Run for real (careful!)
 RUST_LOG=info cargo run --release -- --real
 ```
 
-Notes & safety
+## 📚 Documentation
 
-- The `--real` path uses the keypair file at `wallet_keypair_path`. Do not commit private keys to the repository.
-- `rpc::buy_token` and `rpc::sell_token` contain TODOs and placeholder `Instruction` data — review and implement proper transaction construction before enabling `--real` in any automated environment.
+- **[SETUP.md](./SETUP.md)** - Detailed setup instructions for both modes
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture and design
+- **[config.example.toml](./config.example.toml)** - Configuration reference
 
-Files of interest
+## 🏗️ Project Structure
 
-- `src/main.rs` — runtime, message processing and holdings monitor
-- `src/ws.rs` — websocket subscriptions and reconnect loop
-- `src/rpc.rs` — Solana RPC helpers, price extraction, buy/sell functions (TODOs)
-- `src/models.rs` — bonding curve state and models
-- `src/helius_sender.rs` — Helius Sender integration for ultra-low latency transaction submission
-- `config.example.toml` — example configuration (copy to `config.toml`)
+```
+sol_beast/
+├── sol_beast_core/      # Shared Rust library (native + WASM)
+├── sol_beast_wasm/      # WASM bindings for browser
+├── sol_beast_cli/       # CLI application (server mode)
+├── frontend/            # React + TypeScript dashboard
+└── src/                 # Legacy source (being migrated)
+```
+
+## ✨ Features
+
+### Trading Strategy
+- ✅ Configurable take-profit (TP) percentage
+- ✅ Configurable stop-loss (SL) percentage
+- ✅ Timeout-based auto-sell
+- ✅ Safer sniping filters (price, liquidity, etc.)
+- ✅ Slippage tolerance
+
+### Token Monitoring
+- ✅ Real-time pump.fun token launches
+- ✅ Automatic metadata fetching
+- ✅ Bonding curve analysis
+- ✅ Multi-websocket support for reliability
+
+### Browser Mode Extras
+- ✅ Wallet adapter (Phantom, Solflare, etc.)
+- ✅ Per-wallet account persistence
+- ✅ Local trade history
+- ✅ Real-time holdings tracking
+- ✅ User-friendly configuration UI
+
+### CLI Mode Extras
+- ✅ Helius Sender integration
+- ✅ Dynamic priority fees
+- ✅ REST API for monitoring
+- ✅ Web dashboard
+- ✅ Comprehensive logging
+
+## 🔐 Security
+
+### Browser Mode
+- Private keys stay in your wallet extension
+- No data sent to external servers
+- You approve every transaction
+- Settings stored locally in your browser
+
+### CLI Mode
+- Never commit private keys
+- Use environment variables for secrets
+- Test in dry-run mode first
+- Use dedicated trading wallets
+
+## 🛠️ Development
+
+```bash
+# Test core library
+cargo test -p sol_beast_core
+
+# Test all packages
+cargo test --workspace
+
+# Build for production
+cargo build --release
+
+# Format code
+cargo fmt --all
+
+# Lint
+cargo clippy --all-targets
+```
+
+## Notes & Safety
+
+- **Browser Mode**: You control your wallet and approve all transactions
+- **CLI Mode**: The `--real` flag uses your configured keypair - test thoroughly first!
+- Start with small amounts to test the strategy
+- Monitor your positions regularly
+- Set reasonable limits (max holdings, buy amount)
+
+## Files of Interest
+
+- `sol_beast_core/` - Platform-agnostic trading logic
+- `sol_beast_wasm/` - WASM bindings for browsers
+- `frontend/src/components/` - React UI components
+- `frontend/src/store/wasmStore.ts` - WASM integration
+- `src/main.rs` - Legacy CLI runtime (being refactored)
+- `config.example.toml` - Configuration template
 
 ## Helius Sender Integration
 

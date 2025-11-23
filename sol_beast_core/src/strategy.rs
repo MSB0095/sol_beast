@@ -126,11 +126,13 @@ mod tests {
             onchain: None,
         };
 
-        // Price up 30% - should trigger TP
-        let current_price = 0.000013;
+        // Price up more than 30% to definitely trigger TP
+        // 0.00001 * 1.31 = 0.0000131
+        let current_price = 0.0000131;
         let result = strategy.should_sell(&holding, current_price).unwrap();
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("Take profit"));
+        assert!(result.is_some(), "Expected TP to trigger at 31% gain");
+        let reason = result.unwrap();
+        assert!(reason.contains("Take profit"), "Expected 'Take profit' message, got: {}", reason);
     }
 
     #[test]

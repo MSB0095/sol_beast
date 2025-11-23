@@ -1,6 +1,7 @@
 use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionResult {
@@ -16,7 +17,7 @@ pub struct TransactionBuilder {
 
 impl TransactionBuilder {
     pub fn new(pump_program: String) -> Result<Self, CoreError> {
-        let pump_program = Pubkey::try_from(pump_program.as_str())
+        let pump_program = Pubkey::from_str(&pump_program)
             .map_err(|e| CoreError::Config(format!("Invalid pump program: {}", e)))?;
         
         Ok(Self { pump_program })
@@ -24,7 +25,7 @@ impl TransactionBuilder {
 
     /// Calculate the bonding curve PDA for a mint
     pub fn get_bonding_curve_pda(&self, mint: &str) -> Result<String, CoreError> {
-        let mint_pubkey = Pubkey::try_from(mint)
+        let mint_pubkey = Pubkey::from_str(mint)
             .map_err(|e| CoreError::Parse(format!("Invalid mint: {}", e)))?;
         
         let (pda, _bump) = Pubkey::find_program_address(
@@ -105,6 +106,6 @@ mod tests {
         
         // Should return a valid base58 pubkey
         assert!(!pda.is_empty());
-        assert!(Pubkey::try_from(pda.as_str()).is_ok());
+        assert!(Pubkey::from_str(&pda).is_ok());
     }
 }

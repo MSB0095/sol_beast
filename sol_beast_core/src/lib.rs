@@ -20,7 +20,8 @@ pub use models::{
 };
 pub use transaction::{TransactionBuilder, TransactionResult};
 pub use wallet::{WalletManager, WalletInfo};
-pub use strategy::{TradingStrategy, StrategyConfig};
+pub use strategy::TradingStrategy;
+pub use models::StrategyConfig;
 
 // Platform-specific initialization
 #[cfg(target_arch = "wasm32")]

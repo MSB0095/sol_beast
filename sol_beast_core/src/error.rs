@@ -52,6 +52,13 @@ impl From<bs58::decode::Error> for CoreError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl From<solana_sdk::pubkey::ParsePubkeyError> for CoreError {
+    fn from(err: solana_sdk::pubkey::ParsePubkeyError) -> Self {
+        CoreError::Parse(err.to_string())
+    }
+}
+
 impl From<std::io::Error> for CoreError {
     fn from(err: std::io::Error) -> Self {
         CoreError::Storage(err.to_string())

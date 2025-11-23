@@ -1,6 +1,5 @@
 use crate::error::CoreError;
 use crate::models::BondingCurveState;
-use serde_json::Value;
 
 /// RPC client trait for both native and WASM implementations
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -46,7 +45,8 @@ pub fn parse_bonding_curve(data: &[u8]) -> Result<BondingCurveState, CoreError> 
     );
     let complete = data[40] != 0;
     
-    let creator = if data.len() >= 72 {
+    let creator = if data.len() >= 73 {
+        // Creator is 32 bytes starting at index 41
         let creator_bytes = &data[41..73];
         Some(bs58::encode(creator_bytes).into_string())
     } else {
@@ -105,12 +105,12 @@ pub mod native {
             self.client.get_balance(&pubkey).map_err(CoreError::from)
         }
 
-        async fn send_transaction(&self, transaction: &[u8]) -> Result<String, CoreError> {
+        async fn send_transaction(&self, _transaction: &[u8]) -> Result<String, CoreError> {
             // Implementation would involve deserializing and sending the transaction
             Err(CoreError::Internal("Not implemented".to_string()))
         }
 
-        async fn confirm_transaction(&self, signature: &str) -> Result<bool, CoreError> {
+        async fn confirm_transaction(&self, _signature: &str) -> Result<bool, CoreError> {
             // Implementation would check transaction confirmation
             Err(CoreError::Internal("Not implemented".to_string()))
         }
@@ -227,12 +227,13 @@ mod tests {
 
     #[test]
     fn test_parse_bonding_curve() {
-        // Create mock data with discriminator + fields
+        // Create mock data with discriminator + fields (need at least 73 bytes for creator)
         let mut data = vec![0u8; 80];
         
-        // Discriminator (8 bytes)
+        // Discriminator (8 bytes) - will be stripped
         data[0..8].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
         
+        // After discriminator (starting at index 8):
         // virtual_token_reserves
         data[8..16].copy_from_slice(&1000u64.to_le_bytes());
         // virtual_sol_reserves
@@ -243,8 +244,10 @@ mod tests {
         data[32..40].copy_from_slice(&4000u64.to_le_bytes());
         // token_total_supply
         data[40..48].copy_from_slice(&5000u64.to_le_bytes());
-        // complete
+        // complete (1 byte)
         data[48] = 1;
+        // creator (32 bytes starting at 49)
+        // Leave as zeros for test
         
         let result = parse_bonding_curve(&data).unwrap();
         

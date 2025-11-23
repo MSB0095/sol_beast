@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use solana_sdk::pubkey::Pubkey;
 
 /// Bonding Curve State for pump.fun tokens
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]

@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useBotStore } from './store/botStore'
 import { useSettingsStore } from './store/settingsStore'
+import { useWasmStore } from './store/wasmStore'
 import Header from './components/Header'
 import Dashboard from './components/Dashboard'
 import ConfigurationPanel from './components/ConfigurationPanel'
@@ -9,14 +10,22 @@ import LogsPanel from './components/LogsPanel'
 import BotControl from './components/BotControl'
 import NewCoinsPanel from './components/NewCoinsPanel'
 import TradingHistory from './components/TradingHistory'
+import WalletConnect from './components/WalletConnect'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import './App.css'
 
 function App() {
   const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
+  const { initializeWasm, initialized: wasmInitialized } = useWasmStore()
 
   useEffect(() => {
+    // Initialize WASM module for browser-based trading
+    initializeWasm().catch(err => {
+      console.error('Failed to initialize WASM:', err)
+    })
+
+    // Also initialize backend connection for hybrid mode
     initializeConnection()
     fetchSettings()
 
@@ -24,7 +33,7 @@ function App() {
     return () => {
       cleanup()
     }
-  }, [initializeConnection, cleanup, fetchSettings])
+  }, [initializeConnection, cleanup, fetchSettings, initializeWasm])
 
   return (
     <div className="min-h-screen bg-black transition-colors duration-500 relative overflow-hidden">
@@ -55,6 +64,23 @@ function App() {
       <Header />
       
       <main className="container mx-auto px-4 py-8 relative z-10">
+        {/* Wallet Connection Section */}
+        <div className="mb-6">
+          <div className="card bg-base-200 p-6">
+            <h2 className="text-lg font-bold mb-4">Browser Mode - Wallet Connection</h2>
+            <p className="text-sm opacity-70 mb-4">
+              Connect your Solana wallet to trade directly from your browser. Your settings and holdings are securely stored locally.
+            </p>
+            <WalletConnect />
+            {wasmInitialized && (
+              <div className="mt-2 text-xs text-success flex items-center gap-2">
+                <span className="w-2 h-2 bg-success rounded-full animate-pulse"></span>
+                WASM module loaded - Browser trading ready
+              </div>
+            )}
+          </div>
+        </div>
+
         {status === 'disconnected' && (
           <div className="alert-error mb-6 p-6 rounded-2xl relative overflow-hidden animate-fade-in-up">
             <p className="font-mono-tech font-black flex items-center gap-3 uppercase tracking-widest text-base mb-3">

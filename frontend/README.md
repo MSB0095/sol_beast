@@ -28,9 +28,19 @@ The frontend will start on `http://localhost:3000` and proxy API requests to `ht
 
 ## Building
 
+### Local Build
 ```bash
 npm run build
 ```
+
+### GitHub Pages Deployment
+The project includes a GitHub Actions workflow that automatically builds and deploys to GitHub Pages. The workflow:
+1. Builds the WASM module from `sol_beast_wasm`
+2. Installs frontend dependencies
+3. Builds the frontend with proper base path configuration
+4. Deploys to GitHub Pages
+
+The deployment is triggered on push to `main` or `master` branches, or can be manually triggered via workflow dispatch.
 
 ## Architecture
 

@@ -72,12 +72,13 @@ impl TradingStrategy {
             )));
         }
 
-        // Timeout
+        // Timeout (guard against clock skew producing negative durations)
         let holding_duration = Utc::now().signed_duration_since(holding.buy_time);
-        if holding_duration.num_seconds() >= self.config.timeout_secs {
+        let duration_secs = holding_duration.num_seconds().max(0); // Ensure non-negative
+        if duration_secs >= self.config.timeout_secs {
             return Ok(Some(format!(
                 "Timeout after {} seconds ({:.2}% P/L)",
-                holding_duration.num_seconds(),
+                duration_secs,
                 price_change_percent
             )));
         }

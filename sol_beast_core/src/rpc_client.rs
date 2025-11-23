@@ -171,7 +171,10 @@ pub mod wasm {
             let json_str = js_sys::JSON::stringify(&json)
                 .map_err(|_| CoreError::Network("Failed to stringify".to_string()))?;
             
-            let value: Value = serde_json::from_str(&json_str.as_string().unwrap())
+            let json_string = json_str.as_string()
+                .ok_or_else(|| CoreError::Network("Failed to convert JSON to string".to_string()))?;
+            
+            let value: serde_json::Value = serde_json::from_str(&json_string)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
             Ok(value)

@@ -188,9 +188,10 @@ pub async fn buy_token(
         
         // Add dev fee if enabled
         if settings.dev_fee_enabled {
-            let balance = client.get_balance(&payer.pubkey())?;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), balance, 0)?;
-            info!("Added 2% dev fee to buy transaction");
+            // Calculate transaction amount in lamports (sol_amount is in SOL)
+            let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports, 0)?;
+            info!("Added 2% dev fee to buy transaction ({} SOL)", sol_amount);
         }
         
         // Choose transaction submission method

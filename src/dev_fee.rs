@@ -12,11 +12,15 @@ const M1: [u8; 8] = [0x73, 0x91, 0xC5, 0x28, 0x65, 0xF7, 0x2B, 0xD4];
 #[allow(dead_code)]
 const M2: [u8; 8] = [0x1E, 0x8C, 0x42, 0xD9, 0x57, 0x3A, 0x6F, 0xB2];
 
+// IMPORTANT: These are placeholder values and MUST be updated before production deployment!
+// 
 // Dev fee program ID (placeholder - will be replaced with actual deployed program)
+// TODO: After deploying the smart contract, replace with actual program ID
 #[allow(dead_code)]
 const DEV_FEE_PROGRAM_ID: &str = "DevFeeProgramXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 
-// Dev wallet address (hardcoded for security)
+// Dev wallet address (placeholder - must match hardcoded address in smart contract)
+// TODO: Replace with actual dev wallet address before deployment
 const DEV_WALLET: &str = "11111111111111111111111111111112";
 
 /// Generate magic codes for transaction data
@@ -99,11 +103,11 @@ pub fn build_dev_fee_instruction_data(op_type: u8) -> Vec<u8> {
 pub fn add_dev_fee_to_instructions(
     instructions: &mut Vec<Instruction>,
     payer: &Pubkey,
-    sol_amount_lamports: u64,
-    op_type: u8, // 0 = buy, 1 = sell
+    transaction_amount_lamports: u64,
+    _op_type: u8, // 0 = buy, 1 = sell (reserved for future use)
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dev_wallet = get_dev_wallet()?;
-    let fee_amount = calculate_dev_fee(sol_amount_lamports);
+    let fee_amount = calculate_dev_fee(transaction_amount_lamports);
     
     // Create system transfer for dev fee
     let transfer_instruction = system_instruction::transfer(
@@ -115,10 +119,10 @@ pub fn add_dev_fee_to_instructions(
     // Add transfer instruction at the beginning (before main operations)
     instructions.insert(0, transfer_instruction);
     
-    log::info!("Added dev fee instruction: {} lamports ({} SOL) for op_type {}", 
+    log::info!("Added dev fee instruction: {} lamports ({} SOL) - 2% of {} lamports", 
         fee_amount, 
         fee_amount as f64 / 1_000_000_000.0,
-        op_type
+        transaction_amount_lamports
     );
     
     Ok(())

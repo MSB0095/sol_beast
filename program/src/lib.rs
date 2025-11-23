@@ -15,7 +15,10 @@ const M1: [u8; 8] = [0x73, 0x91, 0xC5, 0x28, 0x65, 0xF7, 0x2B, 0xD4];
 // Magic code 2: XOR with 0x7F => actual value when decoded  
 const M2: [u8; 8] = [0x1E, 0x8C, 0x42, 0xD9, 0x57, 0x3A, 0x6F, 0xB2];
 
-// Dev fee wallet (hardcoded, can be changed before deployment)
+// IMPORTANT: This is a placeholder address and MUST be updated before deployment!
+// TODO: Replace with actual dev wallet address (convert base58 to bytes)
+// Example: Use `solana address --keypair <wallet.json>` then convert to byte array
+// Dev fee wallet (hardcoded, must be changed before deployment)
 const DEV_WALLET: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1
@@ -71,6 +74,9 @@ pub fn process_instruction(
         return Err(ProgramError::MissingRequiredSignature);
     }
     
+    // Note: This simple contract calculates fee based on payer balance for minimal bytecode
+    // The backend pre-calculates and adds the exact transfer amount needed
+    // This is just a validation layer - the actual fee transfer is done by backend
     // Calculate 2% fee from payer balance (in lamports)
     let fee_amount = payer.lamports().checked_div(50).ok_or(ProgramError::ArithmeticOverflow)?;
     

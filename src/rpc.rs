@@ -1100,9 +1100,10 @@ pub async fn sell_token(
         
         // Add dev fee if enabled
         if settings.dev_fee_enabled {
-            let balance = client.get_balance(&user_pubkey)?;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, balance, 1)?;
-            info!("Added 2% dev fee to sell transaction");
+            // Calculate expected SOL received from sell (in lamports)
+            let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, 1)?;
+            info!("Added 2% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
         }
         
         // Choose transaction submission method

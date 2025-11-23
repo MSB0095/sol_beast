@@ -73,6 +73,13 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: Prepare GitHub Pages deployment
+        run: |
+          touch frontend/dist/.nojekyll
+          echo "Sol Beast - Solana Trading Bot" > frontend/dist/README.txt
+          echo "Built with WASM + React" >> frontend/dist/README.txt
+          echo "Build date: $(date)" >> frontend/dist/README.txt
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 

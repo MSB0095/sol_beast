@@ -37,12 +37,19 @@ impl TransactionBuilder {
     }
 
     /// Calculate expected token output for a given SOL input
+    /// 
+    /// Note: This method accepts f64 for convenience but converts to lamports internally.
+    /// For production use with large amounts, consider accepting lamports directly as u64
+    /// to avoid floating-point precision issues. The current implementation is acceptable
+    /// for typical trading amounts (< 1000 SOL) where precision loss is negligible.
     pub fn calculate_token_output(
         &self,
         sol_amount: f64,
         virtual_sol_reserves: u64,
         virtual_token_reserves: u64,
     ) -> u64 {
+        // Convert SOL to lamports (1 SOL = 1e9 lamports)
+        // Precision loss is acceptable for typical trading amounts
         let sol_lamports = (sol_amount * 1e9) as u64;
         
         // Constant product formula: k = virtual_sol * virtual_token

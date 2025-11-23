@@ -38,8 +38,8 @@ export const useWasmStore = create<WasmState>((set, get) => ({
       // Create bot instance
       const bot = new wasmModule.SolBeastBot();
       
-      // Initialize with pump.fun program address
-      const pumpProgram = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+      // Initialize with pump.fun program address (configurable via environment)
+      const pumpProgram = import.meta.env.VITE_PUMP_PROGRAM || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
       bot.initialize(pumpProgram);
       
       set({ bot, initialized: true, loading: false });
@@ -48,7 +48,7 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     } catch (error) {
       console.error('Failed to initialize WASM module:', error);
       set({ 
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: error instanceof Error ? error.message : `Failed to initialize: ${String(error)}`,
         loading: false 
       });
     }

@@ -123,6 +123,7 @@ pub mod wasm {
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{Request, RequestInit, Response};
+    use serde_json::Value;
 
     pub struct WasmRpcClient {
         url: String,

@@ -73,6 +73,9 @@ pub mod storage {
     use wasm_bindgen::JsValue;
     use web_sys::window;
 
+    // Note: localStorage is origin-scoped but not protected against XSS attacks.
+    // User data stored here does not contain private keys (those stay in wallet extension).
+    // Consider additional encryption for sensitive fields in future versions.
     const STORAGE_KEY_PREFIX: &str = "sol_beast_user_";
 
     pub fn save_user_account(account: &UserAccount) -> Result<(), CoreError> {
@@ -121,23 +124,25 @@ pub mod storage {
     use super::*;
     use std::path::PathBuf;
 
-    fn get_storage_path(wallet_address: &str) -> PathBuf {
-        let mut path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    fn get_storage_path(wallet_address: &str) -> Result<PathBuf, CoreError> {
+        let mut path = std::env::current_dir()
+            .map_err(|e| CoreError::Storage(format!("Failed to get current directory: {}", e)))?;
         path.push(".sol_beast_data");
-        std::fs::create_dir_all(&path).ok();
+        std::fs::create_dir_all(&path)
+            .map_err(|e| CoreError::Storage(format!("Failed to create storage directory: {}", e)))?;
         path.push(format!("user_{}.json", wallet_address));
-        path
+        Ok(path)
     }
 
     pub fn save_user_account(account: &UserAccount) -> Result<(), CoreError> {
-        let path = get_storage_path(&account.wallet_address);
+        let path = get_storage_path(&account.wallet_address)?;
         let json = serde_json::to_string_pretty(account)?;
         std::fs::write(path, json)?;
         Ok(())
     }
 
     pub fn load_user_account(wallet_address: &str) -> Result<Option<UserAccount>, CoreError> {
-        let path = get_storage_path(wallet_address);
+        let path = get_storage_path(wallet_address)?;
         if !path.exists() {
             return Ok(None);
         }

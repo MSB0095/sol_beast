@@ -15,12 +15,21 @@ pub struct BondingCurveState {
 
 impl BondingCurveState {
     /// Compute the spot price in SOL per token using the virtual reserves.
+    /// 
+    /// Returns the price in SOL per token (with token decimals).
+    /// Formula: (virtual_sol_lamports / virtual_token_base_units) * 1e-3
+    /// 
+    /// The 1e-3 factor accounts for the unit conversion:
+    /// - SOL reserves are in lamports (1 SOL = 1e9 lamports)
+    /// - Token reserves are in base units (1 token = 1e6 base units for 6 decimals)
+    /// - Result: (lamports / base_units) * 1e-3 = SOL per token
     pub fn spot_price_sol_per_token(&self) -> Option<f64> {
         if self.virtual_token_reserves == 0 {
             return None;
         }
         let vsol = self.virtual_sol_reserves as f64;
         let vtok = self.virtual_token_reserves as f64;
+        // Price = (SOL_lamports / token_base_units) * 1e-3
         Some((vsol / vtok) * 1e-3)
     }
 }
@@ -42,7 +51,7 @@ pub struct UserSettings {
     pub sl_percent: f64,
     pub timeout_secs: i64,
     pub buy_amount: f64,
-    pub max_holded_coins: usize,
+    pub max_held_coins: usize,
     pub enable_safer_sniping: bool,
     pub min_tokens_threshold: u64,
     pub max_sol_per_token: f64,
@@ -56,7 +65,7 @@ impl Default for UserSettings {
             sl_percent: -20.0,
             timeout_secs: 3600,
             buy_amount: 0.1,
-            max_holded_coins: 10,
+            max_held_coins: 10,
             enable_safer_sniping: true,
             min_tokens_threshold: 1_000_000,
             max_sol_per_token: 0.0001,

@@ -43,4 +43,4 @@ opt-level = "z"     # Optimize for size
 lto = true          # Enable Link Time Optimization
 codegen-units = 1   # Reduce parallel codegen for better optimization
 panic = "abort"     # Reduce binary size
-strip = true        # Strip symbols
+strip = "debuginfo" # Strip debug info only, preserve some debuggability

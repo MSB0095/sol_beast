@@ -74,7 +74,18 @@ impl TradingStrategy {
 
         // Timeout (guard against clock skew producing negative durations)
         let holding_duration = Utc::now().signed_duration_since(holding.buy_time);
-        let duration_secs = holding_duration.num_seconds().max(0); // Ensure non-negative
+        let duration_secs = if holding_duration.num_seconds() < 0 {
+            log::warn!(
+                "Clock skew or data corruption detected for holding {}: buy_time ({}) is after current time ({}). Duration: {} seconds.",
+                holding.mint,
+                holding.buy_time,
+                Utc::now(),
+                holding_duration.num_seconds()
+            );
+            0
+        } else {
+            holding_duration.num_seconds()
+        };
         if duration_secs >= self.config.timeout_secs {
             return Ok(Some(format!(
                 "Timeout after {} seconds ({:.2}% P/L)",

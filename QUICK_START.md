@@ -76,7 +76,7 @@ wallet_keypair_path = "./keypair.json"
 
 # Safety
 enable_safer_sniping = true
-max_holded_coins = 100
+max_held_coins = 100
 ```
 
 ---

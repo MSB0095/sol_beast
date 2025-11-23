@@ -81,7 +81,11 @@ cp ~/.config/solana/id.json ./keypair.json
 
 **Option C: Use base64 environment variable (recommended)**
 ```bash
+# Linux (GNU coreutils)
 export SOL_BEAST_KEYPAIR_B64=$(cat keypair.json | base64 -w0)
+
+# macOS (BSD base64)
+export SOL_BEAST_KEYPAIR_B64=$(cat keypair.json | base64)
 ```
 
 ### 2. Configure Settings
@@ -296,7 +300,10 @@ export VITE_SOLANA_RPC_URL="https://your-rpc-endpoint.com"
 ### CLI Mode
 ```bash
 # Recommended: Keypair as base64
+# Linux (GNU coreutils)
 export SOL_BEAST_KEYPAIR_B64=$(cat keypair.json | base64 -w0)
+# macOS (BSD base64)
+export SOL_BEAST_KEYPAIR_B64=$(cat keypair.json | base64)
 
 # Optional: Custom config path
 export SOL_BEAST_CONFIG_PATH="/path/to/config.toml"

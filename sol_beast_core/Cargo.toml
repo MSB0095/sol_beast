@@ -1,0 +1,51 @@
+[package]
+name = "sol_beast_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+bs58 = { workspace = true }
+borsh = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+url = { workspace = true }
+rand = { workspace = true }
+once_cell = { workspace = true }
+
+solana-program = { workspace = true }
+solana-sdk = { workspace = true }
+solana-client = { workspace = true, optional = true }
+solana-account-decoder = { workspace = true }
+spl-token = { workspace = true }
+spl-associated-token-account = { workspace = true }
+mpl-token-metadata = { workspace = true }
+
+# Optional: async support for non-WASM targets
+tokio = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+
+# WASM-specific dependencies
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, features = ["Window", "Storage", "Crypto", "SubtleCrypto", "Request", "RequestInit", "Response", "Headers"], optional = true }
+getrandom = { workspace = true, optional = true }
+async-trait = "0.1"
+console_log = { version = "1.0", optional = true }
+env_logger = { version = "0.11", optional = true }
+
+[features]
+default = ["native"]
+native = ["tokio", "futures-util", "reqwest", "solana-client", "env_logger"]
+wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys", "getrandom", "console_log"]

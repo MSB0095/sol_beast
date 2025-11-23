@@ -44,7 +44,7 @@ The frontend is configured to work with GitHub Pages' base path:
 base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/'
 ```
 
-This ensures that all assets and routes work correctly when deployed to `https://yourusername.github.io/sol_beast/`.
+This ensures that all assets and routes work correctly when deployed to `https://your-username.github.io/sol_beast/`.
 
 ### Custom Domain (Optional)
 

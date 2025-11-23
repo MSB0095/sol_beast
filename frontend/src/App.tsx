@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
+import { useWallet } from '@solana/wallet-adapter-react'
 import { useBotStore } from './store/botStore'
 import { useSettingsStore } from './store/settingsStore'
+import { useUserSessionStore } from './store/userSessionStore'
 import Header from './components/Header'
 import Dashboard from './components/Dashboard'
 import ConfigurationPanel from './components/ConfigurationPanel'
@@ -10,13 +12,17 @@ import BotControl from './components/BotControl'
 import NewCoinsPanel from './components/NewCoinsPanel'
 import TradingHistory from './components/TradingHistory'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { WalletConnect } from './components/WalletConnect'
 import './App.css'
 
 function App() {
+  const { publicKey, connected } = useWallet()
   const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
+  const { setWallet, getCurrentUserSettings } = useUserSessionStore()
 
   useEffect(() => {
+    // Initialize bot connection (can work with or without backend)
     initializeConnection()
     fetchSettings()
 
@@ -25,6 +31,16 @@ function App() {
       cleanup()
     }
   }, [initializeConnection, cleanup, fetchSettings])
+
+  // Handle wallet connection changes
+  useEffect(() => {
+    if (connected && publicKey) {
+      setWallet(publicKey)
+      const userSettings = getCurrentUserSettings()
+      console.log('User settings loaded:', userSettings)
+      // TODO: Apply user settings to trading engine
+    }
+  }, [connected, publicKey, setWallet, getCurrentUserSettings])
 
   return (
     <div className="min-h-screen bg-black transition-colors duration-500 relative overflow-hidden">
@@ -120,6 +136,14 @@ function App() {
 
           {/* Sidebar */}
           <div className="lg:col-span-1 space-y-6">
+            {/* Wallet Connection */}
+            {!connected && (
+              <div className="cyber-card p-6">
+                <h3 className="font-display text-xl font-black mb-5 glow-text uppercase tracking-wider">Connect Wallet</h3>
+                <WalletConnect />
+              </div>
+            )}
+            
             {/* Bot Control */}
             <BotControl />
             

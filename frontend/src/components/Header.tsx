@@ -4,6 +4,7 @@ import { useSettingsStore } from '../store/settingsStore'
 import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft } from 'lucide-react'
 import { ThemeSwitcher } from './ThemeSwitcher'
 import BeastLogo from './BeastLogo'
+import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
 
 export default function Header() {
   const { status } = useBotStore()
@@ -75,6 +76,7 @@ export default function Header() {
           </div>
 
           <div className="flex items-center gap-4">
+            <WalletMultiButton className="!bg-[var(--theme-accent)] !text-black !font-mono-tech !text-xs !uppercase !tracking-wider !px-4 !py-2 hover:!bg-[var(--theme-accent-hover)] !transition-all !electric-border" />
             <div className="flex items-center gap-3 px-5 py-2 bg-black electric-border font-mono-tech text-sm uppercase tracking-wider">
               <div 
                 className={`w-3 h-3 ${status === 'connected' ? 'bg-[var(--theme-accent)]' : 'bg-red-500'}`}

@@ -12,6 +12,8 @@ Trade directly from your browser using WebAssembly (WASM) and your Solana wallet
 - ✅ Settings saved per wallet address
 - ✅ Local trade history and holdings
 
+**Try it live**: Visit the [GitHub Pages deployment](https://msb0095.github.io/sol_beast/) (automatically deployed from main branch)
+
 ### 🖥️ CLI/Server Mode
 Traditional automated trading bot for power users:
 - ✅ Fully automated 24/7 trading
@@ -55,6 +57,7 @@ RUST_LOG=info cargo run --release -- --real
 
 - **[SETUP.md](./SETUP.md)** - Detailed setup instructions for both modes
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture and design
+- **[GITHUB_PAGES_SETUP.md](./GITHUB_PAGES_SETUP.md)** - GitHub Pages deployment guide
 - **[config.example.toml](./config.example.toml)** - Configuration reference
 
 ## 🏗️ Project Structure

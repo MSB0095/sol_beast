@@ -6,12 +6,15 @@ Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heu
 
 sol_beast now supports **serverless deployment** with Solana wallet integration! Run the entire application in your browser:
 
-- 🔐 **Wallet Authentication**: Connect with Phantom, Solflare, Backpack, etc.
+- 🔐 **Wallet Authentication**: Connect with Phantom, Solflare, Backpack, Coinbase, Ledger
 - 💾 **Per-Wallet Settings**: Each wallet gets its own persistent account
 - 🌍 **GitHub Pages Ready**: Deploy for free, no server needed
 - 🚀 **Client-Side Trading**: All processing happens in your browser
+- 🔒 **Private Keys Stay Safe**: Never leave your wallet extension
 
-**[📖 See Browser Deployment Guide](./WASM_DEPLOYMENT.md)**
+**Quick Start:** [📖 QUICKSTART_BROWSER.md](./QUICKSTART_BROWSER.md)
+
+**Full Documentation:** [📖 WASM_DEPLOYMENT.md](./WASM_DEPLOYMENT.md)
 
 ## Traditional Server Deployment
 

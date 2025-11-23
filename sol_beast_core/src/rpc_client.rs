@@ -64,7 +64,7 @@ pub fn parse_bonding_curve(data: &[u8]) -> Result<BondingCurveState, CoreError> 
     })
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "solana-client"))]
 pub mod native {
     use super::*;
     use solana_client::rpc_client::RpcClient as SolanaRpcClient;
@@ -121,6 +121,7 @@ pub mod native {
 pub mod wasm {
     use super::*;
     use wasm_bindgen::JsValue;
+    use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{Request, RequestInit, Response};
     use serde_json::Value;

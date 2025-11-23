@@ -271,15 +271,23 @@ pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
     let mut m = HashMap::new();
     let candidates = vec!["pumpfun.json", "pumpfunamm.json", "pumpfunfees.json"];
     for c in candidates {
-        if std::path::Path::new(c).exists() {
-            match SimpleIdl::load_from(c) {
+        let path = if std::path::Path::new(c).exists() {
+            c.to_string()
+        } else if std::path::Path::new("..").join(c).exists() {
+            format!("../{}", c)
+        } else {
+            c.to_string()
+        };
+
+        if std::path::Path::new(&path).exists() {
+            match SimpleIdl::load_from(&path) {
                 Ok(idl) => {
                     // key by file stem
-                    let key = c.trim_end_matches(".json").to_string();
+                    let key = std::path::Path::new(c).file_stem().unwrap().to_str().unwrap().to_string();
                     m.insert(key, idl);
                 }
                 Err(e) => {
-                    log::warn!("Failed to load IDL {}: {}", c, e);
+                    log::warn!("Failed to load IDL {}: {}", path, e);
                 }
             }
         }

@@ -319,7 +319,12 @@ mod tests {
         // This test validates that `Settings::from_file` can load the example
         // config without panicking and that a couple of fields match expected
         // placeholder values from `config.example.toml`.
-        let s = Settings::from_file("config.example.toml").unwrap();
+        let path = if std::path::Path::new("config.example.toml").exists() {
+            "config.example.toml"
+        } else {
+            "../config.example.toml"
+        };
+        let s = Settings::from_file(path).unwrap();
         assert_eq!(s.tp_percent, 30.0);
         assert_eq!(s.sl_percent, -20.0);
         assert_eq!(s.cache_capacity, 1024);

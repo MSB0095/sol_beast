@@ -30,9 +30,14 @@ pub fn init() {
     console_log::init_with_level(Level::Info).expect("Failed to initialize logger");
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "env_logger"))]
 pub fn init() {
     env_logger::init();
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "env_logger")))]
+pub fn init() {
+    // No-op when env_logger is not enabled
 }
 
 #[cfg(target_arch = "wasm32")]

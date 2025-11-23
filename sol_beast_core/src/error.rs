@@ -65,7 +65,7 @@ impl From<std::io::Error> for CoreError {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "solana-client"))]
 impl From<solana_client::client_error::ClientError> for CoreError {
     fn from(err: solana_client::client_error::ClientError) -> Self {
         CoreError::Rpc(err.to_string())

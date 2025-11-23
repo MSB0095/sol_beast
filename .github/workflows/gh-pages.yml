@@ -73,6 +73,16 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: Inspect build output
+        run: |
+          echo "Listing files in frontend/dist:"
+          ls -laR frontend/dist
+          echo "Contents of frontend/dist/index.html:"
+          cat frontend/dist/index.html
+
+      - name: Add 404.html for SPA routing
+        run: cp frontend/dist/index.html frontend/dist/404.html
+
       - name: Prepare GitHub Pages deployment
         run: |
           echo "Sol Beast - Solana Trading Bot" > frontend/dist/README.txt

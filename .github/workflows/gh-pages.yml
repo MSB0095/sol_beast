@@ -57,13 +57,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 'latest'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
         run: |
           cd frontend
-          npm ci
+          # Clean install - regenerate lock file if corrupted
+          rm -rf node_modules package-lock.json
+          npm install
+          echo "Dependencies installed successfully"
 
       - name: Build frontend
         run: |

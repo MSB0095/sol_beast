@@ -57,7 +57,6 @@ export function WalletConnect() {
           <ul className="font-mono-tech text-xs text-[var(--theme-text-secondary)] space-y-1">
             <li>✓ Phantom</li>
             <li>✓ Solflare</li>
-            <li>✓ Backpack</li>
             <li>✓ Coinbase Wallet</li>
             <li>✓ Ledger</li>
           </ul>

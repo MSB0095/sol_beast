@@ -7,7 +7,7 @@ export interface UserSettings {
   buyAmount: number
   tpPercent: number
   slPercent: number
-  maxHoldedCoins: number
+  maxHeldCoins: number
   enableSaferSniping: boolean
   minTokensThreshold: number
   maxSolPerToken: number
@@ -43,7 +43,7 @@ const DEFAULT_USER_SETTINGS: Omit<UserSettings, 'createdAt' | 'lastActive'> = {
   buyAmount: 0.1,
   tpPercent: 30.0,
   slPercent: -20.0,
-  maxHoldedCoins: 10,
+  maxHeldCoins: 10,
   enableSaferSniping: true,
   minTokensThreshold: 1000000,
   maxSolPerToken: 0.0001,

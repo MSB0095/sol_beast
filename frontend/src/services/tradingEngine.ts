@@ -6,13 +6,16 @@
 import { Connection } from '@solana/web3.js'
 import { WalletContextState } from '@solana/wallet-adapter-react'
 
+// Configuration constants
+const PUMP_FUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
+
 export interface TradingEngineConfig {
   rpcUrl: string
   wsUrl: string
   buyAmount: number
   tpPercent: number
   slPercent: number
-  maxHoldedCoins: number
+  maxHeldCoins: number
   enableSaferSniping: boolean
   minTokensThreshold: number
   maxSolPerToken: number
@@ -105,7 +108,7 @@ export class TradingEngine {
         method: 'logsSubscribe',
         params: [
           {
-            mentions: ['6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'] // pump.fun program ID
+            mentions: [PUMP_FUN_PROGRAM_ID]
           },
           {
             commitment: 'confirmed'
@@ -160,7 +163,7 @@ export class TradingEngine {
       console.log('New token detected:', signature)
       
       // Check if we're at max holdings
-      if (this.holdings.size >= this.config.maxHoldedCoins) {
+      if (this.holdings.size >= this.config.maxHeldCoins) {
         console.log('Max holdings reached, skipping buy')
         return
       }

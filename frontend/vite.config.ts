@@ -15,7 +15,7 @@ export default defineConfig({
   define: {
     'global.Buffer': 'Buffer'
   },
-  base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/',
+  base: process.env.VITE_BASE || (process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/'),
   build: {
     outDir: 'dist',
     assetsDir: 'assets',

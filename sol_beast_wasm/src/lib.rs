@@ -1,11 +1,9 @@
 use wasm_bindgen::prelude::*;
 use sol_beast_core::{
-    CoreError, WalletManager, TransactionBuilder, StrategyConfig, TradingStrategy,
+    WalletManager, TransactionBuilder, StrategyConfig, TradingStrategy,
     UserAccount, Holding, TradeRecord, models::UserSettings,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use std::cell::RefCell;
 
 // Set panic hook for better error messages in console
 #[wasm_bindgen(start)]

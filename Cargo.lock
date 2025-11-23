@@ -3868,6 +3868,7 @@ dependencies = [
 name = "sol_beast_wasm"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "console_error_panic_hook",
  "console_log 1.0.0",
  "getrandom 0.2.16",

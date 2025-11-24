@@ -1,10 +1,10 @@
 #!/bin/bash
-# Test script for Sol Beast API endpoints
+# Test script for Sol Beast API endpoints (moved to sol_beast_scripts/linux)
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd ../.. && pwd)"
 BASE_URL="http://localhost:8080"
 
-# Detect frontend folder
-if [ -d "sol_beast_frontend" ]; then
+if [ -d "$ROOT_DIR/sol_beast_frontend" ]; then
     FRONTEND_DIR="sol_beast_frontend"
 else
     FRONTEND_DIR="frontend"
@@ -21,7 +21,6 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Test 1: Health Check
 echo -e "${YELLOW}Test 1: Health Check${NC}"
 response=$(curl -s "$BASE_URL/health")
 if [[ $response == *"ok"* ]]; then
@@ -33,14 +32,12 @@ else
 fi
 echo ""
 
-# Test 2: Get Bot State
 echo -e "${YELLOW}Test 2: Get Bot State${NC}"
 response=$(curl -s "$BASE_URL/bot/state")
 echo "Response: $response"
 echo -e "${GREEN}✓ PASS${NC}"
 echo ""
 
-# Test 3: Get Settings
 echo -e "${YELLOW}Test 3: Get Settings${NC}"
 response=$(curl -s "$BASE_URL/settings")
 if [[ $response == *"tp_percent"* ]]; then
@@ -51,7 +48,6 @@ else
 fi
 echo ""
 
-# Test 4: Get Stats
 echo -e "${YELLOW}Test 4: Get Stats${NC}"
 response=$(curl -s "$BASE_URL/stats")
 if [[ $response == *"total_buys"* ]]; then
@@ -62,15 +58,13 @@ else
 fi
 echo ""
 
-# Test 5: Get Logs
 echo -e "${YELLOW}Test 5: Get Logs${NC}"
 response=$(curl -s "$BASE_URL/logs")
 echo "Response: $response" | jq '.' 2>/dev/null || echo "Response: $response"
 echo -e "${GREEN}✓ PASS${NC}"
 echo ""
 
-# Test 6: Stop Bot (to prepare for mode change)
-echo -e "${YELLOW}Test 6: Stop Bot${NC}"
+echo -e "${YELLOW}Test 6: Stop Bot (to prepare for mode change)${NC}"
 response=$(curl -s -X POST "$BASE_URL/bot/stop")
 echo "Response: $response"
 if [[ $response == *"success"* ]] || [[ $response == *"stopping"* ]]; then
@@ -80,12 +74,10 @@ else
 fi
 echo ""
 
-# Wait for bot to stop
-echo "Waiting 2 seconds for bot to fully stop..."
+echo "Waiting 2 seconds for bot to stop..."
 sleep 2
 echo ""
 
-# Test 7: Change Mode to Dry-Run
 echo -e "${YELLOW}Test 7: Change Mode to Dry-Run${NC}"
 response=$(curl -s -X POST "$BASE_URL/bot/mode" \
     -H "Content-Type: application/json" \
@@ -98,7 +90,6 @@ else
 fi
 echo ""
 
-# Test 8: Start Bot
 echo -e "${YELLOW}Test 8: Start Bot${NC}"
 response=$(curl -s -X POST "$BASE_URL/bot/start")
 echo "Response: $response"
@@ -109,12 +100,10 @@ else
 fi
 echo ""
 
-# Wait for bot to start
 echo "Waiting 2 seconds for bot to fully start..."
 sleep 2
 echo ""
 
-# Test 9: Verify Bot State is Running
 echo -e "${YELLOW}Test 9: Verify Bot State is Running${NC}"
 response=$(curl -s "$BASE_URL/bot/state")
 echo "Response: $response"
@@ -125,7 +114,6 @@ else
 fi
 echo ""
 
-# Test 10: Get Updated Stats (should show running state)
 echo -e "${YELLOW}Test 10: Get Updated Stats${NC}"
 response=$(curl -s "$BASE_URL/stats")
 echo "Response: $response" | jq '.' 2>/dev/null || echo "Response: $response"
@@ -136,7 +124,6 @@ else
 fi
 echo ""
 
-# Test 11: Get Updated Logs
 echo -e "${YELLOW}Test 11: Get Updated Logs${NC}"
 response=$(curl -s "$BASE_URL/logs")
 log_count=$(echo "$response" | jq '.logs | length' 2>/dev/null || echo "0")
@@ -150,7 +137,6 @@ else
 fi
 echo ""
 
-# Test 12: Try to Change Mode While Running (should fail)
 echo -e "${YELLOW}Test 12: Try to Change Mode While Running (should fail)${NC}"
 response=$(curl -s -X POST "$BASE_URL/bot/mode" \
     -H "Content-Type: application/json" \
@@ -163,7 +149,6 @@ else
 fi
 echo ""
 
-# Test 13: Stop Bot Again
 echo -e "${YELLOW}Test 13: Stop Bot Again${NC}"
 response=$(curl -s -X POST "$BASE_URL/bot/stop")
 echo "Response: $response"

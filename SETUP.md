@@ -1,6 +1,6 @@
 # Sol Beast Setup Guide
 
-This guide covers setting up Sol Beast in both **Browser Mode** and **CLI Mode**.
+This file has been moved to `sol_beast_docs/SETUP.md`. The full setup guide is available there. The original content is preserved for backwards compatibility.
 
 ## Prerequisites
 

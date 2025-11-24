@@ -36,7 +36,7 @@ curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 cd sol_beast_wasm && ./wasm-pack-build.sh && cd ..
 
 # 3. Start frontend
-cd frontend && npm install && npm run dev
+cd sol_beast_frontend && npm install && npm run dev  # canonical folder name; older 'frontend' retained briefly for backward compatibility
 
 # 4. Open http://localhost:5173 and connect your wallet!
 ```
@@ -58,6 +58,8 @@ RUST_LOG=info cargo run --release -- --real
 ## 📚 Documentation
 
 - **[SETUP.md](./SETUP.md)** - Detailed setup instructions for both modes
+ - **[sol_beast_docs](./sol_beast_docs)** - Additional documentation and guides (moved from repo root)
+ - **Scripts & wrappers**: Use `sol_beast_scripts/linux/` or the matching OS folder to run `start-backend.sh`, `start-frontend.sh`, and `start-all.sh` for a unified cross-platform developer experience.
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Technical architecture and design
 - **[GITHUB_PAGES_SETUP.md](./GITHUB_PAGES_SETUP.md)** - GitHub Pages deployment guide
 - **[config.example.toml](./config.example.toml)** - Configuration reference
@@ -69,7 +71,7 @@ sol_beast/
 ├── sol_beast_core/      # Shared Rust library (native + WASM)
 ├── sol_beast_wasm/      # WASM bindings for browser
 ├── sol_beast_cli/       # CLI application (server mode)
-├── frontend/            # React + TypeScript dashboard
+├── sol_beast_frontend/            # React + TypeScript dashboard
 └── src/                 # Legacy source (being migrated)
 ```
 
@@ -147,8 +149,8 @@ cargo clippy --all-targets
 
 - `sol_beast_core/` - Platform-agnostic trading logic
 - `sol_beast_wasm/` - WASM bindings for browsers
-- `frontend/src/components/` - React UI components
-- `frontend/src/store/wasmStore.ts` - WASM integration
+ - `sol_beast_frontend/src/components/` - React UI components
+ - `sol_beast_frontend/src/store/wasmStore.ts` - WASM integration
 - `src/main.rs` - Legacy CLI runtime (being refactored)
 - `config.example.toml` - Configuration template
 

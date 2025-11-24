@@ -1,5 +1,6 @@
 # Quick Start Guide
 
+This file has been moved to `sol_beast_docs/QUICK_START.md`. See that location for the full quick start guide.
 Choose your mode and get started in minutes!
 
 ## 🌐 Browser Mode (Easiest)

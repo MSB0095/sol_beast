@@ -29,6 +29,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Set FRONTEND_DIR
+        run: |
+          if [ -d sol_beast_frontend ]; then
+            echo "FRONTEND_DIR=sol_beast_frontend" >> $GITHUB_ENV
+          else
+            echo "FRONTEND_DIR=frontend" >> $GITHUB_ENV
+          fi
+
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
         with:
@@ -49,9 +57,9 @@ jobs:
       - name: Build WASM module
         run: |
           cd sol_beast_wasm
-          wasm-pack build --target web --out-dir ../frontend/src/wasm
+          wasm-pack build --target web --out-dir ../${FRONTEND_DIR}/src/wasm
           echo "WASM module built successfully"
-          ls -la ../frontend/src/wasm/
+          ls -la ../${FRONTEND_DIR}/src/wasm/
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -60,7 +68,7 @@ jobs:
 
       - name: Install frontend dependencies
         run: |
-          cd frontend
+          cd ${FRONTEND_DIR}
           # Clean install - regenerate lock file if corrupted
           rm -rf node_modules package-lock.json
           npm install
@@ -68,26 +76,26 @@ jobs:
 
       - name: Build frontend
         run: |
-          cd frontend
+          cd ${FRONTEND_DIR}
           npm run build
         env:
           NODE_ENV: production
 
       - name: Inspect build output
         run: |
-          echo "Listing files in frontend/dist:"
-          ls -laR frontend/dist
-          echo "Contents of frontend/dist/index.html:"
-          cat frontend/dist/index.html
+          echo "Listing files in $FRONTEND_DIR/dist:"
+          ls -laR ${FRONTEND_DIR}/dist
+          echo "Contents of $FRONTEND_DIR/dist/index.html:"
+          cat ${FRONTEND_DIR}/dist/index.html
 
       - name: Add 404.html for SPA routing
-        run: cp frontend/dist/index.html frontend/dist/404.html
+        run: cp ${FRONTEND_DIR}/dist/index.html ${FRONTEND_DIR}/dist/404.html
 
       - name: Prepare GitHub Pages deployment
         run: |
-          echo "Sol Beast - Solana Trading Bot" > frontend/dist/README.txt
-          echo "Built with WASM + React" >> frontend/dist/README.txt
-          echo "Build date: $(date)" >> frontend/dist/README.txt
+          echo "Sol Beast - Solana Trading Bot" > ${FRONTEND_DIR}/dist/README.txt
+          echo "Built with WASM + React" >> ${FRONTEND_DIR}/dist/README.txt
+          echo "Build date: $(date)" >> ${FRONTEND_DIR}/dist/README.txt
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -95,7 +103,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./frontend/dist
+          path: ./${FRONTEND_DIR}/dist
 
   deploy:
     environment:

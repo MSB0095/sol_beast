@@ -6,6 +6,7 @@ mod idl;
 mod models;
 mod monitor;
 mod rpc;
+mod protocols;
 mod settings;
 mod state;
 mod tx_builder;
@@ -148,7 +149,33 @@ async fn main() -> Result<(), AppError> {
     // Shared map of active subscriptions for mints we care about. Value is (wss_sender_index, sub_id)
     let sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::channel(1000);
-    let is_real = std::env::args().any(|arg| arg == "--real");
+    let mut args: Vec<String> = std::env::args().collect();
+    let is_real = args.iter().any(|arg| arg == "--real");
+    // runtime mode: frontend-wasm | frontend-backend | cli | dedicated
+    let mut runtime_mode = std::env::var("SOL_BEAST_RUNTIME_MODE").unwrap_or_else(|_| "frontend-backend".to_string());
+    // Allow CLI arg --mode or --mode= to override env var
+    for (i, arg) in args.iter().enumerate() {
+        if arg.starts_with("--mode=") {
+            if let Some(val) = arg.splitn(2, '=').nth(1) {
+                runtime_mode = val.to_string();
+                break;
+            }
+        }
+        if arg == "--mode" {
+            if let Some(val) = args.get(i + 1) {
+                runtime_mode = val.clone();
+                break;
+            }
+        }
+    }
+    // If user explicitly runs the backend binary in wasm-only mode, don't start backend services
+    if runtime_mode == "frontend-wasm" {
+        println!("Runtime mode set to 'frontend-wasm'. Backend will not start. Use the frontend + wasm instead.");
+        return Ok(());
+    }
+    if runtime_mode == "dedicated" {
+        println!("Runtime mode set to 'dedicated'. This is coming soon: starting backend in default configuration.");
+    }
     // Load real keypair either from path or from JSON in config (optional)
     // Prefer base64 env var for keypairs to avoid storing keys on disk.
     let keypair: Option<std::sync::Arc<Keypair>> = if is_real {
@@ -312,6 +339,7 @@ async fn main() -> Result<(), AppError> {
         last_activity: chrono::Utc::now().to_rfc3339(),
         running_state: Some("running".to_string()),
         mode: Some(if is_real { "real" } else { "dry-run" }.to_string()),
+        runtime_mode: Some(runtime_mode.clone()),
     }));
 
     let api_state = ApiState {

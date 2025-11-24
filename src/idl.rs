@@ -271,12 +271,27 @@ pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
     let mut m = HashMap::new();
     let candidates = vec!["pumpfun.json", "pumpfunamm.json", "pumpfunfees.json"];
     for c in candidates {
-        let path = if std::path::Path::new(c).exists() {
-            c.to_string()
-        } else if std::path::Path::new("..").join(c).exists() {
-            format!("../{}", c)
-        } else {
-            c.to_string()
+        // try locating in several possible places to be tolerant of repo layout
+        let mut candidate_paths = vec![
+            c.to_string(),
+            format!("./{}", c),
+            format!("../{}", c),
+            format!("sol_beast_protocols/pumpfun/{}", c),
+            format!("../sol_beast_protocols/pumpfun/{}", c),
+        ];
+        let mut path = None;
+        for p in candidate_paths.iter() {
+            if std::path::Path::new(p).exists() {
+                path = Some(p.clone());
+                break;
+            }
+        }
+        let path = match path {
+            Some(p) => p,
+            None => {
+                log::debug!("Could not find candidate idl {} in default paths", c);
+                c.to_string()
+            }
         };
 
         if std::path::Path::new(&path).exists() {

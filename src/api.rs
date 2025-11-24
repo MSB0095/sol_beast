@@ -132,6 +132,7 @@ pub struct BotStats {
     pub last_activity: String,
     pub running_state: Option<String>,
     pub mode: Option<String>,
+    pub runtime_mode: Option<String>,
 }
 
 pub fn create_router(state: ApiState) -> Router {

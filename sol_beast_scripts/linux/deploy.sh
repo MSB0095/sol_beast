@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Sol Beast - Complete Deployment & Testing Script
-# This script sets up and launches both frontend and backend for testing
+# Moved to sol_beast_scripts/linux/
 
 set -e  # Exit on error
 
@@ -16,14 +16,16 @@ NC='\033[0m' # No Color
 FRONTEND_PORT=3000
 BACKEND_PORT=8080
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Root directory (up from sol_beast_scripts/linux -> project root)
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 # Detect frontend directory: prefer sol_beast_frontend if it exists
-if [ -d "$SCRIPT_DIR/sol_beast_frontend" ]; then
-    FRONTEND_DIR="$SCRIPT_DIR/sol_beast_frontend"
+if [ -d "$ROOT_DIR/sol_beast_frontend" ]; then
+    FRONTEND_DIR="$ROOT_DIR/sol_beast_frontend"
 else
-    FRONTEND_DIR="$SCRIPT_DIR/frontend"
+    FRONTEND_DIR="$ROOT_DIR/frontend"
 fi
 
-# Functions
 print_header() {
     echo -e "${BLUE}================================${NC}"
     echo -e "${BLUE}$1${NC}"
@@ -91,13 +93,13 @@ setup_frontend() {
         print_success "Frontend dependencies already installed"
     fi
     
-    cd ..
+    cd "$ROOT_DIR"
 }
 
 setup_backend() {
     print_header "Setting Up Backend"
     
-    if [ ! -f "Cargo.toml" ]; then
+    if [ ! -f "$ROOT_DIR/Cargo.toml" ]; then
         print_error "Cargo.toml not found"
         return 1
     fi
@@ -144,7 +146,7 @@ display_startup_info() {
     echo -e "${GREEN}API Base:${NC} http://localhost:${BACKEND_PORT}/api"
     echo ""
     echo -e "${YELLOW}Terminal Commands:${NC}"
-    echo "  Frontend: npm run dev (in frontend/)"
+    echo "  Frontend: npm run dev (in $FRONTEND_DIR)"
     echo "  Backend:  cargo run --release"
     echo ""
 }
@@ -156,7 +158,7 @@ start_backend() {
     print_info "Press Ctrl+C to stop"
     echo ""
     
-    cd "$SCRIPT_DIR"
+    cd "$ROOT_DIR"
     export RUST_LOG=info
     exec cargo run --release
 }
@@ -273,3 +275,10 @@ case "${1:-help}" in
         exit 1
         ;;
 esac
+#!/bin/bash
+
+# Wrapper: deploy helper in new scripts folder (Linux/macOS)
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Execute the original deploy.sh while keeping relative pointers working
+bash "$SCRIPT_DIR/../../deploy.sh" "$@"

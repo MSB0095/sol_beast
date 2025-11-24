@@ -1,6 +1,6 @@
 @echo off
-REM Sol Beast - Windows Deployment Script
-REM Complete setup and deployment for Windows
+REM Wrapper: Windows deploy script moved to sol_beast_scripts/windows
+REM This contains the actual deploy logic moved from repo root
 
 setlocal enabledelayedexpansion
 
@@ -15,7 +15,7 @@ set FRONTEND_PORT=3000
 set BACKEND_PORT=8080
 
 REM Detect frontend folder name; prefer sol_beast_frontend if present
-if exist "sol_beast_frontend" (
+if exist "%~dp0\..\..\sol_beast_frontend" (
     set FRONTEND_DIR=sol_beast_frontend
 ) else (
     set FRONTEND_DIR=frontend
@@ -91,3 +91,7 @@ echo 3. In second window, run: run-frontend.bat
 echo 4. Open http://localhost:%FRONTEND_PORT% in browser
 echo.
 pause
+
+@echo off
+REM Wrapper: Windows deploy script in sol_beast_scripts/windows
+call "%~dp0\..\..\deploy.bat" %*

@@ -1,5 +1,6 @@
 # GitHub Pages Setup Guide
 
+This file has been moved to `sol_beast_docs/GITHUB_PAGES_SETUP.md`. The full guide has moved there for consolidated documentation.
 This guide explains how to set up and use the GitHub Pages deployment for Sol Beast.
 
 ## Overview

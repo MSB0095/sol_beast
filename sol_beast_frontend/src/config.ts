@@ -21,6 +21,7 @@ export const API_SETTINGS_URL = `${API_BASE_URL}/settings`
 export const WS_URL = getEnv('VITE_WS_URL', 'ws://localhost:8080/ws')
 export const APP_NAME = 'Sol Beast'
 export const APP_VERSION = '1.0.0'
+export const RUNTIME_MODE = getEnv('VITE_RUNTIME_MODE', 'frontend-backend')
 
 // Feature flags
 export const FEATURES = {

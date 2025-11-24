@@ -134,7 +134,12 @@ if [ $failed -eq 0 ]; then
     echo "✅ Bot control functional"
     echo ""
     echo "Next steps:"
-    echo "1. Start the frontend: cd frontend && npm run dev"
+    if [ -d "sol_beast_frontend" ]; then
+        FRONTEND_DIR="sol_beast_frontend"
+    else
+        FRONTEND_DIR="frontend"
+    fi
+    echo "1. Start the frontend: cd $FRONTEND_DIR && npm run dev"
     echo "2. Open browser to http://localhost:5173"
     echo "3. Check the Logs tab for real-time updates"
     exit 0

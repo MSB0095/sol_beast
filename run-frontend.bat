@@ -3,7 +3,14 @@ REM Sol Beast - Start Frontend (Windows)
 
 setlocal
 
-cd frontend
+REM Detect frontend directory name
+if exist "sol_beast_frontend" (
+	set FRONTEND_DIR=sol_beast_frontend
+) else (
+	set FRONTEND_DIR=frontend
+)
+
+cd %FRONTEND_DIR%
 
 echo Starting Sol Beast Frontend...
 echo.

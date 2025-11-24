@@ -9,7 +9,14 @@ cd "$SCRIPT_DIR"
 echo "Building sol_beast WASM module..."
 
 # Build for web (generates ES modules)
-wasm-pack build --target web --out-dir ../frontend/src/wasm
+if [ -z "$OUT_DIR" ]; then
+	if [ -d ../sol_beast_frontend/src/wasm ] || [ -d ../sol_beast_frontend ]; then
+		OUT_DIR=../sol_beast_frontend/src/wasm
+	else
+		OUT_DIR=../frontend/src/wasm
+	fi
+fi
+wasm-pack build --target web --out-dir "$OUT_DIR"
 
 echo "WASM module built successfully!"
-echo "Output: frontend/src/wasm/"
+echo "Output: $OUT_DIR"

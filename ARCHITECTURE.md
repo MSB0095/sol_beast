@@ -1,5 +1,7 @@
 # Sol Beast Architecture
 
+This file has been moved to `sol_beast_docs/ARCHITECTURE.md`. The original content is preserved there for documentation. 
+
 ## Overview
 
 Sol Beast has been transformed into a **dual-mode** trading bot that can run both:

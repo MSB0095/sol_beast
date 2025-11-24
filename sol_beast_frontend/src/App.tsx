@@ -12,6 +12,7 @@ import NewCoinsPanel from './components/NewCoinsPanel'
 import TradingHistory from './components/TradingHistory'
 import WalletConnect from './components/WalletConnect'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { RUNTIME_MODE } from './config'
 import './App.css'
 
 function App() {
@@ -20,14 +21,20 @@ function App() {
   const { initializeWasm, initialized: wasmInitialized } = useWasmStore()
 
   useEffect(() => {
-    // Initialize WASM module for browser-based trading
-    initializeWasm().catch(err => {
-      console.error('Failed to initialize WASM:', err)
-    })
-
-    // Also initialize backend connection for hybrid mode
-    initializeConnection()
-    fetchSettings()
+    // Initialize behaviors depending on runtime mode
+    if (RUNTIME_MODE === 'frontend-wasm') {
+      // WASM-only mode: initialize WASM and do not initialize backend
+      initializeWasm().catch(err => {
+        console.error('Failed to initialize WASM:', err)
+      })
+    } else {
+      // Default hybrid mode: initialize both WASM and backend connection
+      initializeWasm().catch(err => {
+        console.error('Failed to initialize WASM:', err)
+      })
+      initializeConnection()
+      fetchSettings()
+    }
 
     // Cleanup on unmount
     return () => {

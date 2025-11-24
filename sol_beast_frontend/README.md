@@ -14,7 +14,7 @@ A comprehensive React + TypeScript dashboard for the Sol Beast Solana trading bo
 ## Installation
 
 ```bash
-cd frontend
+cd sol_beast_frontend
 npm install
 ```
 

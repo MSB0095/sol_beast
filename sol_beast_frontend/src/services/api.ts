@@ -7,6 +7,7 @@ const API_BASE = '/api'
 
 class ApiClient {
   private client: AxiosInstance
+  private apiDisabled: boolean
 
   constructor() {
     this.client = axios.create({

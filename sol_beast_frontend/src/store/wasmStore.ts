@@ -16,6 +16,11 @@ interface WasmState {
   updateSettings: (settings: any) => Promise<void>;
   getHoldings: () => Promise<any>;
   getTrades: () => Promise<any>;
+  startBot: (intervalMs?: number) => Promise<void>;
+  stopBot: () => Promise<void>;
+  getLogs: () => Promise<any>;
+  getStats: () => Promise<any>;
+  clearLogs: () => Promise<void>;
 }
 
 export const useWasmStore = create<WasmState>((set, get) => ({
@@ -46,9 +51,10 @@ export const useWasmStore = create<WasmState>((set, get) => ({
       
       console.log('WASM module initialized successfully');
     } catch (error) {
-      console.error('Failed to initialize WASM module:', error);
+      const msg = error instanceof Error ? error.message : `Failed to initialize: ${String(error)}`
+      console.error('Failed to initialize WASM module:', msg);
       set({ 
-        error: error instanceof Error ? error.message : `Failed to initialize: ${String(error)}`,
+        error: msg,
         loading: false 
       });
     }
@@ -89,6 +95,74 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     } catch (error) {
       console.error('Failed to update settings:', error);
       throw error;
+    }
+  },
+
+  startBot: async (intervalMs: number = 2000) => {
+    const { bot } = get();
+    if (!bot) throw new Error('WASM module not initialized');
+    try {
+      await bot.start_monitoring(intervalMs);
+      console.log('WASM bot started monitoring');
+    } catch (err) {
+      console.error('Failed to start WASM bot:', err);
+      throw err;
+    }
+  },
+
+  stopBot: async () => {
+    const { bot } = get();
+    if (!bot) throw new Error('WASM module not initialized');
+    try {
+      await bot.stop_monitoring();
+      console.log('WASM bot stopped monitoring');
+    } catch (err) {
+      console.error('Failed to stop WASM bot:', err);
+      throw err;
+    }
+  },
+
+  getLogs: async () => {
+    const { bot } = get();
+    if (!bot) throw new Error('WASM module not initialized');
+    try {
+      const logs = await bot.get_logs();
+      // Clear any previous error on success
+      set({ error: null })
+      return logs;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('Failed to get logs:', msg);
+      set({ error: msg })
+      throw err;
+    }
+  },
+
+  clearLogs: async () => {
+    const { bot } = get();
+    if (!bot) throw new Error('WASM module not initialized');
+    try {
+      await bot.clear_logs();
+      console.log('WASM logs cleared');
+      // Clear error state and return
+      set({ error: null })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('Failed to clear WASM logs:', msg)
+      set({ error: msg })
+      throw err
+    }
+  },
+
+  getStats: async () => {
+    const { bot } = get();
+    if (!bot) throw new Error('WASM module not initialized');
+    try {
+      const stats = await bot.get_stats();
+      return stats;
+    } catch (err) {
+      console.error('Failed to get stats:', err);
+      throw err;
     }
   },
 

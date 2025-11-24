@@ -4,6 +4,10 @@ use sol_beast_core::{
     UserAccount, Holding, TradeRecord, models::UserSettings,
 };
 use std::sync::{Arc, Mutex};
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use web_sys::window;
+use serde::{Serialize, Deserialize};
 
 // Set panic hook for better error messages in console
 #[wasm_bindgen(start)]
@@ -11,6 +15,28 @@ pub fn init() {
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
     log::info!("sol_beast WASM module initialized");
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub level: String,
+    pub message: String,
+}
+
+impl LogEntry {
+    pub fn new(level: &str, message: &str) -> Self {
+        Self { timestamp: chrono::Utc::now().to_rfc3339(), level: level.to_string(), message: message.to_string() }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct BotStats {
+    pub total_buys: u64,
+    pub total_sells: u64,
+    pub total_profit: f64,
+    pub uptime_secs: u64,
+    pub last_heartbeat: Option<String>,
 }
 
 /// Main bot instance for browser environment
@@ -26,6 +52,9 @@ pub struct SolBeastBot {
     holdings: Arc<Mutex<Vec<Holding>>>,
     trades: Arc<Mutex<Vec<TradeRecord>>>,
     user_account: Arc<Mutex<Option<UserAccount>>>,
+    logs: Arc<Mutex<Vec<LogEntry>>>,
+    stats: Arc<Mutex<BotStats>>,
+    interval_id: Arc<Mutex<Option<i32>>>,
 }
 
 #[wasm_bindgen]
@@ -40,6 +69,9 @@ impl SolBeastBot {
             holdings: Arc::new(Mutex::new(Vec::new())),
             trades: Arc::new(Mutex::new(Vec::new())),
             user_account: Arc::new(Mutex::new(None)),
+            logs: Arc::new(Mutex::new(Vec::new())),
+            stats: Arc::new(Mutex::new(BotStats::default())),
+            interval_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -212,6 +244,71 @@ impl SolBeastBot {
         } else {
             0.0
         }
+    }
+
+    /// Start a lightweight monitor that logs heartbeats and updates stats every interval_ms
+    #[wasm_bindgen]
+    pub fn start_monitoring(&self, interval_ms: u32) -> Result<(), JsValue> {
+        // ensure we don't double-start
+        if self.interval_id.lock().unwrap().is_some() {
+            return Err(JsValue::from_str("Monitor already running"));
+        }
+
+        let logs = self.logs.clone();
+        let stats = self.stats.clone();
+
+        let closure = Closure::wrap(Box::new(move || {
+            // push a heartbeat log
+            let mut l = logs.lock().unwrap();
+            let entry = LogEntry::new("info", "WASM bot heartbeat");
+            l.insert(0, entry.clone());
+            if l.len() > 200 { l.truncate(200); }
+
+            // update stats
+            let mut s = stats.lock().unwrap();
+            s.uptime_secs = s.uptime_secs.saturating_add(interval_ms as u64 / 1000);
+            s.last_heartbeat = Some(entry.timestamp.clone());
+        }) as Box<dyn FnMut()>);
+
+        let win = window().ok_or(JsValue::from_str("No window context"))?;
+        let id = win.set_interval_with_callback_and_timeout_and_arguments_0(closure.as_ref().unchecked_ref(), interval_ms as i32)
+            .map_err(|e| JsValue::from(e))?;
+        *self.interval_id.lock().unwrap() = Some(id);
+        closure.forget();
+        Ok(())
+    }
+
+    /// Stop the monitor if running
+    #[wasm_bindgen]
+    pub fn stop_monitoring(&self) -> Result<(), JsValue> {
+        let mut id_lock = self.interval_id.lock().unwrap();
+        if let Some(id) = *id_lock {
+            let win = window().ok_or(JsValue::from_str("No window"))?;
+            win.clear_interval_with_handle(id);
+            *id_lock = None;
+            return Ok(());
+        }
+        Err(JsValue::from_str("Monitor not running"))
+    }
+
+    #[wasm_bindgen]
+    pub fn get_logs(&self) -> Result<JsValue, JsValue> {
+        let logs = self.logs.lock().unwrap();
+        Ok(serde_wasm_bindgen::to_value(&*logs).map_err(|e| JsValue::from_str(&e.to_string()))?)
+    }
+
+    /// Clear the stored logs
+    #[wasm_bindgen]
+    pub fn clear_logs(&self) -> Result<(), JsValue> {
+        let mut logs = self.logs.lock().unwrap();
+        logs.clear();
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn get_stats(&self) -> Result<JsValue, JsValue> {
+        let stats = self.stats.lock().unwrap();
+        Ok(serde_wasm_bindgen::to_value(&*stats).map_err(|e| JsValue::from_str(&e.to_string()))?)
     }
 }
 

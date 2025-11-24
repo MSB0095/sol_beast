@@ -1,14 +1,62 @@
 import { useBotStore, LogEntry } from '../store/botStore'
+import { useWasmStore } from '../store/wasmStore'
 import { AlertCircle, Info, AlertTriangle, Trash2, Download } from 'lucide-react'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { RUNTIME_MODE } from '../config'
 
 export default function LogsPanel() {
-  const { logs, clearLogs } = useBotStore()
+  const { logs: apiLogs, clearLogs } = useBotStore()
+  const { initialized: wasmInitialized, initializeWasm, getLogs: getWasmLogs, clearLogs: clearWasmLogs, error: wasmError } = useWasmStore()
+  const [wasmLogs, setWasmLogs] = useState<LogEntry[]>([])
+  const [logMode, setLogMode] = useState<'auto' | 'wasm' | 'api'>('auto')
+  const effectiveSource = logMode === 'auto' ? (RUNTIME_MODE === 'frontend-wasm' ? 'wasm' : 'api') : logMode
+  useEffect(() => {
+    let intervalId: number | undefined
+
+    const setup = async () => {
+      if (effectiveSource !== 'wasm') return
+
+      try {
+        if (!wasmInitialized) {
+          await initializeWasm()
+        }
+
+        const fetchWasmLogs = async () => {
+          try {
+            const logs = await getWasmLogs()
+            if (Array.isArray(logs)) {
+              setWasmLogs(logs as LogEntry[])
+            } else if ((logs as any)?.logs && Array.isArray((logs as any).logs)) {
+              setWasmLogs((logs as any).logs as LogEntry[])
+            }
+          } catch (err) {
+            console.error('Failed to fetch WASM logs:', err)
+          }
+        }
+
+        // fetch immediately and then poll
+        await fetchWasmLogs()
+        intervalId = window.setInterval(fetchWasmLogs, 2000)
+      } catch (err) {
+        console.error('WASM logs poll setup failed:', err)
+      }
+    }
+
+    setup()
+
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId)
+      }
+    }
+  }, [wasmInitialized, initializeWasm, getWasmLogs, effectiveSource])
   const [filter, setFilter] = useState<'all' | 'info' | 'warn' | 'error'>('all')
 
+  const displayLogs = effectiveSource === 'wasm' ? wasmLogs : apiLogs
+
   const filteredLogs = filter === 'all' 
-    ? logs 
-    : logs.filter(log => log.level === filter)
+    ? displayLogs 
+    : displayLogs.filter(log => log.level === filter)
 
   const getLogIcon = (level: LogEntry['level']) => {
     switch (level) {
@@ -63,7 +111,26 @@ export default function LogsPanel() {
       {/* Header with controls */}
       <div className="card-enhanced rounded-xl p-4">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold gradient-text">Bot Logs</h3>
+            <div className="flex items-center gap-3">
+              <h3 className="text-lg font-semibold gradient-text">Bot Logs</h3>
+              <div className="text-xs px-2 py-0.5 rounded-lg bg-gray-800 text-gray-300 border border-gray-700">
+                Source: <span className="ml-1 font-semibold">{effectiveSource === 'wasm' ? 'WASM' : 'API'}</span>
+              </div>
+              <div className="ml-2 flex items-center gap-1">
+                <button
+                  onClick={() => setLogMode('auto')}
+                  className={`px-2 py-0.5 rounded ${logMode === 'auto' ? 'bg-sol-purple text-white' : 'bg-gray-800 text-gray-300'}`}
+                >Auto</button>
+                <button
+                  onClick={() => setLogMode('api')}
+                  className={`px-2 py-0.5 rounded ${logMode === 'api' ? 'bg-sol-purple text-white' : 'bg-gray-800 text-gray-300'}`}
+                >API</button>
+                <button
+                  onClick={() => setLogMode('wasm')}
+                  className={`px-2 py-0.5 rounded ${logMode === 'wasm' ? 'bg-sol-purple text-white' : 'bg-gray-800 text-gray-300'}`}
+                >WASM</button>
+              </div>
+            </div>
           <div className="flex gap-2">
             <button
               onClick={exportLogs}
@@ -74,8 +141,19 @@ export default function LogsPanel() {
               Export
             </button>
             <button
-              onClick={clearLogs}
-              disabled={logs.length === 0}
+              onClick={async () => {
+                try {
+                  if (effectiveSource === 'wasm') {
+                    await clearWasmLogs()
+                    setWasmLogs([])
+                  } else {
+                    clearLogs()
+                  }
+                } catch (err) {
+                  console.error('Clear logs failed', err)
+                }
+              }}
+              disabled={displayLogs.length === 0}
               className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 border border-red-500/50 rounded-lg text-sm flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:scale-105"
             >
               <Trash2 size={14} />
@@ -97,9 +175,9 @@ export default function LogsPanel() {
               }`}
             >
               {level === 'all' ? 'All' : level.charAt(0).toUpperCase() + level.slice(1)}
-              {level !== 'all' && (
+                  {level !== 'all' && (
                 <span className="ml-1.5 text-xs opacity-70">
-                  ({logs.filter(l => l.level === level).length})
+                  ({displayLogs.filter(l => l.level === level).length})
                 </span>
               )}
             </button>
@@ -109,6 +187,22 @@ export default function LogsPanel() {
 
       {/* Logs display */}
       <div className="card-enhanced rounded-xl p-4 max-h-[600px] overflow-y-auto">
+        {wasmError && effectiveSource === 'wasm' && (
+          <div className="bg-red-900/30 text-red-100 rounded p-3 mb-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <strong>WASM Error:</strong> {wasmError}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => initializeWasm()}
+                  className="px-3 py-1 bg-sol-cyan/20 text-sm rounded"
+                >Retry</button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {filteredLogs.length === 0 ? (
           <div className="text-center py-12 text-gray-400">
             <Info size={48} className="mx-auto mb-3 opacity-30" />
@@ -168,7 +262,7 @@ export default function LogsPanel() {
             <span className="text-sm text-gray-400 font-medium">Info</span>
           </div>
           <p className="text-2xl font-bold text-blue-400">
-            {logs.filter(l => l.level === 'info').length}
+            {displayLogs.filter(l => l.level === 'info').length}
           </p>
         </div>
         
@@ -178,7 +272,7 @@ export default function LogsPanel() {
             <span className="text-sm text-gray-400 font-medium">Warnings</span>
           </div>
           <p className="text-2xl font-bold text-yellow-400">
-            {logs.filter(l => l.level === 'warn').length}
+            {displayLogs.filter(l => l.level === 'warn').length}
           </p>
         </div>
         
@@ -188,7 +282,7 @@ export default function LogsPanel() {
             <span className="text-sm text-gray-400 font-medium">Errors</span>
           </div>
           <p className="text-2xl font-bold text-red-400">
-            {logs.filter(l => l.level === 'error').length}
+            {displayLogs.filter(l => l.level === 'error').length}
           </p>
         </div>
       </div>

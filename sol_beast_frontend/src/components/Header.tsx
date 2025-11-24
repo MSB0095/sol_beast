@@ -3,6 +3,7 @@ import { useBotStore } from '../store/botStore'
 import { useSettingsStore } from '../store/settingsStore'
 import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft } from 'lucide-react'
 import { ThemeSwitcher } from './ThemeSwitcher'
+import ModeSwitcher from './ModeSwitcher'
 import BeastLogo from './BeastLogo'
 
 export default function Header() {
@@ -88,6 +89,7 @@ export default function Header() {
                 {status === 'connected' ? '[ONLINE]' : '[OFFLINE]'}
               </span>
             </div>
+            <ModeSwitcher />
             <ThemeSwitcher />
           </div>
         </div>

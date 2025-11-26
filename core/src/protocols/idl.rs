@@ -247,6 +247,7 @@ pub fn load_all_idls() -> Result<HashMap<String, SimpleIdl>, CoreError> {
             format!("./{}", c),
             format!("../{}", c),
             format!("pumpfun/{}", c),
+            format!("src/protocols/pumpfun/{}", c),
             format!("sol_beast_protocols/pumpfun/{}", c),
             format!("../sol_beast_protocols/pumpfun/{}", c),
         ];

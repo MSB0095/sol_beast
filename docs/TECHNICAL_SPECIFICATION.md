@@ -53,8 +53,7 @@ core/src/
 │   ├── idl.rs            # IDL-based instruction building
 │   └── pumpfun.rs        # Pump.fun protocol support
 └── trading/              # Trading functionality
-    ├── buyer.rs          # Token buying logic
-    ├── buyer_new.rs      # Enhanced buying logic
+    ├── buyer.rs          # Token buying logic (consolidated; buyer_new merged into buyer.rs)
     ├── monitor.rs        # Holdings monitoring
     └── strategy.rs       # Trading strategies
 ```
@@ -84,7 +83,6 @@ pub mod blockchain {
 pub mod trading {
     pub mod strategy;
     pub mod buyer;
-    pub mod buyer_new;
     pub mod monitor;
 }
 
@@ -969,7 +967,7 @@ The pump.fun IDL (`pumpfun.json`) defines:
 
 ## Trading Module
 
-### Token Buying (`buyer.rs` & `buyer_new.rs`)
+### Token Buying (`buyer.rs`)
 
 #### Main Buy Function
 ```rust

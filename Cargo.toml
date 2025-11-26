@@ -1,10 +1,11 @@
 [workspace]
 members = [
-    "sol_beast_core",
-    "sol_beast_cli",
-    "sol_beast_wasm",
+    "core",
+    "cli",
+    "wasm",
 ]
 resolver = "2"
+
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +13,7 @@ edition = "2021"
 authors = ["sol_beast contributors"]
 license = "MIT"
 repository = "https://github.com/MSB0095/sol_beast"
+
 
 [workspace.dependencies]
 # Shared dependencies
@@ -54,3 +56,6 @@ getrandom = { version = "0.2", features = ["js"] }
 async-trait = "0.1"
 console_log = "1.0"
 env_logger = "0.11"
+config = "0.14"
+toml = "0.8"
+

@@ -68,7 +68,7 @@ RUST_LOG=info cargo run --release -- --real
 
 ```
 sol_beast/
-├── sol_beast_core/      # Shared Rust library (native + WASM)
+├── core/      # Shared Rust library (native + WASM)
 ├── sol_beast_wasm/      # WASM bindings for browser
 ├── sol_beast_cli/       # CLI application (server mode)
 ├── sol_beast_frontend/            # React + TypeScript dashboard
@@ -122,7 +122,7 @@ sol_beast/
 
 ```bash
 # Test core library
-cargo test -p sol_beast_core
+cargo test -p core
 
 # Test all packages
 cargo test --workspace
@@ -147,7 +147,7 @@ cargo clippy --all-targets
 
 ## Files of Interest
 
-- `sol_beast_core/` - Platform-agnostic trading logic
+- `core/` - Platform-agnostic trading logic
 - `sol_beast_wasm/` - WASM bindings for browsers
  - `sol_beast_frontend/src/components/` - React UI components
  - `sol_beast_frontend/src/store/wasmStore.ts` - WASM integration

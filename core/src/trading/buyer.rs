@@ -139,6 +139,101 @@ mod tests {
         assert_eq!(holding.mint, mint.to_string());
         assert!(holding.amount > 0);
     }
+
+    #[tokio::test]
+    async fn real_flow_buy_signs_and_sends() {
+        use solana_sdk::signature::Signer as SolKeypairSigner;
+        use base64::Engine;
+        // Setup mocked RPC client which returns latest blockhash and accepts send_and_confirm
+        struct MockSendRpcClient;
+        #[async_trait]
+        impl RpcClient for MockSendRpcClient {
+            async fn get_account_info(&self, _pubkey: &str) -> Result<Option<Vec<u8>>, crate::core::error::CoreError> { Ok(None) }
+            async fn get_balance(&self, _pubkey: &str) -> Result<u64, crate::core::error::CoreError> { Ok(1_000_000_000) }
+            async fn send_transaction(&self, _transaction: &[u8]) -> Result<String, crate::core::error::CoreError> { Ok("SIG".to_string()) }
+            async fn confirm_transaction(&self, _signature: &str) -> Result<bool, crate::core::error::CoreError> { Ok(true) }
+            async fn get_latest_blockhash(&self) -> Result<solana_sdk::hash::Hash, crate::core::error::CoreError> { Ok(solana_sdk::hash::Hash::default()) }
+            async fn simulate_transaction_with_config(&self, _tx: &solana_sdk::transaction::Transaction, _config: serde_json::Value) -> Result<serde_json::Value, crate::core::error::CoreError> { Ok(json!({"value": {"err": null}})) }
+            async fn send_and_confirm_transaction(&self, _tx: &solana_sdk::transaction::Transaction) -> Result<String, crate::core::error::CoreError> { Ok("SIGREAL".to_string()) }
+        }
+
+        // MockSigner that signs transactions using a Keypair
+        struct MockSignerWithKey { kp: solana_sdk::signature::Keypair }
+        #[async_trait]
+        impl crate::Signer for MockSignerWithKey {
+            fn pubkey(&self) -> solana_program::pubkey::Pubkey { self.kp.pubkey() }
+            async fn sign_transaction(&self, tx: &mut solana_sdk::transaction::Transaction, recent_blockhash: solana_sdk::hash::Hash) -> Result<(), crate::core::error::CoreError> {
+                tx.sign(&[&self.kp], recent_blockhash);
+                Ok(())
+            }
+        }
+
+        let rpc_client: Arc<dyn RpcClient> = Arc::new(MockSendRpcClient{});
+        let mut cache = LruCache::new(NonZeroUsize::new(16).unwrap());
+        let mint_pub = solana_program::pubkey::Pubkey::new_unique();
+        let mint = mint_pub.to_string();
+        cache.put(mint.clone(), (Instant::now(), 0.0001f64));
+        let price_cache = Arc::new(Mutex::new(cache));
+
+        // Construct settings with valid pubkeys to avoid parsing errors
+        let pump_program = solana_program::pubkey::Pubkey::new_unique().to_string();
+        let metadata_program = solana_program::pubkey::Pubkey::new_unique().to_string();
+        let settings_toml = format!(r#"
+solana_ws_urls = []
+solana_rpc_urls = ["http://localhost:8899"]
+pump_fun_program = "{}"
+metadata_program = "{}"
+tp_percent = 30.0
+sl_percent = -20.0
+timeout_secs = 3600
+cache_capacity = 16
+price_cache_ttl_secs = 60
+buy_amount = 0.1
+"#, pump_program, metadata_program);
+        let settings = Arc::new(Settings::from_toml_str(&settings_toml).unwrap());
+
+        // Provide a MockProvider for getAccountInfo to satisfy Global PDA fetch
+        struct MockProviderSend;
+        #[async_trait]
+        impl crate::rpc::RpcProvider for MockProviderSend {
+            async fn send_json(&self, request: serde_json::Value) -> Result<serde_json::Value, crate::core::error::CoreError> {
+                let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                match method {
+                    "getAccountInfo" => {
+                        // Return a minimal Global PDA with fee_recipient
+                        let mut data = vec![0u8; 73];
+                        let global_discriminator: [u8; 8] = [0xa7, 0xe8, 0xe8, 0xb1, 0xc8, 0x6c, 0x72, 0x7f];
+                        data[0..8].copy_from_slice(&global_discriminator);
+                        let fee_recipient_pk = solana_program::pubkey::Pubkey::new_unique();
+                        data[8+33..8+33+32].copy_from_slice(fee_recipient_pk.as_ref());
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                        Ok(json!({"jsonrpc":"2.0","id":1,"result": {"value": {"data": [encoded, "base64"]}}}))
+                    }
+                    _ => Ok(json!({"jsonrpc":"2.0","id":1,"result": null})),
+                }
+            }
+        }
+        crate::rpc::set_global_json_rpc_provider(Some(Arc::new(MockProviderSend))).await;
+
+        // Setup signer
+        let kp = solana_sdk::signature::Keypair::new();
+        let signer: Arc<dyn crate::Signer> = Arc::new(MockSignerWithKey { kp });
+
+        let result = buy_token(
+            mint.as_str(),
+            0.01,
+            true,
+            Some(signer.clone()),
+            None,
+            price_cache.clone(),
+            &rpc_client,
+            &settings,
+        ).await;
+        if let Err(e) = &result { panic!("buy_token real flow failed: {}", e); }
+        let holding = result.unwrap();
+        assert_eq!(holding.mint, mint);
+        assert!(holding.amount > 0);
+    }
 }
 
 async fn build_context_for_buy(

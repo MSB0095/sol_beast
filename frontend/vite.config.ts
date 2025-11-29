@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite'
+import * as path from 'path'
 import react from '@vitejs/plugin-react'
 import { nodePolyfills } from 'vite-plugin-node-polyfills'
 import wasm from "vite-plugin-wasm";
@@ -24,10 +25,12 @@ export default defineConfig({
     alias: {
       // Ensure `buffer` imports resolve to the browser shim
       buffer: 'buffer'
+      ,
+      'borsh': path.resolve(__dirname, 'src/shims/borsh-compat.js')
     }
   },
   optimizeDeps: {
-    include: ['buffer']
+    include: ['buffer', 'borsh', '@solana/web3.js']
   },
   base: process.env.VITE_BASE || (process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/'),
   build: {
@@ -40,6 +43,11 @@ export default defineConfig({
         // (Retained for rollup/production bundles)
         inject({ Buffer: ['buffer', 'Buffer'] })
       ]
+    }
+    ,
+    commonjsOptions: {
+      transformMixedEsModules: true,
+      include: [/node_modules/] // Ensure CJS dependencies like borsh are transformed correctly for ESM imports
     }
   },
   server: {

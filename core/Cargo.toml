@@ -1,5 +1,5 @@
 [package]
-name = "core"
+name = "sol_beast_core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -23,6 +23,7 @@ rand = { workspace = true }
 once_cell = { workspace = true }
 config = { workspace = true }
 toml = { workspace = true }
+bincode = { workspace = true }
 
 solana-program = { workspace = true }
 solana-sdk = { workspace = true }
@@ -37,6 +38,7 @@ mpl-token-metadata = { workspace = true }
 # Optional: async support for non-WASM targets
 tokio = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+hyper = { version = "0.14", features = ["server"] }
 
 # WASM-specific dependencies
 wasm-bindgen = { workspace = true, optional = true }
@@ -50,11 +52,12 @@ env_logger = { version = "0.11", optional = true }
 lru = "0.16.2"
 axum = "0.8.7"
 tower-http = { version = "0.6.7", features = ["cors"] }
-tokio-tungstenite = "0.28.0"
+tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+native-tls = { version = "0.2", optional = true }
 
 [features]
 default = ["native"]
-native = ["tokio", "futures-util", "reqwest", "env_logger", "solana-client"]
+native = ["tokio", "futures-util", "reqwest", "env_logger", "solana-client", "native-tls"]
 # Enable features
 native-rpc = ["reqwest"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys", "getrandom", "console_log"]

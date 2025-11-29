@@ -66,6 +66,9 @@ interface BotStore {
   runningState: BotRunningState
   mode: BotMode
   pollInterval: number | null
+  isPolling: boolean
+  lastPollError: string | null
+  lastInitError: string | null
   historicalData: HistoricalDataPoint[]
   lastStatUpdate: number
   initializeConnection: () => Promise<void>
@@ -88,6 +91,9 @@ export const useBotStore = create<BotStore>((set, get) => ({
   runningState: 'stopped',
   mode: 'dry-run',
   pollInterval: null,
+  isPolling: false,
+  lastPollError: null,
+  lastInitError: null,
   historicalData: [],
   lastStatUpdate: 0,
   
@@ -161,12 +167,22 @@ export const useBotStore = create<BotStore>((set, get) => ({
             const res = await fetch(API_LOGS_URL)
             if (res.ok) {
               const logsData = await res.json()
-              if (logsData.logs && Array.isArray(logsData.logs)) {
-                set({ logs: logsData.logs })
+              // Accept either an array response or an object with `logs` field
+              if (Array.isArray(logsData)) {
+                set({ logs: logsData, lastPollError: null })
+              } else if (logsData && Array.isArray(logsData.logs)) {
+                set({ logs: logsData.logs, lastPollError: null })
+              } else {
+                // Unexpected shape
+                set({ lastPollError: 'Unexpected logs response shape' })
               }
+            } else {
+              set({ lastPollError: `Logs fetch failed: ${res.status}` })
             }
           } catch (err) {
-            console.error('Failed to fetch logs:', err)
+            const msg = err instanceof Error ? err.message : String(err)
+            console.error('Failed to fetch logs:', msg)
+            set({ lastPollError: msg })
           }
         }
         
@@ -179,10 +195,10 @@ export const useBotStore = create<BotStore>((set, get) => ({
           pollStats()
           pollLogs()
         }, 2000)
-        
-        set({ pollInterval: interval as unknown as number })
+
+        set({ pollInterval: interval as unknown as number, isPolling: true, lastPollError: null, lastInitError: null })
       } else {
-        set({ status: 'disconnected', error: 'Backend not available' })
+        set({ status: 'disconnected', error: 'Backend not available', lastInitError: 'Backend not available' })
         // Stop polling if interval exists
         const current = get()
         if (current.pollInterval !== null) {
@@ -191,9 +207,11 @@ export const useBotStore = create<BotStore>((set, get) => ({
         }
       }
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Connection failed'
       set({ 
         status: 'disconnected', 
-        error: err instanceof Error ? err.message : 'Connection failed' 
+        error: msg,
+        lastInitError: msg
       })
       // Stop polling if interval exists
       const current = get()

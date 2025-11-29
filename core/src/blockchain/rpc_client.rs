@@ -1,4 +1,4 @@
-use crate::core::error::CoreError;
+use crate::core_mod::error::CoreError;
 use crate::models::BondingCurveState;
 
 /// RPC client trait for both native and WASM implementations

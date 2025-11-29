@@ -10,7 +10,7 @@
 //! concrete implementations.
 use serde_json::{json, Value};
 use crate::{
-    core::models::{Holding, PriceCache},
+    models::{Holding, PriceCache},
     rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback},
     idl::load_all_idls,
 };
@@ -49,13 +49,13 @@ mod tests {
     struct MockRpcClient;
     #[async_trait]
     impl RpcClient for MockRpcClient {
-        async fn get_account_info(&self, _pubkey: &str) -> Result<Option<Vec<u8>>, crate::core::error::CoreError> { Ok(None) }
-        async fn get_balance(&self, _pubkey: &str) -> Result<u64, crate::core::error::CoreError> { Ok(1_000_000_000) }
-        async fn send_transaction(&self, _transaction: &[u8]) -> Result<String, crate::core::error::CoreError> { Ok("SIG".to_string()) }
-        async fn confirm_transaction(&self, _signature: &str) -> Result<bool, crate::core::error::CoreError> { Ok(true) }
-        async fn get_latest_blockhash(&self) -> Result<Hash, crate::core::error::CoreError> { Ok(Hash::default()) }
-        async fn simulate_transaction_with_config(&self, _tx: &solana_sdk::transaction::Transaction, _config: serde_json::Value) -> Result<serde_json::Value, crate::core::error::CoreError> { Ok(json!({"value": {"err": null, "units_consumed": 100}})) }
-        async fn send_and_confirm_transaction(&self, _tx: &solana_sdk::transaction::Transaction) -> Result<String, crate::core::error::CoreError> { Ok("SIG".to_string()) }
+        async fn get_account_info(&self, _pubkey: &str) -> Result<Option<Vec<u8>>, crate::core_mod::error::CoreError> { Ok(None) }
+        async fn get_balance(&self, _pubkey: &str) -> Result<u64, crate::core_mod::error::CoreError> { Ok(1_000_000_000) }
+        async fn send_transaction(&self, _transaction: &[u8]) -> Result<String, crate::core_mod::error::CoreError> { Ok("SIG".to_string()) }
+        async fn confirm_transaction(&self, _signature: &str) -> Result<bool, crate::core_mod::error::CoreError> { Ok(true) }
+        async fn get_latest_blockhash(&self) -> Result<Hash, crate::core_mod::error::CoreError> { Ok(Hash::default()) }
+        async fn simulate_transaction_with_config(&self, _tx: &solana_sdk::transaction::Transaction, _config: serde_json::Value) -> Result<serde_json::Value, crate::core_mod::error::CoreError> { Ok(json!({"value": {"err": null, "units_consumed": 100}})) }
+        async fn send_and_confirm_transaction(&self, _tx: &solana_sdk::transaction::Transaction) -> Result<String, crate::core_mod::error::CoreError> { Ok("SIG".to_string()) }
     }
 
     // MockSigner not needed for dry-run test
@@ -105,7 +105,7 @@ mod tests {
         struct MockProvider;
         #[async_trait]
         impl crate::rpc::RpcProvider for MockProvider {
-            async fn send_json(&self, request: serde_json::Value) -> Result<serde_json::Value, crate::core::error::CoreError> {
+            async fn send_json(&self, request: serde_json::Value) -> Result<serde_json::Value, crate::core_mod::error::CoreError> {
                 let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 match method {
                     "getAccountInfo" => {
@@ -148,13 +148,13 @@ mod tests {
         struct MockSendRpcClient;
         #[async_trait]
         impl RpcClient for MockSendRpcClient {
-            async fn get_account_info(&self, _pubkey: &str) -> Result<Option<Vec<u8>>, crate::core::error::CoreError> { Ok(None) }
-            async fn get_balance(&self, _pubkey: &str) -> Result<u64, crate::core::error::CoreError> { Ok(1_000_000_000) }
-            async fn send_transaction(&self, _transaction: &[u8]) -> Result<String, crate::core::error::CoreError> { Ok("SIG".to_string()) }
-            async fn confirm_transaction(&self, _signature: &str) -> Result<bool, crate::core::error::CoreError> { Ok(true) }
-            async fn get_latest_blockhash(&self) -> Result<solana_sdk::hash::Hash, crate::core::error::CoreError> { Ok(solana_sdk::hash::Hash::default()) }
-            async fn simulate_transaction_with_config(&self, _tx: &solana_sdk::transaction::Transaction, _config: serde_json::Value) -> Result<serde_json::Value, crate::core::error::CoreError> { Ok(json!({"value": {"err": null}})) }
-            async fn send_and_confirm_transaction(&self, _tx: &solana_sdk::transaction::Transaction) -> Result<String, crate::core::error::CoreError> { Ok("SIGREAL".to_string()) }
+            async fn get_account_info(&self, _pubkey: &str) -> Result<Option<Vec<u8>>, crate::core_mod::error::CoreError> { Ok(None) }
+            async fn get_balance(&self, _pubkey: &str) -> Result<u64, crate::core_mod::error::CoreError> { Ok(1_000_000_000) }
+            async fn send_transaction(&self, _transaction: &[u8]) -> Result<String, crate::core_mod::error::CoreError> { Ok("SIG".to_string()) }
+            async fn confirm_transaction(&self, _signature: &str) -> Result<bool, crate::core_mod::error::CoreError> { Ok(true) }
+            async fn get_latest_blockhash(&self) -> Result<solana_sdk::hash::Hash, crate::core_mod::error::CoreError> { Ok(solana_sdk::hash::Hash::default()) }
+            async fn simulate_transaction_with_config(&self, _tx: &solana_sdk::transaction::Transaction, _config: serde_json::Value) -> Result<serde_json::Value, crate::core_mod::error::CoreError> { Ok(json!({"value": {"err": null}})) }
+            async fn send_and_confirm_transaction(&self, _tx: &solana_sdk::transaction::Transaction) -> Result<String, crate::core_mod::error::CoreError> { Ok("SIGREAL".to_string()) }
         }
 
         // MockSigner that signs transactions using a Keypair
@@ -162,7 +162,7 @@ mod tests {
         #[async_trait]
         impl crate::Signer for MockSignerWithKey {
             fn pubkey(&self) -> solana_program::pubkey::Pubkey { self.kp.pubkey() }
-            async fn sign_transaction(&self, tx: &mut solana_sdk::transaction::Transaction, recent_blockhash: solana_sdk::hash::Hash) -> Result<(), crate::core::error::CoreError> {
+            async fn sign_transaction(&self, tx: &mut solana_sdk::transaction::Transaction, recent_blockhash: solana_sdk::hash::Hash) -> Result<(), crate::core_mod::error::CoreError> {
                 tx.sign(&[&self.kp], recent_blockhash);
                 Ok(())
             }
@@ -196,7 +196,7 @@ buy_amount = 0.1
         struct MockProviderSend;
         #[async_trait]
         impl crate::rpc::RpcProvider for MockProviderSend {
-            async fn send_json(&self, request: serde_json::Value) -> Result<serde_json::Value, crate::core::error::CoreError> {
+            async fn send_json(&self, request: serde_json::Value) -> Result<serde_json::Value, crate::core_mod::error::CoreError> {
                 let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 match method {
                     "getAccountInfo" => {

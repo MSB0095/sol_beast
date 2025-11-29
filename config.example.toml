@@ -88,6 +88,11 @@ sub_ttl_secs = 900
 # Timeout waiting for WebSocket subscription confirmation
 wss_subscribe_timeout_secs = 6
 
+# If you are running in an environment where TLS root certs are missing or a proxy
+# intercepts TLS (enterprise/CI), set this to true to allow insecure TLS for WebSocket connections.
+# WARNING: This option disables certificate validation and is INSECURE. Use only for testing.
+disable_tls_verification = false
+
 # ==================== Caching ====================
 cache_capacity = 1024
 price_cache_ttl_secs = 30

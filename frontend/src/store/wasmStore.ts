@@ -1,7 +1,20 @@
 import { create } from 'zustand';
+import type { Holding, BotStats } from './botStore'
+import type { Settings } from './settingsStore'
 
-// WASM module will be loaded dynamically
-type SolBeastBot = any; // Will be properly typed once WASM module is built
+// Minimal WASM bot interface used by the frontend
+type SolBeastBot = {
+  connect_wallet: (address: string) => Promise<Record<string, unknown>>
+  disconnect_wallet: () => void
+  update_settings: (settings: Partial<Settings>) => Promise<void>
+  start_monitoring: (intervalMs?: number) => Promise<void>
+  stop_monitoring: () => Promise<void>
+  get_logs: () => Promise<Array<Record<string, unknown>>>
+  clear_logs: () => Promise<void>
+  get_stats: () => Promise<BotStats>
+  get_holdings: () => Promise<Holding[]>
+  get_trades: () => Promise<Array<Record<string, unknown>>>
+}
 
 interface WasmState {
   bot: SolBeastBot | null;
@@ -11,15 +24,15 @@ interface WasmState {
   
   // Actions
   initializeWasm: () => Promise<void>;
-  connectWallet: (address: string) => Promise<any>;
+  connectWallet: (address: string) => Promise<Record<string, unknown>>;
   disconnectWallet: () => void;
-  updateSettings: (settings: any) => Promise<void>;
-  getHoldings: () => Promise<any>;
-  getTrades: () => Promise<any>;
+  updateSettings: (settings: Partial<Settings>) => Promise<void>;
+  getHoldings: () => Promise<Holding[]>;
+  getTrades: () => Promise<Array<Record<string, unknown>>>;
   startBot: (intervalMs?: number) => Promise<void>;
   stopBot: () => Promise<void>;
-  getLogs: () => Promise<any>;
-  getStats: () => Promise<any>;
+  getLogs: () => Promise<Array<Record<string, unknown>>>;
+  getStats: () => Promise<BotStats>;
   clearLogs: () => Promise<void>;
 }
 
@@ -83,7 +96,7 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     }
   },
 
-  updateSettings: async (settings: any) => {
+  updateSettings: async (settings: Partial<Settings>) => {
     const { bot } = get();
     if (!bot) {
       throw new Error('WASM module not initialized');
@@ -122,7 +135,7 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     }
   },
 
-  getLogs: async () => {
+  getLogs: async (): Promise<Array<Record<string, unknown>>> => {
     const { bot } = get();
     if (!bot) throw new Error('WASM module not initialized');
     try {
@@ -154,7 +167,7 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     }
   },
 
-  getStats: async () => {
+  getStats: async (): Promise<BotStats> => {
     const { bot } = get();
     if (!bot) throw new Error('WASM module not initialized');
     try {
@@ -166,7 +179,7 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     }
   },
 
-  getHoldings: async () => {
+  getHoldings: async (): Promise<Holding[]> => {
     const { bot } = get();
     if (!bot) {
       throw new Error('WASM module not initialized');
@@ -181,7 +194,7 @@ export const useWasmStore = create<WasmState>((set, get) => ({
     }
   },
 
-  getTrades: async () => {
+  getTrades: async (): Promise<Array<Record<string, unknown>>> => {
     const { bot } = get();
     if (!bot) {
       throw new Error('WASM module not initialized');

@@ -199,7 +199,7 @@ colored = "2.0"     # For colored terminal output
 
 # Ensure these are available
 tokio = { workspace = true }
-core = { path = "../core", features = ["native", "native-rpc"] }
+sol_beast_core = { package = "sol_beast_core", path = "../core", features = ["native", "native-rpc"] }
 ```
 
 ### Core Module Integration

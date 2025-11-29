@@ -1,8 +1,9 @@
 use wasm_bindgen::prelude::*;
-use core::{
+use sol_beast_core::{
     WalletManager, TransactionBuilder, StrategyConfig, TradingStrategy,
     UserAccount, Holding, TradeRecord, models::UserSettings,
 };
+use sol_beast_core as core;
 
 // Simple WASM RPC client
 #[derive(Clone)]
@@ -48,7 +49,7 @@ const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 #[allow(dead_code)]
 const FEE_PROGRAM_PUBKEY: &str = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
 
-use core::blockchain::tx_builder::{build_buy_instruction, build_sell_instruction};
+use sol_beast_core::blockchain::tx_builder::{build_buy_instruction, build_sell_instruction};
 
 // Note: Build instructions are implemented centrally in `core::tx_builder`.
 

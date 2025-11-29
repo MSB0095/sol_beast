@@ -15,7 +15,7 @@ echo ""
 echo "Press Ctrl+C to stop"
 echo ""
 
-cargo run --release
+cargo run -p cli --release -- bot start
 #!/bin/bash
 
 # Wrapper: Start Sol Beast Backend (Linux/macOS)
@@ -30,4 +30,4 @@ echo "📍 http://localhost:8080"
 echo "📊 API: http://localhost:8080/api"
 echo "Press Ctrl+C to stop"
 
-cargo run --release
+cargo run -p cli --release -- bot start

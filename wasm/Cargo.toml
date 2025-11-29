@@ -10,7 +10,7 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-core = { path = "../core", default-features = false, features = ["wasm"] }
+sol_beast_core = { package = "sol_beast_core", path = "../core", default-features = false, features = ["wasm"] }
 # helius: will be migrated into core as core::helius
 
 wasm-bindgen = { workspace = true }

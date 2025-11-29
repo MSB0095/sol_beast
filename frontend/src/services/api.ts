@@ -54,8 +54,9 @@ class ApiClient {
   }
 
   // Helper for batch updates
-  async batchUpdateSettings(updates: Record<string, any>) {
-    return this.updateSettings(updates as any)
+  async batchUpdateSettings(updates: Record<string, unknown>) {
+    // Narrow unknowns to Partial<Settings> where possible
+    return this.updateSettings(updates as Partial<Settings>)
   }
 
   // Error handler

@@ -1,4 +1,4 @@
-use crate::core::error::CoreError;
+use crate::core_mod::error::CoreError;
 use serde::{Deserialize, Serialize};
 use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
@@ -65,6 +65,8 @@ pub struct Settings {
     pub helius_sender_enabled: bool,
     #[serde(default)]
     pub helius_api_key: Option<String>,
+    #[serde(default)]
+    pub helius_ws_enabled: bool,
     #[serde(default = "default_helius_sender_endpoint")]
     pub helius_sender_endpoint: String,
     #[serde(default = "default_helius_min_tip_sol")]
@@ -77,6 +79,35 @@ pub struct Settings {
     pub helius_use_dynamic_tips: bool,
     #[serde(default = "default_helius_confirm_timeout_secs")]
     pub helius_confirm_timeout_secs: u64,
+    #[serde(default = "default_helius_enhanced_ws")]
+    pub helius_enhanced_ws: bool,
+    #[serde(default = "default_auto_subscribe_on_mint")]
+    pub auto_subscribe_on_mint: bool,
+    #[serde(default)]
+    pub disable_tls_verification: bool,
+    #[serde(default = "default_enable_strict_metadata_filter")]
+    pub enable_strict_metadata_filter: bool,
+    #[serde(default = "default_priority_level")]
+    pub priority_level: String,
+    #[serde(default = "default_enable_dynamic_compute_units")]
+    pub enable_dynamic_compute_units: bool,
+    #[serde(default = "default_compute_unit_limit_multiplier")]
+    pub compute_unit_limit_multiplier: f64,
+    #[serde(default = "default_fallback_compute_units")]
+    pub fallback_compute_units: u64,
+    #[serde(default = "default_enable_graceful_stop")]
+    pub enable_graceful_stop: bool,
+    // Webhook settings
+    #[serde(default = "default_webhooks_enabled")]
+    pub webhooks_enabled: bool,
+    #[serde(default = "default_webhook_detect_new_coins")]
+    pub webhook_detect_new_coins: bool,
+    #[serde(default = "default_webhook_monitor_prices")]
+    pub webhook_monitor_prices: bool,
+    #[serde(default = "default_webhook_server_port")]
+    pub webhook_server_port: u16,
+    #[serde(default)]
+    pub webhook_monitored_mints: Vec<String>,
 }
 
 impl Settings {
@@ -162,6 +193,15 @@ impl Settings {
         if other.helius_use_dynamic_tips != self.helius_use_dynamic_tips {
             self.helius_use_dynamic_tips = other.helius_use_dynamic_tips;
         }
+        if other.helius_ws_enabled != self.helius_ws_enabled {
+            self.helius_ws_enabled = other.helius_ws_enabled;
+        }
+        if other.helius_enhanced_ws != self.helius_enhanced_ws {
+            self.helius_enhanced_ws = other.helius_enhanced_ws;
+        }
+        if other.auto_subscribe_on_mint != self.auto_subscribe_on_mint {
+            self.auto_subscribe_on_mint = other.auto_subscribe_on_mint;
+        }
         if other.helius_min_tip_sol != self.helius_min_tip_sol {
             self.helius_min_tip_sol = other.helius_min_tip_sol;
         }
@@ -207,6 +247,39 @@ impl Settings {
         if other.simulate_wallet_private_key_string != self.simulate_wallet_private_key_string {
             self.simulate_wallet_private_key_string = other.simulate_wallet_private_key_string.clone();
         }
+        if other.enable_strict_metadata_filter != self.enable_strict_metadata_filter {
+            self.enable_strict_metadata_filter = other.enable_strict_metadata_filter;
+        }
+        if other.priority_level != self.priority_level {
+            self.priority_level = other.priority_level.clone();
+        }
+        if other.enable_dynamic_compute_units != self.enable_dynamic_compute_units {
+            self.enable_dynamic_compute_units = other.enable_dynamic_compute_units;
+        }
+        if (other.compute_unit_limit_multiplier - self.compute_unit_limit_multiplier).abs() > f64::EPSILON {
+            self.compute_unit_limit_multiplier = other.compute_unit_limit_multiplier;
+        }
+        if other.fallback_compute_units != self.fallback_compute_units {
+            self.fallback_compute_units = other.fallback_compute_units;
+        }
+        if other.enable_graceful_stop != self.enable_graceful_stop {
+            self.enable_graceful_stop = other.enable_graceful_stop;
+        }
+        if other.webhooks_enabled != self.webhooks_enabled {
+            self.webhooks_enabled = other.webhooks_enabled;
+        }
+        if other.webhook_detect_new_coins != self.webhook_detect_new_coins {
+            self.webhook_detect_new_coins = other.webhook_detect_new_coins;
+        }
+        if other.webhook_monitor_prices != self.webhook_monitor_prices {
+            self.webhook_monitor_prices = other.webhook_monitor_prices;
+        }
+        if other.webhook_server_port != self.webhook_server_port {
+            self.webhook_server_port = other.webhook_server_port;
+        }
+        if other.webhook_monitored_mints != self.webhook_monitored_mints {
+            self.webhook_monitored_mints = other.webhook_monitored_mints.clone();
+        }
     }
 
     pub fn validate(&self) -> Result<(), CoreError> {
@@ -230,6 +303,17 @@ impl Settings {
         }
         if self.max_liquidity_sol < self.min_liquidity_sol {
             return Err(CoreError::Config("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
+        }
+        // Validate priority level
+        let p = self.priority_level.to_lowercase();
+        if p != "low" && p != "medium" && p != "high" {
+            return Err(CoreError::Config("priority_level must be one of: Low, Medium, High".to_string()));
+        }
+        if self.compute_unit_limit_multiplier <= 0.0 {
+            return Err(CoreError::Config("compute_unit_limit_multiplier must be > 0".to_string()));
+        }
+        if self.fallback_compute_units == 0 {
+            return Err(CoreError::Config("fallback_compute_units must be > 0".to_string()));
         }
         Ok(())
     }
@@ -305,6 +389,18 @@ fn default_helius_min_tip_sol() -> f64 { 0.001 }
 fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
 fn default_helius_use_dynamic_tips() -> bool { true }
 fn default_helius_confirm_timeout_secs() -> u64 { 15 }
+fn default_helius_enhanced_ws() -> bool { false }
+fn default_auto_subscribe_on_mint() -> bool { true }
+fn default_enable_strict_metadata_filter() -> bool { false }
+fn default_priority_level() -> String { "Medium".to_string() }
+fn default_enable_dynamic_compute_units() -> bool { false }
+fn default_compute_unit_limit_multiplier() -> f64 { 1.0 }
+fn default_fallback_compute_units() -> u64 { 200000 }
+fn default_enable_graceful_stop() -> bool { false }
+fn default_webhooks_enabled() -> bool { false }
+fn default_webhook_detect_new_coins() -> bool { false }
+fn default_webhook_monitor_prices() -> bool { false }
+fn default_webhook_server_port() -> u16 { 8080 }
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode

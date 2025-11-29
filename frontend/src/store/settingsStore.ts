@@ -63,7 +63,7 @@ export interface Settings {
   helius_confirm_timeout_secs: number
 }
 
-type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades'
+export type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades'
 
 interface SettingsStore {
   settings: Settings | null
@@ -71,6 +71,8 @@ interface SettingsStore {
   saving: boolean
   error: string | null
   activeTab: SettingsTab
+  engine: 'backend' | 'wasm'
+  setEngine: (engine: 'backend' | 'wasm') => void
   
   fetchSettings: () => Promise<void>
   saveSettings: (settings: Partial<Settings>) => Promise<void>
@@ -79,48 +81,17 @@ interface SettingsStore {
   setError: (error: string | null) => void
 }
 
-const defaultSettings: Settings = {
-  solana_ws_urls: ['wss://solana-mainnet.core.chainstack.com/'],
-  solana_rpc_urls: ['https://solana-mainnet.core.chainstack.com/'],
-  pump_fun_program: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
-  metadata_program: 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s',
-  tp_percent: 100,
-  sl_percent: -50,
-  timeout_secs: 50,
-  buy_amount: 0.001,
-  enable_safer_sniping: true,
-  min_tokens_threshold: 30000,
-  max_sol_per_token: 0.002,
-  slippage_bps: 500,
-  min_liquidity_sol: 0,
-  max_liquidity_sol: 15,
-  max_create_to_buy_secs: 5,
-  max_holded_coins: 4,
-  price_source: 'wss',
-  rotate_rpc: true,
-  rpc_rotate_interval_secs: 6000,
-  max_subs_per_wss: 2,
-  sub_ttl_secs: 900,
-  wss_subscribe_timeout_secs: 10,
-  cache_capacity: 1024,
-  price_cache_ttl_secs: 30,
-  bonding_curve_strict: false,
-  bonding_curve_log_debounce_secs: 300,
-  helius_sender_enabled: true,
-  helius_sender_endpoint: 'https://sender.helius-rpc.com/fast',
-  helius_min_tip_sol: 0.00001,
-  helius_priority_fee_multiplier: 1.2,
-  helius_use_swqos_only: true,
-  helius_use_dynamic_tips: true,
-  helius_confirm_timeout_secs: 1,
-}
+// Note: we avoid populating UI with hardcoded defaults when backend is unreachable.
+// The app will show a loading / error state and require the backend to provide
+// authoritative settings. This prevents placeholders from appearing as "real" data.
 
 export const useSettingsStore = create<SettingsStore>((set) => ({
-  settings: defaultSettings,
+  settings: null,
   loading: false,
   saving: false,
   error: null,
   activeTab: 'dashboard',
+  engine: 'backend',
   
   fetchSettings: async () => {
     set({ loading: true, error: null })
@@ -131,14 +102,14 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
         set({ settings, loading: false })
       } else {
         set({ 
-          settings: defaultSettings,
+          settings: null,
           loading: false,
           error: 'Failed to fetch settings from backend'
         })
       }
     } catch (err) {
       set({ 
-        settings: defaultSettings,
+        settings: null,
         loading: false,
         error: err instanceof Error ? err.message : 'Failed to fetch settings'
       })
@@ -153,10 +124,12 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates),
       })
-      
+
       if (response.ok) {
+        // Use the authoritative settings returned by backend if available
+        const saved = await response.json().catch(() => null)
         set((state) => ({
-          settings: state.settings ? { ...state.settings, ...updates } : defaultSettings,
+          settings: saved || (state.settings ? { ...state.settings, ...updates } : null),
           saving: false,
         }))
       } else {
@@ -183,5 +156,6 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   },
   
   setActiveTab: (tab) => set({ activeTab: tab }),
+  setEngine: (engine: 'backend' | 'wasm') => set({ engine }),
   setError: (error) => set({ error }),
 }))

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use crate::core::error::CoreError;
+use crate::core_mod::error::CoreError;
 use solana_program::pubkey::Pubkey;
 use solana_sdk::transaction::Transaction;
 

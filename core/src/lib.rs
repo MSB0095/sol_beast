@@ -1,7 +1,7 @@
 // Core library for sol_beast - shared between CLI and WASM builds
 #![cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 
-pub mod core {
+pub mod core_mod {
     pub mod error;
     pub mod models;
     pub mod state;
@@ -40,8 +40,8 @@ pub mod connectivity {
 }
 
 // Re-export commonly used types
-pub use core::error::CoreError;
-pub use core::models::{
+pub use core_mod::error::CoreError;
+pub use core_mod::models::{
     BondingCurveState,
     Holding,
     OffchainMetadata,
@@ -52,15 +52,15 @@ pub use core::models::{
 pub use blockchain::transaction::{TransactionBuilder, TransactionResult};
 pub use config::wallet::{WalletManager, WalletInfo};
 pub use trading::strategy::TradingStrategy;
-pub use core::models::StrategyConfig;
+pub use core_mod::models::StrategyConfig;
 pub use config::settings::Settings;
 pub use blockchain::signer::*;
 pub use config::settings::{load_keypair_from_env_var, parse_private_key_string};
 pub use protocols::idl::SimpleIdl;
 
 // Re-export modules for backward compatibility with main.rs and other consumers
-pub use core::models as models;
-pub use core::state as state;
+pub use core_mod::models as models;
+pub use core_mod::state as state;
 pub use blockchain::rpc_client as rpc_client;
 pub use blockchain::rpc as rpc;
 pub use blockchain::rpc_helpers as rpc_helpers;

@@ -25,7 +25,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Core library integration
-core = { path = "../core", features = ["native", "native-rpc"] }
+sol_beast_core = { package = "sol_beast_core", path = "../core", features = ["native", "native-rpc"] }
 
 # CLI Framework
 clap = { version = "4.4", features = ["derive", "cargo"] }

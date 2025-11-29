@@ -1,4 +1,4 @@
-use crate::core::models::Protocol;
+use crate::core_mod::models::Protocol;
 use solana_program::pubkey::Pubkey;
 
 #[allow(dead_code)]

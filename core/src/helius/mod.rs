@@ -9,6 +9,10 @@ use super::blockchain::rpc_client::RpcClient as CoreRpcClient;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 use log::debug;
+use base64::engine::general_purpose::STANDARD as Base64Engine;
+use base64::Engine;
+pub mod client;
+use client::HeliusClient;
 
 // TIP accounts and constants
 pub const TIP_ACCOUNTS: &[&str] = &[
@@ -44,17 +48,31 @@ pub async fn get_priority_fee_estimate(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn send_transaction_via_helius(
-    _instructions: Vec<Instruction>,
-    _payer: std::sync::Arc<dyn CoreSigner>,
+    instructions: Vec<Instruction>,
+    payer: std::sync::Arc<dyn CoreSigner>,
     settings: &Arc<Settings>,
-    _rpc_client: &Arc<dyn CoreRpcClient>,
+    rpc_client: &Arc<dyn CoreRpcClient>,
 ) -> Result<String, Box<dyn Error + Send + Sync>> {
-    // naive native implementation: call out to Helius sender endpoint if enabled
+    // Use Helius Sender to send the transaction if enabled in config
     if !settings.helius_sender_enabled {
         return Err("Helius Sender is not enabled in settings".into());
     }
-    // TODO: Implement a real sender; for now return an error indicating not implemented.
-    Err("send_transaction_via_helius native implementation not yet implemented".into())
+
+    // Build transaction and sign it
+    let payer_pubkey = payer.pubkey();
+    let mut tx = solana_sdk::transaction::Transaction::new_with_payer(&instructions, Some(&payer_pubkey));
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    payer.sign_transaction(&mut tx, recent_blockhash).await?;
+
+    // Serialize and send via Helius Sender
+    let serialized = bincode::serialize(&tx)?;
+    let base64_tx = Base64Engine.encode(serialized);
+
+    let helius_base = &settings.helius_sender_endpoint;
+    let client = HeliusClient::new(helius_base, settings.helius_api_key.clone());
+    // skip_preflight true for sender speed; max_retries 0 for sender
+    let sig = client.send_transaction(&base64_tx, true, 0).await?;
+    Ok(sig)
 }
 
 // wasm stub implementations

@@ -3,6 +3,7 @@ export default {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
+    "./node_modules/flyonui/dist/**/*.{js,ts,jsx,tsx}"
   ],
   theme: {
     extend: {
@@ -32,5 +33,5 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [require('flyonui')],
 }

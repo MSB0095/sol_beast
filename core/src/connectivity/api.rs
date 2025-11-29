@@ -1,7 +1,18 @@
+impl ApiState {
+    pub async fn add_detected_coin(&self, coin: DetectedCoin) {
+        {
+            let mut coins = self.detected_coins.lock().await;
+            coins.insert(0, coin.clone());
+            if coins.len() > 100 { coins.truncate(100); }
+        }
+        self.bot_control.log_coin_detected(&coin).await;
+    }
+}
 use axum::{
     extract::{State, Json},
     routing::{get, post},
     Router,
+    
     response::IntoResponse,
 };
 use std::sync::Arc;
@@ -10,6 +21,9 @@ use serde_json::json;
 use log::{info, warn};
 use chrono::Utc;
 use axum::http::StatusCode;
+use tokio::task::JoinHandle;
+use tokio::sync::oneshot;
+use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 
 use crate::models::Holding;
@@ -58,6 +72,7 @@ impl BotControl {
 
     pub async fn add_log(&self, level: &str, message: String, details: Option<String>) {
         let mut logs = self.logs.lock().await;
+        info!("Adding log entry: level={}, message={}", level, message);
         let entry = LogEntry {
             timestamp: Utc::now().to_rfc3339(),
             level: level.to_string(),
@@ -67,6 +82,11 @@ impl BotControl {
         logs.insert(0, entry);
         if logs.len() > 100 { logs.truncate(100); }
     }
+
+        pub async fn log_coin_detected(&self, coin: &DetectedCoin) {
+            let msg = format!("New coin detected: {} ({})", coin.name.as_deref().unwrap_or("Unknown"), coin.mint);
+            self.add_log("info", msg, Some(format!("Symbol: {:?}, Creator: {}", coin.symbol, coin.creator))).await;
+        }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -145,6 +165,134 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/trades", get(get_trades_handler))
         .with_state(state)
         .layer(CorsLayer::permissive())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Settings;
+    use tokio::sync::Mutex as TokioMutex;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_start_api_server_and_shutdown() {
+        // Build minimal settings for test
+        let settings = Settings {
+            solana_ws_urls: vec![String::from("wss://example.org")],
+            solana_rpc_urls: vec![String::from("http://127.0.0.1:8899")],
+            pump_fun_program: String::from("pump"),
+            metadata_program: String::from("meta"),
+            wallet_keypair_path: None,
+            wallet_keypair_json: None,
+            wallet_private_key_string: None,
+            simulate_wallet_private_key_string: None,
+            tp_percent: 30.0,
+            sl_percent: -20.0,
+            timeout_secs: 3600,
+            cache_capacity: 16,
+            price_cache_ttl_secs: 60,
+            buy_amount: 0.1,
+            price_source: String::from("wss"),
+            rotate_rpc: true,
+            rpc_rotate_interval_secs: 60,
+            max_holded_coins: 10,
+            max_subs_per_wss: 4,
+            sub_ttl_secs: 900,
+            wss_subscribe_timeout_secs: 6,
+            max_create_to_buy_secs: 6,
+            bonding_curve_strict: false,
+            bonding_curve_log_debounce_secs: 300,
+            simulate_wallet_keypair_json: None,
+            min_tokens_threshold: 1000000,
+            max_sol_per_token: 0.0001,
+            slippage_bps: 500,
+            enable_safer_sniping: false,
+            min_liquidity_sol: 0.0,
+            max_liquidity_sol: 100.0,
+            helius_sender_enabled: false,
+            helius_api_key: None,
+            helius_sender_endpoint: String::from("https://sender.helius-rpc.com/fast"),
+            helius_min_tip_sol: 0.001,
+            helius_priority_fee_multiplier: 1.2,
+            helius_use_swqos_only: false,
+            helius_use_dynamic_tips: true,
+            helius_confirm_timeout_secs: 15,
+            enable_strict_metadata_filter: false,
+            priority_level: String::from("Medium"),
+            enable_dynamic_compute_units: false,
+            compute_unit_limit_multiplier: 1.0,
+            fallback_compute_units: 200000,
+            enable_graceful_stop: false,
+            webhooks_enabled: false,
+            webhook_detect_new_coins: false,
+            webhook_monitor_prices: false,
+            webhook_server_port: 8080,
+            webhook_monitored_mints: Vec::new(),
+            helius_ws_enabled: false,
+            helius_enhanced_ws: false,
+            disable_tls_verification: false,
+            auto_subscribe_on_mint: true,
+        };
+
+        let api_state = ApiState {
+            settings: Arc::new(TokioMutex::new(settings)),
+            stats: Arc::new(TokioMutex::new(BotStats { total_buys: 0, total_sells: 0, total_profit: 0.0, current_holdings: Vec::new(), uptime_secs: 0, last_activity: "".to_string(), running_state: None, mode: None, runtime_mode: None })),
+            bot_control: Arc::new(BotControl::new_with_mode(BotMode::DryRun)),
+            detected_coins: Arc::new(TokioMutex::new(Vec::new())),
+            trades: Arc::new(TokioMutex::new(Vec::new())),
+        };
+
+        let addr = "127.0.0.1:0";
+        let server_handle = start_api_server(api_state.clone(), addr).await.expect("start server");
+        // Shutdown right away
+        server_handle.shutdown().await.expect("shutdown server");
+    }
+}
+
+/// A handle to a running API server, allows graceful shutdown.
+pub struct ServerHandle {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join_handle: JoinHandle<()>,
+}
+
+impl ServerHandle {
+    pub async fn shutdown(mut self) -> Result<(), crate::core_mod::error::CoreError> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            // ignore send error - the receiver may have already gone.
+            let _ = tx.send(());
+        }
+        // Await server task finish
+        if let Err(e) = self.join_handle.await {
+                return Err(crate::core_mod::error::CoreError::Internal(format!("Server join error: {}", e)));
+            }
+        Ok(())
+    }
+}
+
+/// Start AXUM server with the provided ApiState and bind address.
+/// Returns a `ServerHandle` to allow graceful shutdown.
+pub async fn start_api_server(state: ApiState, bind_addr: &str) -> Result<ServerHandle, crate::core_mod::error::CoreError> {
+    let router = create_router(state);
+    let addr: SocketAddr = bind_addr.parse().map_err(|e| crate::core_mod::error::CoreError::Serialization(format!("Invalid bind address: {}", e)))?;
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let make_svc = router.into_make_service();
+
+    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| crate::core_mod::error::CoreError::Internal(format!("Failed to bind to address {}: {}", addr, e)))?;
+    let graceful = axum::serve(listener, make_svc).with_graceful_shutdown(async {
+        let _ = shutdown_rx.await;
+    });
+
+    let join_handle = tokio::spawn(async move {
+        if let Err(e) = graceful.await {
+            log::error!("Server error: {}", e);
+        }
+    });
+
+    Ok(ServerHandle {
+        shutdown_tx: Some(shutdown_tx),
+        join_handle,
+    })
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -435,6 +583,7 @@ async fn get_detected_coins_handler(
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
     let coins = state.detected_coins.lock().await;
+    info!("Fetching detected coins for frontend");
     Json(coins.clone())
 }
 

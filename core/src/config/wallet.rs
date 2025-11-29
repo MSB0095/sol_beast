@@ -1,5 +1,5 @@
-use crate::core::error::CoreError;
-use crate::core::models::UserAccount;
+use crate::core_mod::error::CoreError;
+use crate::core_mod::models::UserAccount;
 use serde::{Deserialize, Serialize};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;

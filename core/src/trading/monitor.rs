@@ -6,7 +6,13 @@ use std::{collections::HashMap, sync::Arc};
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::{Mutex, mpsc};
 use crate::ws::WsRequest;
+use lru::LruCache;
 use log::{info, debug, error};
+use std::num::NonZeroUsize;
+use crate::core_mod::error::CoreError;
+use crate::connectivity::api::ApiState;
+use tokio::task::JoinHandle;
+use tokio::sync::oneshot;
 
 pub async fn monitor_holdings(
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
@@ -22,9 +28,8 @@ pub async fn monitor_holdings(
     _next_wss_sender: Arc<AtomicUsize>,
     trades_list: Arc<tokio::sync::Mutex<Vec<TradeRecord>>>,
     bot_control: Arc<BotControl>,
-) {
-    info!("Starting holdings monitor - real trading: {}, active holdings: {}",
-          is_real, holdings.lock().await.len());
+ ) {
+    info!("Starting holdings monitor - real trading: {}, active holdings: {}", is_real, holdings.lock().await.len());
     
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
     let max_retries = 3;
@@ -78,6 +83,164 @@ pub async fn monitor_holdings(
     info!("Holdings monitor stopped");
 }
 
+/// Handle to the background monitor tasks (WS connections and monitor loop)
+pub struct MonitorHandle {
+    stop_tx: Option<oneshot::Sender<()>>,
+    join_handles: Vec<JoinHandle<()>>,
+}
+
+impl MonitorHandle {
+    pub async fn stop(mut self) -> Result<(), CoreError> {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        for h in self.join_handles {
+            if let Err(e) = h.await {
+                return Err(CoreError::Internal(format!("Monitor join error: {}", e)));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Start monitor tasks: WSS subscriptions and holdings monitor.
+/// Returns a MonitorHandle to allow stopping the tasks.
+pub async fn start_monitor_tasks(
+    api_state: ApiState,
+    rpc_client: Arc<dyn CoreRpcClient>,
+    keypair: Option<Arc<dyn crate::Signer>>,
+    simulate_keypair: Option<Arc<dyn crate::Signer>>,
+    price_cache: Arc<Mutex<PriceCache>>,
+    settings: Arc<Settings>,
+) -> Result<MonitorHandle, CoreError> {
+    // Create common shared structures
+    let holdings: Arc<Mutex<std::collections::HashMap<String, Holding>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let trades_map: Arc<Mutex<std::collections::HashMap<String, crate::state::BuyRecord>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let sub_map: Arc<Mutex<std::collections::HashMap<String, (usize, u64)>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let trades_list: Arc<tokio::sync::Mutex<Vec<crate::api::TradeRecord>>> = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let next_wss_sender = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut join_handles: Vec<JoinHandle<()>> = Vec::new();
+    let mut ws_senders: Vec<tokio::sync::mpsc::Sender<WsRequest>> = Vec::new();
+
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+
+    // For each WSS URL, spawn a run_ws task
+    let (detected_tx, mut detected_rx) = tokio::sync::mpsc::channel::<String>(256);
+    for wss_url in settings.solana_ws_urls.clone().into_iter() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<WsRequest>(64);
+        ws_senders.push(tx.clone());
+        let (tx_string_sender, rx_string_receiver) = tokio::sync::mpsc::channel::<crate::connectivity::ws::OutgoingMessage>(64);
+        let holdings_clone = holdings.clone();
+        let price_cache_clone = price_cache.clone();
+        let settings_clone = settings.clone();
+        let rx_clone = rx;
+
+        // run_ws returns Result - spawn and ignore result inside
+        let seen = Arc::new(Mutex::new(LruCache::<String, ()>::new(NonZeroUsize::new(100).unwrap())));
+        let detected_tx_clone = detected_tx.clone();
+        let handle = tokio::spawn(async move {
+            let _ = crate::connectivity::ws::run_ws(
+                wss_url.as_str(),
+                tx_string_sender,
+                rx_string_receiver,
+                seen,
+                holdings_clone,
+                price_cache_clone,
+                rx_clone,
+                settings_clone,
+                Some(detected_tx_clone),
+            ).await;
+        });
+        join_handles.push(handle);
+    }
+
+    // Create ws_control_senders Arc
+    let ws_controls_arc = Arc::new(ws_senders);
+
+    // Spawn detector task: listens for tokens detected by WS and auto-subscribes
+    let ws_controls_clone2 = ws_controls_arc.clone();
+    let sub_map_clone2 = sub_map.clone();
+    let settings_clone2 = settings.clone();
+    let next_wss_sender_clone2 = next_wss_sender.clone();
+    // We don't need rpc_client in the detector currently. Keep a clone ready if future extension needed.
+    let detector_handle = tokio::spawn(async move {
+        while let Some(mint) = detected_rx.recv().await {
+            debug!("Detector received new mint: {}", mint);
+            if !settings_clone2.auto_subscribe_on_mint {
+                continue;
+            }
+            // Do not subscribe if we already have it
+            {
+                let sub_map_guard = sub_map_clone2.lock().await;
+                if sub_map_guard.contains_key(&mint) {
+                    continue;
+                }
+            }
+            // Pick a WSS sender to use
+            if ws_controls_clone2.len() == 0 {
+                continue;
+            }
+            let idx = next_wss_sender_clone2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % ws_controls_clone2.len();
+            if let Some(sender) = ws_controls_clone2.get(idx) {
+                let (resp_tx, resp_rx) = oneshot::channel::<Result<u64, String>>();
+                if let Err(e) = sender.send(crate::ws::WsRequest::Subscribe { account: mint.clone(), mint: mint.clone(), resp: resp_tx }).await {
+                    error!("Detector failed to send subscribe request for {}: {}", mint, e);
+                    continue;
+                }
+                match resp_rx.await {
+                    Ok(Ok(sub_id)) => {
+                        let mut sub_map_guard = sub_map_clone2.lock().await;
+                        sub_map_guard.insert(mint.clone(), (idx, sub_id));
+                        info!("Detector subscribed {} on wss index {}: sub_id {}", mint, idx, sub_id);
+                    }
+                    Ok(Err(e)) => error!("Detector subscribe failed for {}: {}", mint, e),
+                    Err(e) => error!("Detector oneshot canceled for {}: {}", mint, e),
+                }
+            }
+        }
+    });
+    join_handles.push(detector_handle);
+
+    // Spawn the monitor_holdings loop
+    let holdings_clone_for_monitor = holdings.clone();
+    let price_cache_clone_for_monitor = price_cache.clone();
+    let rpc_client_for_monitor = rpc_client.clone();
+    let settings_clone_for_monitor = settings.clone();
+    let trades_map_clone = trades_map.clone();
+    let ws_controls_clone = ws_controls_arc.clone();
+    let sub_map_clone = sub_map.clone();
+    let next_wss_sender_clone = next_wss_sender.clone();
+    let trades_list_clone = trades_list.clone();
+    let bot_control_clone = api_state.bot_control.clone();
+
+    let monitor_handle = tokio::spawn(async move {
+        tokio::select! {
+            _ = monitor_holdings(
+                holdings_clone_for_monitor,
+                price_cache_clone_for_monitor,
+                rpc_client_for_monitor,
+                !settings_clone_for_monitor.buy_amount.is_nan() && settings_clone_for_monitor.buy_amount > 0.0, // is_real heuristic (could be improved)
+                keypair,
+                simulate_keypair,
+                settings_clone_for_monitor,
+                trades_map_clone,
+                ws_controls_clone,
+                sub_map_clone,
+                next_wss_sender_clone,
+                trades_list_clone,
+                bot_control_clone,
+            ) => {},
+            _ = stop_rx => {
+                // Received stop signal
+            }
+        }
+    });
+    join_handles.push(monitor_handle);
+
+    Ok(MonitorHandle { stop_tx: Some(stop_tx), join_handles })
+}
+
 async fn monitor_single_holding(
     mint: &str,
     holding: &Holding,
@@ -85,7 +248,7 @@ async fn monitor_single_holding(
     rpc_client: &Arc<dyn CoreRpcClient>,
     settings: &Arc<Settings>,
     _trades_map: &Arc<Mutex<HashMap<String, BuyRecord>>>,
-    _ws_control_senders: &Arc<Vec<mpsc::Sender<WsRequest>>>,
+    ws_control_senders: &Arc<Vec<mpsc::Sender<WsRequest>>>,
     _sub_map: &Arc<Mutex<HashMap<String, (usize, u64)>>>,
     _max_retries: usize,
     _retry_delay: tokio::time::Duration,
@@ -147,6 +310,33 @@ async fn monitor_single_holding(
             if trades_guard.len() > 1000 {
                 let excess = trades_guard.len() - 1000;
                 trades_guard.drain(0..excess);
+            }
+        }
+    }
+
+    // Ensure we have an active websocket subscription for this holding
+    // If not, send a Subscribe control message requesting updates
+    {
+        let mut sub_map_guard = _sub_map.lock().await;
+        if !sub_map_guard.contains_key(mint) {
+            if let Some(sender) = ws_control_senders.get(0) {
+                let (resp_tx, resp_rx) = oneshot::channel::<Result<u64, String>>();
+                if let Err(e) = sender.send(WsRequest::Subscribe { account: mint.to_string(), mint: mint.to_string(), resp: resp_tx }).await {
+                    error!("Failed to send subscribe request for {}: {}", mint, e);
+                } else {
+                    match resp_rx.await {
+                        Ok(Ok(sub_id)) => {
+                            sub_map_guard.insert(mint.to_string(), (0usize, sub_id));
+                            info!("Subscribed {} with sub_id {}", mint, sub_id);
+                        }
+                        Ok(Err(err_str)) => {
+                            error!("Subscribe failed for {}: {}", mint, err_str);
+                        }
+                        Err(e) => {
+                            error!("Subscribe oneshot canceled for {}: {}", mint, e);
+                        }
+                    }
+                }
             }
         }
     }

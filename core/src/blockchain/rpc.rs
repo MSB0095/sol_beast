@@ -1,7 +1,7 @@
 use log::debug;
 use serde_json::Value;
 use async_trait::async_trait;
-use crate::core::error::CoreError;
+use crate::core_mod::error::CoreError;
 
 /// Trait that abstracts sending JSON-RPC requests to a provider.
 #[async_trait]
@@ -71,7 +71,7 @@ pub async fn fetch_with_fallback<T: DeserializeOwned + Send + 'static>(
     _method: &str,
     _rpc_client: &Arc<dyn crate::rpc_client::RpcClient>,
     settings: &crate::config::settings::Settings,
-) -> Result<crate::core::models::RpcResponse<T>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<crate::core_mod::models::RpcResponse<T>, Box<dyn std::error::Error + Send + Sync>> {
     static RPC_ROUND_ROBIN: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
     let urls = &settings.solana_rpc_urls;
     if urls.is_empty() {
@@ -90,7 +90,7 @@ pub async fn fetch_with_fallback<T: DeserializeOwned + Send + 'static>(
         if let Some(ref provider) = provider_opt {
             match provider.send_json(request_body.clone()).await {
                 Ok(resp_value) => {
-                    match serde_json::from_value::<crate::core::models::RpcResponse<T>>(resp_value.clone()) {
+                    match serde_json::from_value::<crate::core_mod::models::RpcResponse<T>>(resp_value.clone()) {
                         Ok(parsed) => {
                             if parsed.error.is_some() { return Err(format!("RPC error from {}: {:?}", http, parsed.error).into()); }
                             return Ok(parsed);
@@ -106,7 +106,7 @@ pub async fn fetch_with_fallback<T: DeserializeOwned + Send + 'static>(
                 let status = resp.status();
                 let text = resp.text().await.map_err(|e| Box::<dyn std::error::Error + Send + Sync>::from(e.to_string()))?;
                 if !status.is_success() { debug!("HTTP {} from {}: {}", status, http, text); continue; }
-                match serde_json::from_str::<crate::core::models::RpcResponse<T>>(&text) {
+                match serde_json::from_str::<crate::core_mod::models::RpcResponse<T>>(&text) {
                     Ok(parsed) => { if parsed.error.is_some() { return Err(format!("RPC error from {}: {:?}", http, parsed.error).into()); } return Ok(parsed); }
                     Err(e) => { debug!("JSON parse error from {}: {} -- body: {}", http, e, text); continue; }
                 }

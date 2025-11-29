@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[command(version = "0.1.0")]
 pub struct Cli {
     /// Configuration file path
-    #[arg(short, long, default_value = "~/.config/sol_beast/config.toml")]
+    #[arg(short, long, default_value = "config.toml")]
     pub config: PathBuf,
     
     /// Enable verbose output

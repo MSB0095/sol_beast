@@ -1,7 +1,10 @@
 // Vite environment variables
+type ViteEnv = { [key: string]: string | undefined }
+
 const getEnv = (key: string, fallback: string): string => {
   try {
-    return (import.meta as any).env[key] || fallback
+    const env = (import.meta as unknown as { env: ViteEnv }).env
+    return env?.[key] ?? fallback
   } catch {
     return fallback
   }

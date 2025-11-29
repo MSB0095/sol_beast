@@ -4,7 +4,7 @@ use solana_program::pubkey::Pubkey;
 use solana_program::instruction::AccountMeta;
 use std::str::FromStr;
 use std::vec::Vec;
-use crate::core::error::CoreError;
+use crate::core_mod::error::CoreError;
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";

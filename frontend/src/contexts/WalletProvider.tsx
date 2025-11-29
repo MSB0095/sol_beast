@@ -42,7 +42,7 @@ export const SolanaWalletProvider: FC<Props> = ({ children }) => {
   );
 
   // Only autoConnect if a preferred extension (Phantom) is present to avoid noisy connect attempts in dev
-  const hasPhantom = typeof window !== 'undefined' && !!(window as any).solana && (window as any).solana.isPhantom
+  const hasPhantom = typeof window !== 'undefined' && !!(window as unknown as { solana?: { isPhantom?: boolean } }).solana && !!(window as unknown as { solana?: { isPhantom?: boolean } }).solana?.isPhantom
 
   return (
     <ConnectionProvider endpoint={endpoint}>

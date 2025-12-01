@@ -77,6 +77,7 @@ export default function Header() {
           </div>
 
           <div className="flex items-center gap-4">
+            {/* Connection Status */}
             <div className="flex items-center gap-3 px-5 py-2 bg-black electric-border font-mono-tech text-sm uppercase tracking-wider">
               <div 
                 className={`w-3 h-3 ${status === 'connected' ? 'bg-[var(--theme-accent)]' : 'bg-red-500'}`}
@@ -90,6 +91,20 @@ export default function Header() {
                 {status === 'connected' ? '[ONLINE]' : '[OFFLINE]'}
               </span>
             </div>
+            
+            {/* Deployment Mode Indicator */}
+            <div className="flex items-center gap-3 px-4 py-2 bg-black electric-border font-mono-tech text-xs uppercase tracking-wider">
+              <div 
+                className="w-2 h-2 bg-blue-500"
+                style={{
+                  boxShadow: '0 0 8px rgba(59, 130, 246, 0.8), 0 0 16px rgba(59, 130, 246, 0.4)'
+                }}
+              ></div>
+              <span className="font-semibold text-blue-400">
+                {(import.meta.env.VITE_USE_WASM === 'true' || window.location.hostname.includes('github.io')) ? '[WASM]' : '[API]'}
+              </span>
+            </div>
+            
             <WalletButton />
             <ThemeSwitcher />
           </div>

@@ -7,8 +7,12 @@ use std::collections::HashMap;
 
 pub struct WasmWebSocket {
     ws: WebSocket,
+    // These closures must be kept alive to maintain the event handlers
+    #[allow(dead_code)]
     on_message: Closure<dyn FnMut(MessageEvent)>,
+    #[allow(dead_code)]
     on_error: Closure<dyn FnMut(ErrorEvent)>,
+    #[allow(dead_code)]
     on_close: Closure<dyn FnMut(CloseEvent)>,
     subscriptions: Arc<Mutex<HashMap<u64, String>>>,
 }

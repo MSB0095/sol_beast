@@ -61,7 +61,7 @@ impl WasmRpcClient {
         let body = serde_json::to_string(&request)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
 
-        let mut opts = RequestInit::new();
+        let opts = RequestInit::new();
         opts.set_method("POST");
         opts.set_mode(RequestMode::Cors);
         opts.set_body(&JsValue::from_str(&body));

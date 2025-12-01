@@ -48,7 +48,7 @@ export const botService = {
   async start() {
     if (this.isWasmMode()) {
       try {
-        await wasmBot.start()
+        wasmBot.start()
         return { success: true }
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
@@ -56,8 +56,12 @@ export const botService = {
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/start`, { method: 'POST' })
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.message || 'Failed to start bot')
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to start bot')
+        } catch {
+          throw new Error('Failed to start bot')
+        }
       }
       return response.json()
     }
@@ -67,7 +71,7 @@ export const botService = {
   async stop() {
     if (this.isWasmMode()) {
       try {
-        await wasmBot.stop()
+        wasmBot.stop()
         return { success: true }
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
@@ -75,8 +79,12 @@ export const botService = {
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/stop`, { method: 'POST' })
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.message || 'Failed to stop bot')
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to stop bot')
+        } catch {
+          throw new Error('Failed to stop bot')
+        }
       }
       return response.json()
     }
@@ -86,7 +94,7 @@ export const botService = {
   async setMode(mode: 'dry-run' | 'real') {
     if (this.isWasmMode()) {
       try {
-        await wasmBot.set_mode(mode)
+        wasmBot.set_mode(mode)
         return { success: true, mode }
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
@@ -98,8 +106,12 @@ export const botService = {
         body: JSON.stringify({ mode })
       })
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.message || 'Failed to set mode')
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to set mode')
+        } catch {
+          throw new Error('Failed to set mode')
+        }
       }
       return response.json()
     }
@@ -147,7 +159,7 @@ export const botService = {
   async updateSettings(settings: any) {
     if (this.isWasmMode()) {
       try {
-        await wasmBot.update_settings(JSON.stringify(settings))
+        wasmBot.update_settings(JSON.stringify(settings))
         return { success: true }
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
@@ -159,8 +171,12 @@ export const botService = {
         body: JSON.stringify(settings)
       })
       if (!response.ok) {
-        const error = await response.json()
-        throw new Error(error.message || 'Failed to update settings')
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to update settings')
+        } catch {
+          throw new Error('Failed to update settings')
+        }
       }
       return response.json()
     }

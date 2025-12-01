@@ -43,6 +43,7 @@ export default defineConfig({
     'process.env': '{}',
   },
   optimizeDeps: {
+    include: ['buffer'],
     esbuildOptions: {
       define: {
         global: 'globalThis'
@@ -75,9 +76,12 @@ export default defineConfig({
       transformMixedEsModules: true,
     },
     rollupOptions: {
+      external: [],
       output: {
+        globals: {},
         manualChunks: {
           'wallet-adapter': [
+            'buffer', // Include buffer WITH wallet-adapter to avoid circular deps
             '@solana/wallet-adapter-base',
             '@solana/wallet-adapter-react',
             '@solana/wallet-adapter-react-ui',

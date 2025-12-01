@@ -182,7 +182,65 @@ impl SolBeastBot {
         serde_json::to_string(&state.holdings)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))
     }
+    
+    /// Connect to Solana RPC (for testing connection)
+    #[wasm_bindgen]
+    pub async fn test_rpc_connection(&self) -> Result<String, JsValue> {
+        use sol_beast_core::wasm::WasmRpcClient;
+        
+        let state = self.state.lock().unwrap();
+        let rpc_url = state.settings.solana_rpc_urls.first()
+            .ok_or_else(|| JsValue::from_str("No RPC URL configured"))?
+            .clone();
+        drop(state);
+        
+        let rpc = WasmRpcClient::new(rpc_url);
+        let blockhash = rpc.get_latest_blockhash().await?;
+        
+        Ok(format!("Connected! Latest blockhash: {}", blockhash))
+    }
+    
+    /// Connect to Solana WebSocket (for testing)
+    #[wasm_bindgen]
+    pub async fn test_ws_connection(&self) -> Result<String, JsValue> {
+        use sol_beast_core::wasm::WasmWebSocket;
+        
+        let state = self.state.lock().unwrap();
+        let ws_url = state.settings.solana_ws_urls.first()
+            .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
+            .clone();
+        drop(state);
+        
+        let _ws = WasmWebSocket::new(&ws_url)?;
+        
+        Ok("WebSocket connected successfully!".to_string())
+    }
+    
+    /// Save current state to localStorage
+    #[wasm_bindgen]
+    pub fn save_to_storage(&self) -> Result<(), JsValue> {
+        use sol_beast_core::wasm::save_settings;
+        
+        let state = self.state.lock().unwrap();
+        save_settings(&state.settings)?;
+        
+        Ok(())
+    }
+    
+    /// Load state from localStorage
+    #[wasm_bindgen]
+    pub fn load_from_storage(&self) -> Result<(), JsValue> {
+        use sol_beast_core::wasm::load_settings;
+        
+        if let Some(settings) = load_settings::<BotSettings>()? {
+            let mut state = self.state.lock().unwrap();
+            state.settings = settings;
+        }
+        
+        Ok(())
+    }
 }
+
 
 impl Default for BotSettings {
     fn default() -> Self {

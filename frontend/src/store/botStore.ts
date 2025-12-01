@@ -124,7 +124,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
             
             // Create stats object from WASM data
             const runningState: BotRunningState = status.running ? 'running' : 'stopped'
-            const botMode: BotMode = (status.mode === 'real' || status.mode === 'dry-run') ? status.mode : 'dry-run'
+            const botMode: BotMode = status.mode || 'dry-run'
             
             const stats: BotStats = {
               total_buys: 0,

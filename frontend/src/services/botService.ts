@@ -129,7 +129,7 @@ export const botService = {
   async getSettings() {
     if (this.isWasmMode()) {
       try {
-        const json = await wasmBot.get_settings()
+        const json = wasmBot.get_settings()
         return JSON.parse(json)
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
@@ -170,7 +170,7 @@ export const botService = {
   async getLogs() {
     if (this.isWasmMode()) {
       try {
-        const json = await wasmBot.get_logs()
+        const json = wasmBot.get_logs()
         return JSON.parse(json)
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))
@@ -188,7 +188,7 @@ export const botService = {
   async getHoldings() {
     if (this.isWasmMode()) {
       try {
-        const json = await wasmBot.get_holdings()
+        const json = wasmBot.get_holdings()
         return JSON.parse(json)
       } catch (error) {
         throw new Error(error instanceof Error ? error.message : String(error))

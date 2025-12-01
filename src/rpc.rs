@@ -10,6 +10,124 @@ use crate::{
     settings::Settings,
 };
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
+
+/// Pump.fun `create` instruction discriminator: [24, 30, 200, 40, 5, 28, 7, 119]
+/// This is the 8-byte Anchor discriminator for the `create` instruction that creates new tokens.
+pub const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
+
+/// Extracted data from a pump.fun create instruction
+struct PumpCreateData {
+    mint: String,
+    creator: String,
+    curve: Option<String>,
+}
+
+/// Attempts to extract pump.fun create instruction data from an instruction object.
+/// 
+/// Returns Some(PumpCreateData) if the instruction is a valid pump.fun create instruction,
+/// None otherwise.
+fn try_extract_pump_create_data(
+    instr: &serde_json::Value,
+    account_keys: &[String],
+    pump_fun_program_id: &str,
+) -> Option<PumpCreateData> {
+    // Get program ID
+    let program_id = instr
+        .get("programId")
+        .and_then(|p| p.as_str())
+        .or_else(|| {
+            instr
+                .get("programIdIndex")
+                .and_then(|idx| idx.as_u64())
+                .and_then(|i| account_keys.get(i as usize).map(|s| s.as_str()))
+        })?;
+    
+    if program_id != pump_fun_program_id {
+        return None;
+    }
+    
+    // Check instruction data for create discriminator
+    let data_str = instr.get("data").and_then(|d| d.as_str())?;
+    let data_bytes = bs58::decode(data_str).into_vec().ok()?;
+    
+    if data_bytes.len() < 8 || data_bytes[..8] != PUMP_CREATE_DISCRIMINATOR {
+        return None;
+    }
+    
+    // Extract accounts - per pump.fun IDL:
+    // [0] mint, [1] mint_authority, [2] bonding_curve, [3] associated_bonding_curve,
+    // [4] global, [5] mpl_token_metadata, [6] metadata, [7] user (creator/signer)
+    let accounts = instr.get("accounts").and_then(|a| a.as_array())?;
+    
+    if accounts.len() < 8 {
+        return None;
+    }
+    
+    // Helper to extract account at index
+    let get_account = |idx: usize| -> Option<String> {
+        let account_val = accounts.get(idx)?;
+        if let Some(i) = account_val.as_u64() {
+            account_keys.get(i as usize).cloned()
+        } else {
+            account_val.as_str().map(|s| s.to_string())
+        }
+    };
+    
+    let mint = get_account(0)?;
+    let creator = get_account(7)?;
+    let curve = get_account(2);
+    
+    Some(PumpCreateData { mint, creator, curve })
+}
+
+/// Computes the holder address (associated token account) for a bonding curve and mint.
+/// 
+/// # Parameters
+/// - `owner`: The owner of the token account (bonding curve PDA)
+/// - `mint`: The mint address
+fn compute_holder_address(owner: &str, mint: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let owner_pk = Pubkey::from_str(owner)?;
+    let mint_pk = Pubkey::from_str(mint)?;
+    
+    // Use the imported get_associated_token_address function to compute the ATA
+    let holder_addr = get_associated_token_address(&owner_pk, &mint_pk);
+    Ok(holder_addr.to_string())
+}
+
+/// Processes extracted pump.fun create data and computes derived addresses.
+/// Returns (creator, mint, curve, holder_addr) on success.
+fn process_pump_create_data(
+    data: PumpCreateData,
+    pump_fun_program: &str,
+    location: &str,
+) -> Result<(String, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
+    // Log info if mint doesn't end with "pump" (unusual but possible)
+    if !data.mint.ends_with("pump") {
+        info!("{} mint {} does not end with 'pump' (unusual for pump.fun, but accepting)", location, data.mint);
+    }
+    
+    // Compute bonding curve PDA if not already extracted
+    let curve = match data.curve {
+        Some(c) => c,
+        None => {
+            let pump_program = Pubkey::from_str(pump_fun_program)
+                .map_err(|e| format!("Failed to parse pump.fun program ID: {}", e))?;
+            let mint_pk = Pubkey::from_str(&data.mint)
+                .map_err(|e| format!("Failed to parse mint address {}: {}", data.mint, e))?;
+            let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
+            curve_pda.to_string()
+        }
+    };
+    
+    // Compute the holder address (ATA for the bonding curve)
+    let holder_addr = compute_holder_address(&curve, &data.mint)?;
+    
+    debug!("Pump.fun CREATE in {}: mint={} creator={} curve={} holder_addr={}", 
+           location, data.mint, data.creator, curve, holder_addr);
+    
+    Ok((data.creator, data.mint, curve, holder_addr))
+}
+
 // `select_ok` was previously used for parallel RPC fetch; after switching to
 // a rotating sequential probe we no longer need it.
 use log::{info, warn, error, debug};
@@ -36,13 +154,26 @@ use std::time::Duration;
 use crate::idl::SimpleIdl;
 
 
+/// Fetches transaction details and extracts pump.fun token creation information.
+/// 
+/// # Returns
+/// On success, returns a tuple of:
+/// - `creator`: The user/signer who created the token (account index 7 in create instruction)
+/// - `mint`: The mint address of the newly created token (account index 0)
+/// - `curve_pda`: The bonding curve PDA address (account index 2)
+/// - `holder_addr`: The associated token account owned by the bonding curve PDA
+/// - `is_creation`: Whether this transaction contains a pump.fun create instruction
+/// 
+/// # Detection Logic
+/// Uses the pump.fun `create` instruction discriminator [24, 30, 200, 40, 5, 28, 7, 119]
+/// to reliably identify token creation transactions. Checks both main instructions and
+/// inner instructions (for CPI cases).
 pub async fn fetch_transaction_details(
     signature: &str,
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
 ) -> Result<(String, String, String, String, bool), Box<dyn std::error::Error + Send + Sync>> {
-    // Request jsonParsed encoding so we can detect InitializeMint instructions
-    // in the parsed.type field of inner instructions.
+    // Request base64 encoding to get raw instruction data for discriminator checking
     let mut attempts = 0u8;
     let data_value: serde_json::Value = loop {
         attempts += 1;
@@ -82,20 +213,12 @@ pub async fn fetch_transaction_details(
 
     info!("Transaction data retrieved for {}", signature);
     debug!("Transaction raw JSON: {}", data_value);
-    // Note: previously we persisted raw transaction JSON to disk for post-mortem
-    // inspection. To reduce file I/O we no longer write files; keep the raw
-    // JSON available in debug logs for interactive troubleshooting.
-    debug!("Transaction JSON (debug only): {}", data_value);
 
-    // Normalize account keys
+    // Normalize account keys from the transaction message
     let account_keys_arr = data_value
         .get("transaction")
         .and_then(|t| t.get("message"))
         .and_then(|m| m.get("accountKeys"))
-        .or_else(|| {
-            // older shape: accountKeys under `accountKeys`
-            data_value.get("transaction").and_then(|t| t.get("message")).and_then(|m| m.get("accountKeys"))
-        })
         .and_then(|v| v.as_array())
         .ok_or("Missing accountKeys in transaction")?;
 
@@ -113,134 +236,36 @@ pub async fn fetch_transaction_details(
             account_keys.push(key.to_string());
         }
     }
-    // First pass: prefer postTokenBalances if present (reliable source of mint + owner)
-    // Additionally, compute whether this transaction looks like a mint initialization
-    // by scanning innerInstructions for parsed types 'initializeMint'/'initializeMint2'.
-    let mut is_initialization: bool = false;
-    if let Some(meta) = data_value.get("meta") {
-        if let Some(post_balances) = meta.get("postTokenBalances").and_then(|v| v.as_array()) {
-            if !post_balances.is_empty() {
-                if let Some(entry) = post_balances.first() {
-                        if let (Some(mint), Some(owner)) = (entry.get("mint").and_then(|m| m.as_str()), entry.get("owner").and_then(|o| o.as_str())) {
-                        // try to get creator from parsed initializeMint2 if available
-                        let mut creator_opt: Option<String> = None;
-                        if let Some(inner) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
-                            'outer: for inner_inst in inner {
-                                if let Some(instructions) = inner_inst.get("instructions").and_then(|v| v.as_array()) {
-                                    for instr in instructions {
-                                        if let Some(parsed) = instr.get("parsed") {
-                                            if let Some(t) = parsed.get("type").and_then(|t| t.as_str()) {
-                                                if t == "initializeMint2" {
-                                                    if let Some(info) = parsed.get("info") {
-                                                        if let Some(c) = info.get("mintAuthority").and_then(|c| c.as_str()).or_else(|| info.get("owner").and_then(|o| o.as_str())) {
-                                                            creator_opt = Some(c.to_string());
-                                                            break 'outer;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let creator = creator_opt.unwrap_or_else(|| owner.to_string());
-                        // Check for InitializeMint in inner instructions
-                        if let Some(inner) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
-                            for inner_inst in inner {
-                                if let Some(instructions) = inner_inst.get("instructions").and_then(|v| v.as_array()) {
-                                    for instr in instructions {
-                                        if let Some(parsed) = instr.get("parsed") {
-                                            if let Some(t) = parsed.get("type").and_then(|t| t.as_str()) {
-                                                let t = t.to_lowercase();
-                                                if t.contains("initializemint") || t.contains("initialize mint") {
-                                                    is_initialization = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if is_initialization { break; }
-                            }
-                        }
-                        // compute bonding curve PDA
-                        let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
-                        let mint_pk = Pubkey::from_str(mint)?;
-                        // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
-                        let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-                        // Try to find a token account for this mint that is owned by the bonding curve PDA
-                        let mut holder_addr = owner.to_string();
-                        if let Ok(Some(found)) = find_token_account_owned_by_owner(mint, &curve_pda.to_string(), rpc_client, settings).await {
-                            debug!("Found token account owned by curve PDA: {} -> {}", curve_pda, found);
-                            holder_addr = found;
-                        }
-                        debug!("Found via postTokenBalances mint={} owner={} creator={} curve_pda={} holder={}", mint, owner, creator, curve_pda, holder_addr);
-                        return Ok((creator, mint.to_string(), curve_pda.to_string(), holder_addr, is_initialization));
-                    }
-                }
+
+    let pump_fun_program_id = &settings.pump_fun_program;
+
+    // STEP 1: Check for pump.fun `create` instruction in main instructions
+    if let Some(instructions) = data_value
+        .get("transaction")
+        .and_then(|t| t.get("message"))
+        .and_then(|m| m.get("instructions"))
+        .and_then(|i| i.as_array())
+    {
+        for instr in instructions {
+            if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
+                let (creator, mint, curve, holder_addr) = 
+                    process_pump_create_data(data, pump_fun_program_id, "main instructions")?;
+                return Ok((creator, mint, curve, holder_addr, true));
             }
         }
     }
 
-    // Fallback: look for pump.fun program in raw inner instructions and map account indices
-    let pump_fun_program_id = &settings.pump_fun_program;
+    // STEP 2: Fallback - check inner instructions for pump.fun create
+    // This handles cases where the create is wrapped in a CPI call
     if let Some(meta) = data_value.get("meta") {
         if let Some(inner_instructions) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
             for inner_instruction in inner_instructions {
-                    if let Some(instructions) = inner_instruction.get("instructions").and_then(|v| v.as_array()) {
-                    for instruction in instructions {
-                        // get programId or programIdIndex
-                        let program_id_opt = instruction
-                            .get("programId")
-                            .and_then(|p| p.as_str())
-                            .or_else(|| {
-                                instruction
-                                    .get("programIdIndex")
-                                    .and_then(|idx| idx.as_u64())
-                                    .and_then(|i| account_keys.get(i as usize).map(|s| s.as_str()))
-                            });
-
-                        if let Some(program_id_key) = program_id_opt {
-                            if program_id_key == pump_fun_program_id.as_str() {
-                                if let Some(accounts_val) = instruction.get("accounts").and_then(|a| a.as_array()) {
-                                    if accounts_val.len() >= 4 {
-                                        let mint_index = accounts_val[0].as_u64().ok_or("mint index invalid")? as usize;
-                                        let creator_index = accounts_val[3].as_u64().ok_or("creator index invalid")? as usize;
-                                        if let (Some(mint_key), Some(creator_key)) = (account_keys.get(mint_index), account_keys.get(creator_index)) {
-                                            debug!("Found pump.fun instruction: mint={}, creator={}", mint_key, creator_key);
-                                            // compute bonding curve PDA
-                                            let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
-                                            let mint_pk = Pubkey::from_str(mint_key)?;
-                                            // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
-                                            let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-                                            // Try to find a token account for this mint that is owned by the bonding curve PDA
-                                            let mut holder_addr = creator_key.to_string();
-                                            if let Ok(Some(found)) = find_token_account_owned_by_owner(mint_key, &curve_pda.to_string(), rpc_client, settings).await {
-                                                debug!("Found token account owned by curve PDA: {} -> {}", curve_pda, found);
-                                                holder_addr = found;
-                                            } else {
-                                                debug!("No token account owned by curve PDA found in transaction; using creator as holder: {}", creator_key);
-                                            }
-                                            // If this instruction belongs to pump.fun, treat it as initialization
-                                            let mut parsed_init = false;
-                                            if let Some(parsed) = instruction.get("parsed") {
-                                                if let Some(t) = parsed.get("type").and_then(|t| t.as_str()) {
-                                                    let t = t.to_lowercase();
-                                                    if t.contains("initializemint") || t.contains("initialize mint") {
-                                                        parsed_init = true;
-                                                    }
-                                                }
-                                            }
-                                            return Ok((creator_key.to_string(), mint_key.to_string(), curve_pda.to_string(), holder_addr, parsed_init));
-                                        } else {
-                                            warn!("Account index lookup failed for instruction in tx {}: mint_index={}, creator_index={}, account_keys_len={}", signature, mint_index, creator_index, account_keys.len());
-                                        }
-                                    } else {
-                                        warn!("Unexpected account count for pump.fun instruction in tx {}: expected>=4 got={}", signature, accounts_val.len());
-                                    }
-                                }
-                            }
+                if let Some(instructions) = inner_instruction.get("instructions").and_then(|v| v.as_array()) {
+                    for instr in instructions {
+                        if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
+                            let (creator, mint, curve, holder_addr) = 
+                                process_pump_create_data(data, pump_fun_program_id, "inner instructions")?;
+                            return Ok((creator, mint, curve, holder_addr, true));
                         }
                     }
                 }
@@ -248,8 +273,10 @@ pub async fn fetch_transaction_details(
         }
     }
 
+    // No pump.fun create instruction found
+    debug!("No pump.fun CREATE instruction found in tx {}", signature);
     debug!("Account keys (len={}): {:?}", account_keys.len(), account_keys);
-    Err("Could not find pump.fun instruction or extract details".into())
+    Err("Could not find pump.fun create instruction".into())
 }
 
 

@@ -2,7 +2,7 @@ import { useBotStore } from '../store/botStore'
 import { Play, Square, Loader2, Shield, Zap } from 'lucide-react'
 
 export default function BotControl() {
-  const { runningState, mode, startBot, stopBot } = useBotStore()
+  const { runningState, mode, startBot, stopBot, setMode } = useBotStore()
 
   const isStarting = runningState === 'starting'
   const isStopping = runningState === 'stopping'
@@ -55,12 +55,14 @@ export default function BotControl() {
         </div>
       </div>
 
-      {/* Mode Display (read-only) */}
+      {/* Mode Selection */}
       <div className="mb-6">
         <label className="text-sm mb-2 block uppercase tracking-wider" style={{ color: 'var(--theme-text-secondary)' }}>Trading Mode</label>
         <div className="grid grid-cols-2 gap-2">
-          <div
-            className="p-3 rounded-xl border-2 transition-all"
+          <button
+            onClick={() => isStopped && setMode('dry-run')}
+            disabled={!isStopped}
+            className="p-3 rounded-xl border-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             style={mode === 'dry-run' ? {
               backgroundColor: 'var(--theme-bg-card)',
               borderColor: 'var(--theme-accent)',
@@ -77,10 +79,12 @@ export default function BotControl() {
               <span className="font-semibold uppercase tracking-wide">Dry Run</span>
             </div>
             <p className="text-xs mt-1 opacity-70 text-center">Simulation only</p>
-          </div>
+          </button>
           
-          <div
-            className="p-3 rounded-xl border-2 transition-all"
+          <button
+            onClick={() => isStopped && setMode('real')}
+            disabled={!isStopped}
+            className="p-3 rounded-xl border-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             style={mode === 'real' ? {
               backgroundColor: 'var(--theme-bg-card)',
               borderColor: '#ff6b00',
@@ -97,14 +101,13 @@ export default function BotControl() {
               <span className="font-semibold uppercase tracking-wide">Real Trading</span>
             </div>
             <p className="text-xs mt-1 opacity-70 text-center">Live trades</p>
-          </div>
+          </button>
         </div>
-        <p className="text-xs mt-2 font-mono" style={{ color: 'var(--theme-text-muted)' }}>
-          Mode is set at startup with <code className="px-1 rounded" style={{ 
-            backgroundColor: 'var(--theme-bg-secondary)',
-            color: 'var(--theme-accent)'
-          }}>--real</code> flag. Restart the bot to change mode.
-        </p>
+        {!isStopped && (
+          <p className="text-xs mt-2 font-mono text-center" style={{ color: 'var(--theme-warning)' }}>
+            ⚠ Stop the bot to change mode
+          </p>
+        )}
       </div>
 
       {/* Warning for real mode */}

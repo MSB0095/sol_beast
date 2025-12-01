@@ -1,14 +1,21 @@
 import { useSettingsStore } from '../store/settingsStore'
+import { useBotStore } from '../store/botStore'
 import { useState } from 'react'
 import { Save, AlertCircle, CheckCircle } from 'lucide-react'
 
 export default function ConfigurationPanel() {
   const { settings, saving, error, saveSettings, updateSetting } = useSettingsStore()
+  const { runningState } = useBotStore()
   const [successMessage, setSuccessMessage] = useState('')
 
   if (!settings) return <div>Loading settings...</div>
 
+  const isBotStopped = runningState === 'stopped'
+
   const handleSave = async () => {
+    if (!isBotStopped) {
+      return // Don't save if bot is running
+    }
     await saveSettings(settings)
     setSuccessMessage('Settings saved successfully!')
     setTimeout(() => setSuccessMessage(''), 3000)
@@ -90,6 +97,16 @@ export default function ConfigurationPanel() {
 
   return (
     <div className="space-y-8">
+      {!isBotStopped && (
+        <div className="alert-warning rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
+          <AlertCircle size={24} className="flex-shrink-0 mt-0.5 animate-pulse" />
+          <div>
+            <p className="font-bold uppercase tracking-widest text-sm mb-1">BOT IS RUNNING</p>
+            <p className="text-sm opacity-90">Stop the bot before saving configuration changes</p>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="alert-error rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
           <AlertCircle size={24} className="flex-shrink-0 mt-0.5 animate-pulse" />
@@ -190,11 +207,12 @@ export default function ConfigurationPanel() {
       }}>
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || !isBotStopped}
           className="flex items-center gap-2 px-6 py-3 rounded-xl disabled:opacity-50 transition-all hover:scale-105"
+          title={!isBotStopped ? 'Stop the bot before saving settings' : ''}
         >
           <Save size={18} />
-          {saving ? 'SAVING...' : 'SAVE SETTINGS'}
+          {saving ? 'SAVING...' : isBotStopped ? 'SAVE SETTINGS' : 'STOP BOT TO SAVE'}
         </button>
       </div>
     </div>

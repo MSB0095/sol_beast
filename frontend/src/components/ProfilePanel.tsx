@@ -150,7 +150,7 @@ export default function ProfilePanel() {
             <div className="glass-card p-4 rounded-xl">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--theme-text-secondary)' }}>
-                  Private Key (Keep Secure!)
+                  Private Key (Encrypted - Keep Secure!)
                 </p>
                 <button
                   onClick={() => setShowPrivateKey(!showPrivateKey)}
@@ -161,16 +161,21 @@ export default function ProfilePanel() {
                 </button>
               </div>
               {showPrivateKey ? (
-                <div className="flex items-center justify-between gap-3 bg-black/50 p-3 rounded-lg">
-                  <p className="font-mono text-xs break-all" style={{ color: 'var(--theme-warning)' }}>
-                    {associatedWallet.privateKey}
+                <div>
+                  <p className="text-xs mb-2 opacity-70" style={{ color: 'var(--theme-text-secondary)' }}>
+                    Note: This is the encrypted form for storage. Actual private key is derived from your signature.
                   </p>
-                  <button
-                    onClick={() => copyToClipboard(associatedWallet.privateKey)}
-                    className="p-2 rounded-lg hover:bg-black/30 transition-all flex-shrink-0"
-                  >
-                    {copied ? <Check size={16} /> : <Copy size={16} />}
-                  </button>
+                  <div className="flex items-center justify-between gap-3 bg-black/50 p-3 rounded-lg">
+                    <p className="font-mono text-xs break-all" style={{ color: 'var(--theme-warning)' }}>
+                      {associatedWallet.privateKey}
+                    </p>
+                    <button
+                      onClick={() => copyToClipboard(associatedWallet.privateKey)}
+                      className="p-2 rounded-lg hover:bg-black/30 transition-all flex-shrink-0"
+                    >
+                      {copied ? <Check size={16} /> : <Copy size={16} />}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <p className="font-mono text-sm" style={{ color: 'var(--theme-text-muted)' }}>

@@ -27,10 +27,12 @@ interface WalletStore {
   getAssociatedKeypair: () => Keypair | null
 }
 
-// Simple encryption using signature as key (for demo - in production use better encryption)
+// Simple encryption using signature as key
+// TODO: For production, use proper encryption library (crypto-js with AES)
+// Current implementation provides basic obfuscation but is not cryptographically secure
 function encryptPrivateKey(privateKey: string, signature: Uint8Array): string {
-  // For now, we'll use base64 encoding with signature hash mixed in
-  // In production, use proper encryption like AES
+  // WARNING: This is a demonstration encryption method
+  // In production, use crypto-js or similar library with AES-256-GCM encryption
   const signatureB58 = bs58.encode(signature)
   return btoa(privateKey + ':::' + signatureB58.slice(0, 16))
 }
@@ -109,8 +111,10 @@ export const useWalletStore = create<WalletStore>((set, get) => ({
     if (!associatedWallet) return null
     
     try {
-      // In production, we'd need the signature to decrypt
-      // For now, return null - this would be called with proper signature
+      // TODO: Implement signature-based decryption
+      // This function should accept the user's signature as a parameter to decrypt the private key
+      // For security, we need the user to sign a fresh message each time they want to use the trading wallet
+      // Implementation: getAssociatedKeypair(signature: Uint8Array): Keypair | null
       return null
     } catch (err) {
       console.error('Failed to get keypair:', err)

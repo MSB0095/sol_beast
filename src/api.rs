@@ -17,6 +17,9 @@ use crate::{
     settings::Settings,
 };
 
+// Error message constants
+const ERROR_BOT_MUST_BE_STOPPED: &str = "Bot must be stopped before changing settings or mode";
+
 // Bot control structures
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -194,14 +197,13 @@ async fn update_settings_handler(
     // Check if bot is stopped before allowing settings changes
     let running_state = state.bot_control.running_state.lock().await;
     if *running_state != BotRunningState::Stopped {
-        let error_msg = "Bot must be stopped before updating settings".to_string();
-        warn!("{}", error_msg);
-        bot_control.add_log("warn", error_msg.clone(), None).await;
+        warn!("{}", ERROR_BOT_MUST_BE_STOPPED);
+        bot_control.add_log("warn", ERROR_BOT_MUST_BE_STOPPED.to_string(), None).await;
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "status": "error",
-                "message": error_msg
+                "message": ERROR_BOT_MUST_BE_STOPPED
             }))
         );
     }
@@ -409,7 +411,7 @@ async fn set_bot_mode_handler(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "status": "error",
-                "message": "Bot must be stopped before changing mode"
+                "message": ERROR_BOT_MUST_BE_STOPPED
             }))
         );
     }

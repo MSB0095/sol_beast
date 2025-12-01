@@ -81,13 +81,51 @@ fn try_extract_pump_create_data(
 }
 
 /// Computes the holder address (associated token account) for a bonding curve and mint.
-fn compute_holder_address(curve_pda: &str, mint: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let curve_pk = Pubkey::from_str(curve_pda)?;
+/// 
+/// # Parameters
+/// - `owner`: The owner of the token account (bonding curve PDA)
+/// - `mint`: The mint address
+fn compute_holder_address(owner: &str, mint: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let owner_pk = Pubkey::from_str(owner)?;
     let mint_pk = Pubkey::from_str(mint)?;
     
     // Use the imported get_associated_token_address function to compute the ATA
-    let holder_addr = get_associated_token_address(&curve_pk, &mint_pk);
+    let holder_addr = get_associated_token_address(&owner_pk, &mint_pk);
     Ok(holder_addr.to_string())
+}
+
+/// Processes extracted pump.fun create data and computes derived addresses.
+/// Returns (creator, mint, curve, holder_addr) on success.
+fn process_pump_create_data(
+    data: PumpCreateData,
+    pump_fun_program: &str,
+    location: &str,
+) -> Result<(String, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
+    // Log info if mint doesn't end with "pump" (unusual but possible)
+    if !data.mint.ends_with("pump") {
+        info!("{} mint {} does not end with 'pump' (unusual for pump.fun, but accepting)", location, data.mint);
+    }
+    
+    // Compute bonding curve PDA if not already extracted
+    let curve = match data.curve {
+        Some(c) => c,
+        None => {
+            let pump_program = Pubkey::from_str(pump_fun_program)
+                .map_err(|e| format!("Failed to parse pump.fun program ID: {}", e))?;
+            let mint_pk = Pubkey::from_str(&data.mint)
+                .map_err(|e| format!("Failed to parse mint address {}: {}", data.mint, e))?;
+            let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
+            curve_pda.to_string()
+        }
+    };
+    
+    // Compute the holder address (ATA for the bonding curve)
+    let holder_addr = compute_holder_address(&curve, &data.mint)?;
+    
+    debug!("Pump.fun CREATE in {}: mint={} creator={} curve={} holder_addr={}", 
+           location, data.mint, data.creator, curve, holder_addr);
+    
+    Ok((data.creator, data.mint, curve, holder_addr))
 }
 
 // `select_ok` was previously used for parallel RPC fetch; after switching to
@@ -210,30 +248,9 @@ pub async fn fetch_transaction_details(
     {
         for instr in instructions {
             if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
-                debug!("Found pump.fun CREATE instruction in main instructions");
-                
-                // Log info if mint doesn't end with "pump" (unusual but possible)
-                if !data.mint.ends_with("pump") {
-                    info!("Mint {} does not end with 'pump' (unusual for pump.fun, but accepting)", data.mint);
-                }
-                
-                // Compute bonding curve PDA if not already extracted
-                let curve = match data.curve {
-                    Some(c) => c,
-                    None => {
-                        let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
-                        let mint_pk = Pubkey::from_str(&data.mint)?;
-                        let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-                        curve_pda.to_string()
-                    }
-                };
-                
-                // Compute the holder address (ATA for the bonding curve)
-                let holder_addr = compute_holder_address(&curve, &data.mint)?;
-                
-                debug!("Pump.fun CREATE detected: mint={} creator={} curve={} holder_addr={}", 
-                       data.mint, data.creator, curve, holder_addr);
-                return Ok((data.creator, data.mint, curve, holder_addr, true));
+                let (creator, mint, curve, holder_addr) = 
+                    process_pump_create_data(data, pump_fun_program_id, "main instructions")?;
+                return Ok((creator, mint, curve, holder_addr, true));
             }
         }
     }
@@ -246,32 +263,9 @@ pub async fn fetch_transaction_details(
                 if let Some(instructions) = inner_instruction.get("instructions").and_then(|v| v.as_array()) {
                     for instr in instructions {
                         if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
-                            debug!("Found pump.fun CREATE instruction in inner instructions");
-                            
-                            // Log info if mint doesn't end with "pump" (unusual but possible)
-                            if !data.mint.ends_with("pump") {
-                                info!("Inner instruction mint {} does not end with 'pump' (unusual but accepting)", data.mint);
-                            }
-                            
-                            // Compute bonding curve PDA if not already extracted
-                            let curve = match data.curve {
-                                Some(c) => c,
-                                None => {
-                                    let pump_program = Pubkey::from_str(&settings.pump_fun_program)
-                                        .map_err(|e| format!("Failed to parse pump.fun program ID: {}", e))?;
-                                    let mint_pk = Pubkey::from_str(&data.mint)
-                                        .map_err(|e| format!("Failed to parse mint address {}: {}", data.mint, e))?;
-                                    let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-                                    curve_pda.to_string()
-                                }
-                            };
-                            
-                            // Compute the holder address (ATA for the bonding curve)
-                            let holder_addr = compute_holder_address(&curve, &data.mint)?;
-                            
-                            debug!("Pump.fun CREATE in inner: mint={} creator={} curve={} holder_addr={}", 
-                                   data.mint, data.creator, curve, holder_addr);
-                            return Ok((data.creator, data.mint, curve, holder_addr, true));
+                            let (creator, mint, curve, holder_addr) = 
+                                process_pump_create_data(data, pump_fun_program_id, "inner instructions")?;
+                            return Ok((creator, mint, curve, holder_addr, true));
                         }
                     }
                 }

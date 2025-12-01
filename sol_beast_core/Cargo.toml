@@ -44,6 +44,7 @@ tokio-tungstenite = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
 web-sys = { workspace = true, optional = true, features = [
     "Window",
     "Document",
@@ -77,4 +78,5 @@ wasm = [
     "js-sys",
     "web-sys",
     "getrandom",
+    "serde-wasm-bindgen",
 ]

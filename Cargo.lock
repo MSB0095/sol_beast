@@ -3839,6 +3839,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "solana-account-decoder",
  "solana-client",

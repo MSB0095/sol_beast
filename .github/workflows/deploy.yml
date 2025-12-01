@@ -46,10 +46,11 @@ jobs:
         working-directory: ./frontend
         run: npm ci
 
-      - name: Build frontend
+      - name: Build frontend with webpack
         working-directory: ./frontend
-        run: npm run build:frontend-only
+        run: npm run build:frontend-webpack
         env:
+          NODE_ENV: 'production'
           VITE_USE_WASM: 'true'
 
       - name: Setup Pages

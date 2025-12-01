@@ -40,18 +40,16 @@ pub async fn fetch_transaction_details(
     signature: &str,
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
-) -> Result<(String, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
-    // Request the raw JSON (not jsonParsed) so the returned instruction structures
-    // include `programIdIndex` and `accounts` fields which match our deserialization
-    // model. jsonParsed returns a different shape (parsed instructions) which would
-    // not deserialize into our expected types.
+) -> Result<(String, String, String, String, bool), Box<dyn std::error::Error + Send + Sync>> {
+    // Request jsonParsed encoding so we can detect InitializeMint instructions
+    // in the parsed.type field of inner instructions.
     let mut attempts = 0u8;
     let data_value: serde_json::Value = loop {
         attempts += 1;
         let resp: Result<RpcResponse<Value>, Box<dyn std::error::Error + Send + Sync>> = fetch_with_fallback::<Value>(
             json!({
                 "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
-                "params": [ signature, { "encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
+                "params": [ signature, { "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
             }),
             "getTransaction",
             rpc_client,
@@ -116,11 +114,14 @@ pub async fn fetch_transaction_details(
         }
     }
     // First pass: prefer postTokenBalances if present (reliable source of mint + owner)
+    // Additionally, compute whether this transaction looks like a mint initialization
+    // by scanning innerInstructions for parsed types 'initializeMint'/'initializeMint2'.
+    let mut is_initialization: bool = false;
     if let Some(meta) = data_value.get("meta") {
         if let Some(post_balances) = meta.get("postTokenBalances").and_then(|v| v.as_array()) {
             if !post_balances.is_empty() {
                 if let Some(entry) = post_balances.first() {
-                    if let (Some(mint), Some(owner)) = (entry.get("mint").and_then(|m| m.as_str()), entry.get("owner").and_then(|o| o.as_str())) {
+                        if let (Some(mint), Some(owner)) = (entry.get("mint").and_then(|m| m.as_str()), entry.get("owner").and_then(|o| o.as_str())) {
                         // try to get creator from parsed initializeMint2 if available
                         let mut creator_opt: Option<String> = None;
                         if let Some(inner) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
@@ -144,6 +145,25 @@ pub async fn fetch_transaction_details(
                             }
                         }
                         let creator = creator_opt.unwrap_or_else(|| owner.to_string());
+                        // Check for InitializeMint in inner instructions
+                        if let Some(inner) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
+                            for inner_inst in inner {
+                                if let Some(instructions) = inner_inst.get("instructions").and_then(|v| v.as_array()) {
+                                    for instr in instructions {
+                                        if let Some(parsed) = instr.get("parsed") {
+                                            if let Some(t) = parsed.get("type").and_then(|t| t.as_str()) {
+                                                let t = t.to_lowercase();
+                                                if t.contains("initializemint") || t.contains("initialize mint") {
+                                                    is_initialization = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if is_initialization { break; }
+                            }
+                        }
                         // compute bonding curve PDA
                         let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
                         let mint_pk = Pubkey::from_str(mint)?;
@@ -156,7 +176,7 @@ pub async fn fetch_transaction_details(
                             holder_addr = found;
                         }
                         debug!("Found via postTokenBalances mint={} owner={} creator={} curve_pda={} holder={}", mint, owner, creator, curve_pda, holder_addr);
-                        return Ok((creator, mint.to_string(), curve_pda.to_string(), holder_addr));
+                        return Ok((creator, mint.to_string(), curve_pda.to_string(), holder_addr, is_initialization));
                     }
                 }
             }
@@ -202,7 +222,17 @@ pub async fn fetch_transaction_details(
                                             } else {
                                                 debug!("No token account owned by curve PDA found in transaction; using creator as holder: {}", creator_key);
                                             }
-                                            return Ok((creator_key.to_string(), mint_key.to_string(), curve_pda.to_string(), holder_addr));
+                                            // If this instruction belongs to pump.fun, treat it as initialization
+                                            let mut parsed_init = false;
+                                            if let Some(parsed) = instruction.get("parsed") {
+                                                if let Some(t) = parsed.get("type").and_then(|t| t.as_str()) {
+                                                    let t = t.to_lowercase();
+                                                    if t.contains("initializemint") || t.contains("initialize mint") {
+                                                        parsed_init = true;
+                                                    }
+                                                }
+                                            }
+                                            return Ok((creator_key.to_string(), mint_key.to_string(), curve_pda.to_string(), holder_addr, parsed_init));
                                         } else {
                                             warn!("Account index lookup failed for instruction in tx {}: mint_index={}, creator_index={}, account_keys_len={}", signature, mint_index, creator_index, account_keys.len());
                                         }
@@ -260,11 +290,52 @@ pub async fn fetch_token_metadata(
                             let client = Client::new();
                             match client.get(&uri).send().await {
                                 Ok(resp) => match resp.text().await {
-                                    Ok(body) => match serde_json::from_str::<OffchainTokenMetadata>(&body) {
-                                        Ok(off) => {
-                                            debug!("Fetched off-chain metadata for {}: {:?}", mint, off);
-                                            Ok((Some(meta), Some(off), Some(decoded)))
-                                        }
+                                    Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
+                                            Ok(body_val) => {
+                                                // Try to pull common top-level fields from the JSON using flexible heuristics
+                                                fn extract_first_string(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+                                                    for key in keys {
+                                                        if let Some(field) = v.get(*key) {
+                                                            match field {
+                                                                serde_json::Value::String(s) => return Some(s.clone()),
+                                                                serde_json::Value::Object(map) => {
+                                                                    // Try `en` locale or first string value
+                                                                    if let Some(serde_json::Value::String(s2)) = map.get("en") {
+                                                                        return Some(s2.clone());
+                                                                    }
+                                                                    for (_k, val) in map.iter() {
+                                                                        if let serde_json::Value::String(s3) = val {
+                                                                            return Some(s3.clone());
+                                                                        }
+                                                                    }
+                                                                }
+                                                                serde_json::Value::Array(arr) => {
+                                                                    if let Some(serde_json::Value::String(s4)) = arr.get(0) {
+                                                                        return Some(s4.clone());
+                                                                    }
+                                                                }
+                                                                other => {
+                                                                    // Fallback: use string representation for numbers or bools
+                                                                    return Some(other.to_string());
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    None
+                                                }
+
+                                                let mut off = OffchainTokenMetadata {
+                                                    name: extract_first_string(&body_val, &["name", "title", "token_name"]),
+                                                    symbol: extract_first_string(&body_val, &["symbol", "ticker"]),
+                                                    description: body_val.get("description").and_then(|d| d.as_str().map(|s| s.to_string())),
+                                                    image: extract_first_string(&body_val, &["image", "image_url", "imageUri"]),
+                                                    extras: Some(body_val.clone()),
+                                                };
+                                                // Normalize and extract fields from extras
+                                                off.normalize();
+                                                debug!("Fetched off-chain metadata for {}: {:?}", mint, off);
+                                                Ok((Some(meta), Some(off), Some(decoded)))
+                                            }
                                         Err(e) => {
                                             warn!("Failed to parse off-chain metadata JSON for {}: {}", uri, e);
                                             Ok((Some(meta), None, Some(decoded)))
@@ -295,11 +366,14 @@ pub async fn fetch_token_metadata(
                 }
             }
         } else {
-            warn!("No data field returned in account info for metadata PDA {} mint {}", metadata_pda, mint);
+            // Metadata PDA may legitimately exist but be empty for some mints at
+            // creation time; log at debug level to avoid excessive warning spam.
+            debug!("No data field returned in account info for metadata PDA {} mint {}", metadata_pda, mint);
             Ok((None, None, None))
         }
     } else {
-        warn!("getAccountInfo returned no result for metadata PDA {} mint {}", metadata_pda, mint);
+        // Not fatal: the account may not exist or be unindexed for some RPCs; debug-level log
+        debug!("getAccountInfo returned no result for metadata PDA {} mint {}", metadata_pda, mint);
         Ok((None, None, None))
     }
 }

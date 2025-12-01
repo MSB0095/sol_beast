@@ -57,6 +57,13 @@ pub async fn monitor_holdings(
         let holdings_snapshot = holdings.lock().await.clone();
 
         for (mint, holding) in &holdings_snapshot {
+            // If amount appears to be zero (e.g., token transferred/sold externally)
+            // schedule removal to keep in-memory holdings consistent with on-chain state.
+            if holding.amount == 0 {
+                debug!("Detected zero balance for {} - scheduling removal", mint);
+                to_remove.push(mint.clone());
+                continue;
+            }
             // Prefer WSS-provided cached prices when configured to use WSS only.
             // This avoids RPC polling and keeps the monitor reacting to real-time
             // websocket updates. If `price_source` is not strict "wss", fall
@@ -344,6 +351,14 @@ pub async fn monitor_holdings(
 
             let mut holdings_lock = holdings.lock().await;
             for mint in to_remove {
+                // Log removal to API for better observability
+                let _ = bot_control
+                    .add_log(
+                        "info",
+                        format!("Removing holding {} from in-memory map", mint),
+                        None,
+                    )
+                    .await;
                 holdings_lock.remove(&mint);
             }
         }

@@ -8,6 +8,7 @@ import {
   API_BOT_STOP_URL,
   API_BOT_MODE_URL,
 } from '../config'
+import { API_DETECTED_COINS_URL } from '../config'
 
 export type BotStatus = 'connected' | 'disconnected' | 'error'
 export type BotRunningState = 'running' | 'stopped' | 'starting' | 'stopping'
@@ -68,6 +69,7 @@ interface BotStore {
   pollInterval: number | null
   historicalData: HistoricalDataPoint[]
   lastStatUpdate: number
+  detectedCoins: any[]
   initializeConnection: () => Promise<void>
   updateStatus: (status: BotStatus) => void
   updateStats: (stats: BotStats) => void
@@ -90,6 +92,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
   pollInterval: null,
   historicalData: [],
   lastStatUpdate: 0,
+  detectedCoins: [],
   
   initializeConnection: async () => {
     try {
@@ -169,15 +172,29 @@ export const useBotStore = create<BotStore>((set, get) => ({
             console.error('Failed to fetch logs:', err)
           }
         }
+        // Poll detected coins
+        const pollDetectedCoins = async () => {
+          try {
+            const res = await fetch(API_DETECTED_COINS_URL)
+            if (res.ok) {
+              const coins = await res.json()
+              set({ detectedCoins: coins })
+            }
+          } catch (err) {
+            console.error('Failed to fetch detected coins:', err)
+          }
+        }
         
         // Initial poll
         await pollStats()
         await pollLogs()
+        await pollDetectedCoins()
         
         // Set up polling interval - 2 seconds is reasonable for dashboard updates
         const interval = setInterval(() => {
           pollStats()
           pollLogs()
+          pollDetectedCoins()
         }, 2000)
         
         set({ pollInterval: interval as unknown as number })

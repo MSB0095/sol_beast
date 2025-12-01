@@ -63,7 +63,7 @@ export interface Settings {
   helius_confirm_timeout_secs: number
 }
 
-type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades'
+type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
 
 interface SettingsStore {
   settings: Settings | null

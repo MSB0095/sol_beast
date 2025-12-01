@@ -1,8 +1,52 @@
-# sol_beast
+# Sol Beast - Solana Memecoins Sniper
+
+🚀 **Dual-Mode Trading Bot**: Run in browser (WASM) or with backend (Native Rust)
 
 Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heuristics and manage holdings (TP/SL/timeout).
 
-Quick start
+## 🎯 Deployment Modes
+
+### 🌐 WASM Mode (GitHub Pages)
+**No backend needed! Runs entirely in your browser.**
+
+- ✅ Deploy to GitHub Pages
+- ✅ No server costs
+- ✅ Wallet Adapter integration
+- ✅ Works on any static host
+
+**Try it now**: Visit the deployed GitHub Pages version!
+
+### 🖥️ Backend Mode (Self-Hosted)
+**Full-featured with Rust backend server.**
+
+- ✅ Optimal performance
+- ✅ Server-side WebSocket subscriptions
+- ✅ Secure key storage
+- ✅ Recommended for production
+
+📖 **See [DUAL_MODE_GUIDE.md](DUAL_MODE_GUIDE.md) for complete deployment instructions**
+
+---
+
+## Quick Start
+
+### Option 1: WASM Mode (Browser Only)
+
+```bash
+# Build WASM
+./build-wasm.sh
+
+# Build frontend
+cd frontend
+npm install
+VITE_USE_WASM=true npm run build
+
+# Serve dist/ folder or deploy to GitHub Pages
+```
+
+**Automatic GitHub Pages**: Just push to `main` branch!
+
+### Option 2: Backend Mode (Traditional)
 
 1. Copy the example config and edit values (RPC/WS URLs and program IDs):
 
@@ -28,14 +72,112 @@ Notes & safety
 - The `--real` path uses the keypair file at `wallet_keypair_path`. Do not commit private keys to the repository.
 - `rpc::buy_token` and `rpc::sell_token` contain TODOs and placeholder `Instruction` data — review and implement proper transaction construction before enabling `--real` in any automated environment.
 
-Files of interest
+## 📁 Project Structure
 
-- `src/main.rs` — runtime, message processing and holdings monitor
-- `src/ws.rs` — websocket subscriptions and reconnect loop
-- `src/rpc.rs` — Solana RPC helpers, price extraction, buy/sell functions (TODOs)
-- `src/models.rs` — bonding curve state and models
-- `src/helius_sender.rs` — Helius Sender integration for ultra-low latency transaction submission
-- `config.example.toml` — example configuration (copy to `config.toml`)
+```
+sol_beast/
+├── sol_beast_core/          # Platform-agnostic trading logic
+│   ├── src/
+│   │   ├── models.rs        # Data models
+│   │   ├── tx_builder.rs    # Transaction construction
+│   │   ├── settings.rs      # Configuration
+│   │   ├── wasm/            # Browser-specific code
+│   │   │   ├── rpc.rs       # Fetch API RPC client
+│   │   │   ├── websocket.rs # Browser WebSocket
+│   │   │   └── storage.rs   # localStorage
+│   │   └── native/          # Server-specific code
+│   └── Cargo.toml           # Feature flags: native, wasm
+│
+├── sol_beast_wasm/          # WASM bindings for browser
+│   ├── src/lib.rs           # JavaScript API exports
+│   └── Cargo.toml           # WASM build configuration
+│
+├── sol_beast_cli/           # Backend server (original)
+│   ├── src/
+│   │   ├── main.rs          # Runtime & message processing
+│   │   ├── api.rs           # REST API endpoints
+│   │   ├── buyer.rs         # Token buying logic
+│   │   ├── monitor.rs       # Holdings monitor (TP/SL)
+│   │   └── helius_sender.rs # Helius integration
+│   └── Cargo.toml
+│
+├── frontend/                # React frontend
+│   ├── src/
+│   │   ├── services/
+│   │   │   └── botService.ts  # Dual-mode adapter
+│   │   ├── components/      # UI components
+│   │   ├── stores/          # Zustand stores
+│   │   └── wasm/            # Generated WASM (git-ignored)
+│   └── package.json
+│
+├── build-wasm.sh            # WASM build script
+├── DUAL_MODE_GUIDE.md       # Deployment guide
+└── .github/workflows/
+    └── deploy.yml           # GitHub Pages deployment
+```
+
+## Files of interest
+
+**Core Library** (shared):
+- `sol_beast_core/src/models.rs` — Bonding curve state and models
+- `sol_beast_core/src/tx_builder.rs` — Transaction construction
+- `sol_beast_core/src/settings.rs` — Configuration management
+- `sol_beast_core/src/wasm/` — Browser-specific implementations
+
+**Backend** (CLI mode):
+- `sol_beast_cli/src/main.rs` — Runtime, message processing and holdings monitor
+- `sol_beast_cli/src/ws.rs` — WebSocket subscriptions and reconnect loop
+- `sol_beast_cli/src/rpc.rs` — Solana RPC helpers, price extraction, buy/sell functions
+- `sol_beast_cli/src/helius_sender.rs` — Helius Sender integration for ultra-low latency
+- `config.example.toml` — Example configuration (copy to `config.toml`)
+
+**WASM** (Browser mode):
+- `sol_beast_wasm/src/lib.rs` — JavaScript API exports
+- `frontend/src/services/botService.ts` — Dual-mode adapter (auto-detects WASM vs API)
+
+**Frontend**:
+- `frontend/src/components/` — React UI components
+- `frontend/src/stores/` — Zustand state management
+- `frontend/src/contexts/WalletContextProvider.tsx` — Solana Wallet Adapter
+
+## 🏗️ Architecture
+
+### WASM Mode
+```
+┌───────────────────────────────┐
+│       Browser                 │
+│  ┌─────────────────────────┐  │
+│  │  React Frontend         │  │
+│  │          ↓              │  │
+│  │  botService (adapter)   │  │
+│  │          ↓              │  │
+│  │  WASM Bot Module        │  │
+│  │  (sol_beast_wasm)       │  │
+│  │          ↓              │  │
+│  │  Solana RPC/WebSocket   │  │
+│  └─────────────────────────┘  │
+└───────────────────────────────┘
+```
+
+### Backend Mode
+```
+┌─────────────┐    HTTP     ┌──────────────────┐
+│   Browser   │ ◄────────► │  Rust Backend    │
+│   (React)   │             │  (Axum API)      │
+│             │             │  sol_beast_cli   │
+└─────────────┘             └────────┬─────────┘
+                                     ↓
+                            Solana RPC/WebSocket
+```
+
+### Shared Core
+Both modes use `sol_beast_core`:
+- Trading logic
+- Transaction building
+- Models & types
+- Settings management
+
+**Zero code duplication!**
 
 ## Helius Sender Integration
 

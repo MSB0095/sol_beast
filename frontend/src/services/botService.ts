@@ -108,12 +108,19 @@ export const botService = {
   // Get status
   async getStatus() {
     if (this.isWasmMode()) {
-      return {
-        running: wasmBot.is_running(),
-        mode: wasmBot.get_mode()
+      try {
+        return {
+          running: wasmBot.is_running(),
+          mode: wasmBot.get_mode()
+        }
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/state`)
+      if (!response.ok) {
+        throw new Error('Failed to fetch bot status')
+      }
       return response.json()
     }
   },

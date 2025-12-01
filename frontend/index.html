@@ -7,6 +7,11 @@
     <title>Sol Beast - Memecoins Sniper</title>
     <!-- Iconify for Tabler Icons -->
     <script src="https://code.iconify.design/3/3.1.0/iconify.min.js"></script>
+    <!-- Buffer polyfill - must load before React app -->
+    <script>
+      window.global = window;
+    </script>
+    <script src="/buffer-polyfill.js"></script>
   </head>
   <body class="bg-[var(--theme-bg-primary)] text-[var(--theme-text-primary)] transition-colors duration-500">
     <div id="root"></div>

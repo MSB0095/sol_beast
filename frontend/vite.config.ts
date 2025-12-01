@@ -2,8 +2,9 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { writeFileSync } from 'fs'
 import { resolve } from 'path'
-import { nodePolyfills } from 'vite-plugin-node-polyfills'
-import { Buffer } from 'buffer'
+import { NodeGlobalsPolyfillPlugin } from '@esbuild-plugins/node-globals-polyfill'
+import { NodeModulesPolyfillPlugin } from '@esbuild-plugins/node-modules-polyfill'
+import nodePolyfills from 'rollup-plugin-polyfill-node'
 
 // Plugin to create .nojekyll file for GitHub Pages
 function createNoJekyllPlugin() {
@@ -16,23 +17,48 @@ function createNoJekyllPlugin() {
   }
 }
 
+// Plugin to inject polyfills script into HTML before main module
+function injectBufferPolyfillPlugin() {
+  return {
+    name: 'inject-buffer-polyfill',
+    transformIndexHtml(html: string) {
+      // Polyfills will be auto-injected as a separate entry point
+      // Just ensure global is set
+      const polyfillScript = `<script>window.global = window;</script>\n    `
+      return html.replace(/<script/, polyfillScript + '<script')
+    }
+  }
+}
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
     react(), 
     createNoJekyllPlugin(),
-    nodePolyfills({
-      // Whether to polyfill `node:` protocol imports.
-      protocolImports: true,
-    }),
+    injectBufferPolyfillPlugin(),
   ],
   base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/',
   define: {
     'global': 'globalThis',
   },
+  optimizeDeps: {
+    esbuildOptions: {
+      define: {
+        global: 'globalThis'
+      },
+      plugins: [
+        NodeGlobalsPolyfillPlugin({
+          buffer: true,
+        }),
+        NodeModulesPolyfillPlugin(),
+      ],
+    },
+  },
   resolve: {
     alias: {
-      buffer: 'buffer',
+      buffer: 'buffer/',
+      stream: 'stream-browserify',
+      util: 'util/',
     },
   },
   server: {
@@ -48,7 +74,18 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    commonjsOptions: {
+      transformMixedEsModules: true,
+    },
     rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        polyfills: resolve(__dirname, 'src/polyfills.ts'),
+      },
+      plugins: [
+        // Inject node polyfills for production build
+        nodePolyfills(),
+      ],
       output: {
         manualChunks: {
           'wallet-adapter': [

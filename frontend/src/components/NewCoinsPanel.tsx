@@ -25,6 +25,7 @@ export default function NewCoinsPanel() {
         const response = await fetch(API_DETECTED_COINS_URL)
         if (response.ok) {
           const data = await response.json()
+          console.debug('Detected coins response:', data)
           setCoins(data)
         }
       } catch (error) {

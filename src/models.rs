@@ -74,6 +74,97 @@ pub struct OffchainTokenMetadata {
     pub extras: Option<serde_json::Value>,
 }
 
+impl OffchainTokenMetadata {
+    /// Normalize fields by trimming whitespace and null chars. If a field is
+    /// empty after trimming, it is converted to None. Also attempt to extract
+    /// `name` and `symbol` from common alternative fields in `extras`.
+    pub fn normalize(&mut self) {
+        fn norm_opt(mut s: Option<String>) -> Option<String> {
+            s.as_mut().map(|v| {
+                let trimmed = v.trim().trim_end_matches('\u{0}').to_string();
+                *v = trimmed;
+            });
+            s.and_then(|v| {
+                let trimmed = v.trim().trim_end_matches('\u{0}').to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+        }
+
+        self.name = norm_opt(self.name.take());
+        self.symbol = norm_opt(self.symbol.take());
+        self.description = norm_opt(self.description.take());
+        self.image = norm_opt(self.image.take());
+
+        // If name or symbol are missing, try to extract from `extras`.
+        if (self.name.is_none() || self.symbol.is_none()) && self.extras.is_some() {
+            fn lookup_string(v: &serde_json::Value, path: &[&str]) -> Option<String> {
+                let mut cur = v;
+                for p in path {
+                    cur = cur.get(*p)?;
+                }
+                match cur {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Object(map) => {
+                        // Prefer `en` locale, then first string value
+                        if let Some(serde_json::Value::String(s2)) = map.get("en") {
+                            return Some(s2.clone());
+                        }
+                        for (_k, v) in map.iter() {
+                            if let serde_json::Value::String(s3) = v {
+                                return Some(s3.clone());
+                            }
+                        }
+                        None
+                    }
+                    serde_json::Value::Array(arr) => {
+                        if let Some(serde_json::Value::String(s4)) = arr.get(0) {
+                            return Some(s4.clone());
+                        }
+                        None
+                    }
+                    other => other.as_str().map(|s| s.to_string()),
+                }
+            }
+            if let Some(ref extras) = self.extras {
+                if self.name.is_none() {
+                    let candidates = [
+                        vec!["name"],
+                        vec!["title"],
+                        vec!["properties", "name"],
+                        vec!["data", "name"],
+                        vec!["metadata", "name"],
+                    ];
+                    for c in candidates.iter() {
+                        if let Some(v) = lookup_string(extras, c) {
+                            let t = v.trim().trim_end_matches('\u{0}').to_string();
+                            if !t.is_empty() {
+                                self.name = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if self.symbol.is_none() {
+                    let candidates = [vec!["symbol"], vec!["ticker"], vec!["properties", "symbol"]];
+                    for c in candidates.iter() {
+                        if let Some(v) = lookup_string(extras, c) {
+                            let t = v.trim().trim_end_matches('\u{0}').to_string();
+                            if !t.is_empty() {
+                                self.symbol = Some(t);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // (Previously had a small trimmed `OnchainTokenMetadata`.) We now store the full
 // decoded account bytes in `Holding::onchain_raw` to preserve the complete on-chain
 // metadata payload.
@@ -150,6 +241,8 @@ pub struct AccountInfoResult {
 #[cfg(test)]
 mod tests {
     use super::BondingCurveState;
+    use super::OffchainTokenMetadata;
+    use serde_json::json;
 
     #[test]
     fn test_spot_price_formula_unit() {
@@ -168,5 +261,34 @@ mod tests {
         let expected = 30.0 / 1_073_000_191.0_f64; // ~2.795e-8
         let diff = (price - expected).abs();
         assert!(diff < 1e-15, "price mismatch: got {} expected {} diff {}", price, expected, diff);
+    }
+
+    #[test]
+    fn test_offchain_metadata_normalize_variants() {
+        // Basic string name
+        let mut m1 = OffchainTokenMetadata {
+            name: Some("   Test Token\u{0}  ".to_string()),
+            symbol: Some("TST\u{0}".to_string()),
+            description: None,
+            image: Some("https://example.com/img.png".to_string()),
+            extras: None,
+        };
+        m1.normalize();
+        assert_eq!(m1.name.as_deref(), Some("Test Token"));
+        assert_eq!(m1.symbol.as_deref(), Some("TST"));
+
+        // Name in nested object with locale
+        let v = json!({ "name": { "en": "Localized Token" }, "symbol": "LCL" });
+        let mut m2 = OffchainTokenMetadata { name: None, symbol: None, description: None, image: None, extras: Some(v) };
+        m2.normalize();
+        assert_eq!(m2.name.as_deref(), Some("Localized Token"));
+        assert_eq!(m2.symbol.as_deref(), Some("LCL"));
+
+        // Name in properties.name
+        let v = json!({ "properties": { "name": "Properties Token" }, "ticker": "PRP" });
+        let mut m3 = OffchainTokenMetadata { name: None, symbol: None, description: None, image: None, extras: Some(v) };
+        m3.normalize();
+        assert_eq!(m3.name.as_deref(), Some("Properties Token"));
+        assert_eq!(m3.symbol.as_deref(), Some("PRP"));
     }
 }

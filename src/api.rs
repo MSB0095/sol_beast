@@ -445,6 +445,7 @@ async fn get_detected_coins_handler(
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
     let coins = state.detected_coins.lock().await;
+    info!("Serving /detected-coins: {} coins", coins.len());
     Json(coins.clone())
 }
 

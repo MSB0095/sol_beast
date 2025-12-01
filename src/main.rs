@@ -554,9 +554,18 @@ async fn process_message(
         }
 
         if let (Some(logs), Some(signature)) = (logs_opt, sig_opt) {
-            if logs
-                .iter()
-                .any(|log| log.as_str() == Some("Program log: Instruction: InitializeMint2"))
+            // Trigger if logs mention InitializeMint or the pump.fun program id
+            let pump_prog_id = &settings.pump_fun_program;
+            if logs.iter().any(|log| {
+                // Accept common variants: InitializeMint2 and InitializeMint; match case-insensitively
+                // Match both 'initializemint', 'initialize mint', or 'initializemint2' variations.
+                log.as_str()
+                    .map(|s| {
+                        let s = s.to_lowercase();
+                        s.contains("initializemint") || s.contains("initialize mint") || s.contains(pump_prog_id)
+                    })
+                    .unwrap_or(false)
+            })
                 && seen.lock().await.put(signature.to_string(), ()).is_none()
             {
                 // If we're already at max holdings, skip detection work
@@ -582,7 +591,12 @@ async fn process_message(
                 }
 
                 let detect_time = Utc::now();
-                info!("New pump.fun token: {}", signature);
+                // Validate signature before attempting expensive RPC fetch to skip obvious invalid signatures.
+                let signature_valid = solana_sdk::signature::Signature::from_str(signature).is_ok();
+                if !signature_valid {
+                    debug!("Skipping invalid signature for InitializeMint notification: {}", signature);
+                    return Ok(());
+                }
                 if let Err(e) = handle_new_token(
                     signature,
                     holdings,
@@ -631,53 +645,79 @@ async fn handle_new_token(
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::sync::oneshot;
-    let (creator, mint, curve_pda, holder_addr) =
+    let (creator, mint, curve_pda, holder_addr, is_initialization) =
         rpc::fetch_transaction_details(signature, rpc_client, settings).await?;
+    if !is_initialization {
+        // Not a mint initialization transaction; skip detection.
+        debug!("Transaction {} is not an InitializeMint; skipping detection", signature);
+        return Ok(());
+    }
     let (onchain_meta, offchain_meta, onchain_raw) =
         rpc::fetch_token_metadata(&mint, rpc_client, settings).await?;
-    if let Some(m) = &onchain_meta {
-        info!(
-            "Token {}: Creator={}, Curve={}, Holder={}, URI={}",
-            mint,
-            creator,
-            curve_pda,
-            holder_addr,
-            m.uri.trim_end_matches('\u{0}')
-        );
+    // Attempt to fetch the bonding curve creator so we can validate pump.fun token
+    // and use the creator for additional verification, but do not require it for detection
+    // because some RPCs may not have the PDA available immediately.
+    let bonding_creator_opt = rpc::fetch_bonding_curve_creator(&mint, rpc_client, settings).await.ok().flatten();
+    if bonding_creator_opt.is_none() {
+        // Not fatal: the bonding curve PDA may not be indexed yet by the RPC node.
+        // Log at debug and continue detection using transaction-parsed creator and curve.
+        debug!("Bonding curve creator not found for mint {} (tx sig={}) — continuing detection using transaction parsed values", mint, signature);
+    }
 
-        // Log new token detection to API
+    // We treat lack of on-chain metadata as expected in some cases — continue
+    // detection even when `onchain_meta` is None. Use offchain meta or onchain
+    // raw to fill in display fields when available.
+    // NOTE: we want to continue regardless of name and URI being present.
+    if onchain_meta.is_some() || offchain_meta.is_some() || onchain_raw.is_some() {
+        // Prepare display fields using available on-chain or off-chain metadata
         let token_name = offchain_meta
             .as_ref()
             .and_then(|off| off.name.clone())
-            .or_else(|| {
-                let name = m.name.trim_end_matches('\u{0}').to_string();
-                if name.is_empty() {
-                    None
-                } else {
-                    Some(name)
-                }
-            })
+            .or_else(|| onchain_meta.as_ref().map(|m| m.name.trim_end_matches('\u{0}').to_string()))
             .unwrap_or_else(|| "Unknown".to_string());
+        let token_symbol = offchain_meta
+            .as_ref()
+            .and_then(|off| off.symbol.clone())
+            .or_else(|| onchain_meta.as_ref().map(|m| m.symbol.trim_end_matches('\u{0}').to_string()));
+        let metadata_uri_opt = if let Some(m) = onchain_meta.as_ref() {
+            let uri = m.uri.trim_end_matches('\u{0}').to_string();
+            if uri.is_empty() { None } else { Some(uri) }
+        } else if let Some(off) = offchain_meta.as_ref() { off.image.clone() } else { None };
+
+        // Log token detection using the available fields
+        info!(
+            "New pump.fun token detected: mint={} signature={} creator={} curve={} holder={} URI={}",
+            mint,
+            signature,
+            creator,
+            curve_pda,
+            holder_addr,
+            metadata_uri_opt.clone().unwrap_or_else(|| "<none>".to_string())
+        );
+        // (already logged above using `metadata_uri_opt`)
+
+        // Log new token detection to API
         bot_log!(
             "info",
             format!("New token detected: {}", token_name),
             format!("Mint: {}, Creator: {}", mint, creator)
         );
 
-        // Add to detected coins list
+        // Add to detected coins list. Use offchain metadata if present, else fallback to on-chain
+        // parsed metadata; otherwise mark name as Unknown and symbol None.
         {
             let mut coins = detected_coins.lock().await;
             coins.insert(
                 0,
                 api::DetectedCoin {
                     mint: mint.clone(),
-                    name: offchain_meta.as_ref().and_then(|o| o.name.clone()),
-                    symbol: offchain_meta.as_ref().and_then(|o| o.symbol.clone()),
+                    name: Some(token_name.clone()),
+                    symbol: token_symbol.clone(),
                     image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
                     creator: creator.clone(),
                     bonding_curve: curve_pda.clone(),
                     detected_at: detect_time.to_rfc3339(),
-                    metadata_uri: Some(m.uri.trim_end_matches('\u{0}').to_string()),
+                    metadata_uri: metadata_uri_opt.clone(),
                     buy_price: None,
                     status: "detected".to_string(),
                 },
@@ -694,7 +734,8 @@ async fn handle_new_token(
                 mint, off.name, off.symbol, off.image
             );
         }
-        if !m.uri.trim_end_matches('\u{0}').is_empty() && m.seller_fee_basis_points < 500 {
+        if let Some(m) = onchain_meta.as_ref() {
+            if !m.uri.trim_end_matches('\u{0}').is_empty() && m.seller_fee_basis_points < 500 {
             // Try to get a fast WSS-provided price first depending on price_source.
             // If `price_source` == "rpc" we skip WSS and use RPC only.
             // If `price_source` == "wss" we attempt WSS and do NOT fall back to RPC.
@@ -1051,6 +1092,10 @@ async fn handle_new_token(
                     debug!("No healthy WSS available for {} (all degraded/full)", mint);
                 }
             }
+        } else {
+            // No on-chain metadata to validate or price-seller checks; skip buy logic
+            debug!("No on-chain metadata to validate buy for mint {} (sig={}) — detected only", mint, signature);
+        }
             // We do not fall back to RPC here; WSS-only mode requires a streamed
             // price update from the bonding_curve PDA. If no WSS price was used,
             // skip buying.

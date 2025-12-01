@@ -2,3 +2,6 @@
 config.toml
 trades.csv
 secrets
+
+# WASM build artifacts
+frontend/src/wasm/

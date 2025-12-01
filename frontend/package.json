@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "npm run build:wasm && tsc -b && vite build",
+    "build:wasm": "cd .. && ./build-wasm.sh",
+    "build:frontend-only": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "postinstall": "echo 'Dependencies installed successfully'"

@@ -190,6 +190,23 @@ async fn update_settings_handler(
     info!("Settings update request received: {:?}", updates);
     
     let bot_control = state.bot_control.clone();
+    
+    // Check if bot is stopped before allowing settings changes
+    let running_state = state.bot_control.running_state.lock().await;
+    if *running_state != BotRunningState::Stopped {
+        let error_msg = "Bot must be stopped before updating settings".to_string();
+        warn!("{}", error_msg);
+        bot_control.add_log("warn", error_msg.clone(), None).await;
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "message": error_msg
+            }))
+        );
+    }
+    drop(running_state);
+    
     let mut current_settings = state.settings.lock().await;
     
     // Attempt to deserialize updates into a partial Settings struct

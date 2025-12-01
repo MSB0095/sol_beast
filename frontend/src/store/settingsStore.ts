@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { API_SETTINGS_URL } from '../config'
+import { botService } from '../services/botService'
 
 export interface Settings {
   // RPC & WebSocket
@@ -125,17 +125,9 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   fetchSettings: async () => {
     set({ loading: true, error: null })
     try {
-      const response = await fetch(API_SETTINGS_URL)
-      if (response.ok) {
-        const settings = await response.json()
-        set({ settings, loading: false })
-      } else {
-        set({ 
-          settings: defaultSettings,
-          loading: false,
-          error: 'Failed to fetch settings from backend'
-        })
-      }
+      // Use botService which handles WASM/REST mode
+      const settings = await botService.getSettings()
+      set({ settings, loading: false })
     } catch (err) {
       set({ 
         settings: defaultSettings,
@@ -148,24 +140,12 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   saveSettings: async (updates) => {
     set({ saving: true, error: null })
     try {
-      const response = await fetch(API_SETTINGS_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-      })
-      
-      if (response.ok) {
-        set((state) => ({
-          settings: state.settings ? { ...state.settings, ...updates } : defaultSettings,
-          saving: false,
-        }))
-      } else {
-        const errorData = await response.json().catch(() => ({ message: 'Failed to save settings' }))
-        set({ 
-          saving: false,
-          error: errorData.message || 'Failed to save settings'
-        })
-      }
+      // Use botService which handles WASM/REST mode
+      await botService.updateSettings(updates)
+      set((state) => ({
+        settings: state.settings ? { ...state.settings, ...updates } : defaultSettings,
+        saving: false,
+      }))
     } catch (err) {
       set({ 
         saving: false,

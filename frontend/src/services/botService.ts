@@ -47,9 +47,22 @@ export const botService = {
   // Start bot
   async start() {
     if (this.isWasmMode()) {
-      return wasmBot.start()
+      try {
+        wasmBot.start()
+        return { success: true }
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/start`, { method: 'POST' })
+      if (!response.ok) {
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to start bot')
+        } catch {
+          throw new Error('Failed to start bot')
+        }
+      }
       return response.json()
     }
   },
@@ -57,9 +70,22 @@ export const botService = {
   // Stop bot
   async stop() {
     if (this.isWasmMode()) {
-      return wasmBot.stop()
+      try {
+        wasmBot.stop()
+        return { success: true }
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/stop`, { method: 'POST' })
+      if (!response.ok) {
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to stop bot')
+        } catch {
+          throw new Error('Failed to stop bot')
+        }
+      }
       return response.json()
     }
   },
@@ -67,13 +93,26 @@ export const botService = {
   // Set mode
   async setMode(mode: 'dry-run' | 'real') {
     if (this.isWasmMode()) {
-      return wasmBot.set_mode(mode)
+      try {
+        wasmBot.set_mode(mode)
+        return { success: true, mode }
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/mode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode })
       })
+      if (!response.ok) {
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to set mode')
+        } catch {
+          throw new Error('Failed to set mode')
+        }
+      }
       return response.json()
     }
   },
@@ -81,12 +120,19 @@ export const botService = {
   // Get status
   async getStatus() {
     if (this.isWasmMode()) {
-      return {
-        running: wasmBot.is_running(),
-        mode: wasmBot.get_mode()
+      try {
+        return {
+          running: wasmBot.is_running(),
+          mode: wasmBot.get_mode()
+        }
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/state`)
+      if (!response.ok) {
+        throw new Error('Failed to fetch bot status')
+      }
       return response.json()
     }
   },
@@ -94,10 +140,17 @@ export const botService = {
   // Get settings
   async getSettings() {
     if (this.isWasmMode()) {
-      const json = wasmBot.get_settings()
-      return JSON.parse(json)
+      try {
+        const json = wasmBot.get_settings()
+        return JSON.parse(json)
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/settings`)
+      if (!response.ok) {
+        throw new Error('Failed to fetch settings')
+      }
       return response.json()
     }
   },
@@ -105,13 +158,26 @@ export const botService = {
   // Update settings
   async updateSettings(settings: any) {
     if (this.isWasmMode()) {
-      return wasmBot.update_settings(JSON.stringify(settings))
+      try {
+        wasmBot.update_settings(JSON.stringify(settings))
+        return { success: true }
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)
       })
+      if (!response.ok) {
+        try {
+          const error = await response.json()
+          throw new Error(error.message || 'Failed to update settings')
+        } catch {
+          throw new Error('Failed to update settings')
+        }
+      }
       return response.json()
     }
   },
@@ -119,10 +185,17 @@ export const botService = {
   // Get logs
   async getLogs() {
     if (this.isWasmMode()) {
-      const json = wasmBot.get_logs()
-      return JSON.parse(json)
+      try {
+        const json = wasmBot.get_logs()
+        return JSON.parse(json)
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/logs`)
+      if (!response.ok) {
+        throw new Error('Failed to fetch logs')
+      }
       return response.json()
     }
   },
@@ -130,10 +203,17 @@ export const botService = {
   // Get holdings
   async getHoldings() {
     if (this.isWasmMode()) {
-      const json = wasmBot.get_holdings()
-      return JSON.parse(json)
+      try {
+        const json = wasmBot.get_holdings()
+        return JSON.parse(json)
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
     } else {
       const response = await fetch(`${API_BASE_URL}/holdings`)
+      if (!response.ok) {
+        throw new Error('Failed to fetch holdings')
+      }
       return response.json()
     }
   },

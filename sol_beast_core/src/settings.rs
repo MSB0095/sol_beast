@@ -1,10 +1,8 @@
 use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
-use base64::engine::general_purpose::STANDARD as Base64Engine;
-use base64::Engine;
 
 #[cfg(feature = "native")]
-use std::env;
+use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {

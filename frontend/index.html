@@ -7,11 +7,21 @@
     <title>Sol Beast - Memecoins Sniper</title>
     <!-- Iconify for Tabler Icons -->
     <script src="https://code.iconify.design/3/3.1.0/iconify.min.js"></script>
-    <!-- Buffer polyfill - must load before React app -->
+    <!-- Buffer polyfill - MUST load before any ES modules -->
     <script>
       window.global = window;
     </script>
-    <script src="/buffer-polyfill.js"></script>
+    <script src="/buffer-standalone-bundle.js"></script>
+    <script>
+      // Extract Buffer from the bundle and make it globally available
+      if (typeof BufferModule !== 'undefined' && BufferModule.Buffer) {
+        window.Buffer = BufferModule.Buffer;
+        globalThis.Buffer = BufferModule.Buffer;
+        console.log('✓ Buffer polyfill loaded from standalone bundle');
+      } else {
+        console.error('✗ Failed to load Buffer from bundle');
+      }
+    </script>
   </head>
   <body class="bg-[var(--theme-bg-primary)] text-[var(--theme-text-primary)] transition-colors duration-500">
     <div id="root"></div>

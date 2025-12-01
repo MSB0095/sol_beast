@@ -4,7 +4,6 @@ import { writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { NodeGlobalsPolyfillPlugin } from '@esbuild-plugins/node-globals-polyfill';
 import { NodeModulesPolyfillPlugin } from '@esbuild-plugins/node-modules-polyfill';
-import nodePolyfills from 'rollup-plugin-polyfill-node';
 // Plugin to create .nojekyll file for GitHub Pages
 function createNoJekyllPlugin() {
     return {
@@ -37,6 +36,7 @@ export default defineConfig({
     base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/',
     define: {
         'global': 'globalThis',
+        'process.env': '{}',
     },
     optimizeDeps: {
         esbuildOptions: {
@@ -52,11 +52,7 @@ export default defineConfig({
         },
     },
     resolve: {
-        alias: {
-            buffer: 'buffer/',
-            stream: 'stream-browserify',
-            util: 'util/',
-        },
+        conditions: ['browser', 'module', 'import', 'default'],
     },
     server: {
         port: 3000,
@@ -75,14 +71,6 @@ export default defineConfig({
             transformMixedEsModules: true,
         },
         rollupOptions: {
-            input: {
-                main: resolve(__dirname, 'index.html'),
-                polyfills: resolve(__dirname, 'src/polyfills.ts'),
-            },
-            plugins: [
-                // Inject node polyfills for production build
-                nodePolyfills(),
-            ],
             output: {
                 manualChunks: {
                     'wallet-adapter': [

@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { API_SETTINGS_URL } from '../config'
 import { botService } from '../services/botService'
 
 export interface Settings {

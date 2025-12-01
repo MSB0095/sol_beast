@@ -123,15 +123,18 @@ export const useBotStore = create<BotStore>((set, get) => ({
             const now = Date.now()
             
             // Create stats object from WASM data
-            const stats = {
+            const runningState: BotRunningState = status.running ? 'running' : 'stopped'
+            const botMode: BotMode = (status.mode === 'real' || status.mode === 'dry-run') ? status.mode : 'dry-run'
+            
+            const stats: BotStats = {
               total_buys: 0,
               total_sells: 0,
               total_profit: 0,
               current_holdings: holdings || [],
               uptime_secs: 0,
               last_activity: new Date().toISOString(),
-              running_state: status.running ? 'running' : 'stopped',
-              mode: status.mode
+              running_state: runningState,
+              mode: botMode
             }
             
             set((state) => {
@@ -153,16 +156,16 @@ export const useBotStore = create<BotStore>((set, get) => ({
                   logs: logs || state.logs,
                   historicalData: newHistoricalData,
                   lastStatUpdate: now,
-                  runningState: stats.running_state as any || state.runningState,
-                  mode: stats.mode as any || state.mode
+                  runningState,
+                  mode: botMode
                 }
               }
               
               return {
                 stats,
                 logs: logs || state.logs,
-                runningState: stats.running_state as any || state.runningState,
-                mode: stats.mode as any || state.mode
+                runningState,
+                mode: botMode
               }
             })
           } catch (err) {

@@ -2,6 +2,8 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { writeFileSync } from 'fs'
 import { resolve } from 'path'
+import { nodePolyfills } from 'vite-plugin-node-polyfills'
+import { Buffer } from 'buffer'
 
 // Plugin to create .nojekyll file for GitHub Pages
 function createNoJekyllPlugin() {
@@ -16,8 +18,23 @@ function createNoJekyllPlugin() {
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react(), createNoJekyllPlugin()],
+  plugins: [
+    react(), 
+    createNoJekyllPlugin(),
+    nodePolyfills({
+      // Whether to polyfill `node:` protocol imports.
+      protocolImports: true,
+    }),
+  ],
   base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/',
+  define: {
+    'global': 'globalThis',
+  },
+  resolve: {
+    alias: {
+      buffer: 'buffer',
+    },
+  },
   server: {
     port: 3000,
     proxy: {

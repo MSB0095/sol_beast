@@ -50,6 +50,7 @@ jobs:
         working-directory: ./frontend
         run: npm run build:frontend-only
         env:
+          NODE_ENV: 'production'
           VITE_USE_WASM: 'true'
 
       - name: Setup Pages

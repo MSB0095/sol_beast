@@ -554,19 +554,16 @@ async fn process_message(
         }
 
         if let (Some(logs), Some(signature)) = (logs_opt, sig_opt) {
-            // Trigger if logs mention InitializeMint or the pump.fun program id
+            // Only process if logs mention the pump.fun program id
+            // This ensures we only process transactions that actually interact with pump.fun
             let pump_prog_id = &settings.pump_fun_program;
-            if logs.iter().any(|log| {
-                // Accept common variants: InitializeMint2 and InitializeMint; match case-insensitively
-                // Match both 'initializemint', 'initialize mint', or 'initializemint2' variations.
+            let logs_mention_pump = logs.iter().any(|log| {
                 log.as_str()
-                    .map(|s| {
-                        let s = s.to_lowercase();
-                        s.contains("initializemint") || s.contains("initialize mint") || s.contains(pump_prog_id)
-                    })
+                    .map(|s| s.contains(pump_prog_id))
                     .unwrap_or(false)
-            })
-                && seen.lock().await.put(signature.to_string(), ()).is_none()
+            });
+            
+            if logs_mention_pump && seen.lock().await.put(signature.to_string(), ()).is_none()
             {
                 // If we're already at max holdings, skip detection work
                 // but do not block processing of other websocket messages
@@ -594,7 +591,7 @@ async fn process_message(
                 // Validate signature before attempting expensive RPC fetch to skip obvious invalid signatures.
                 let signature_valid = solana_sdk::signature::Signature::from_str(signature).is_ok();
                 if !signature_valid {
-                    debug!("Skipping invalid signature for InitializeMint notification: {}", signature);
+                    debug!("Skipping invalid signature for pump.fun notification: {}", signature);
                     return Ok(());
                 }
                 if let Err(e) = handle_new_token(
@@ -648,8 +645,8 @@ async fn handle_new_token(
     let (creator, mint, curve_pda, holder_addr, is_initialization) =
         rpc::fetch_transaction_details(signature, rpc_client, settings).await?;
     if !is_initialization {
-        // Not a mint initialization transaction; skip detection.
-        debug!("Transaction {} is not an InitializeMint; skipping detection", signature);
+        // Not a pump.fun create instruction; skip detection.
+        debug!("Transaction {} is not a pump.fun CREATE instruction; skipping detection", signature);
         return Ok(());
     }
     let (onchain_meta, offchain_meta, onchain_raw) =

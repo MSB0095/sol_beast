@@ -191,10 +191,11 @@ pub async fn fetch_transaction_details(
     // If we found a valid pump.fun create instruction, return the extracted data
     if is_pump_create {
         if let (Some(mint), Some(creator)) = (create_mint, create_creator) {
-            // Validate mint address format (should end with "pump" for pump.fun tokens)
+            // Log a warning if mint doesn't end with "pump" (unusual but possible)
+            // Pump.fun typically uses vanity addresses ending in "pump", but we don't reject
+            // valid create instructions that have already been verified by discriminator
             if !mint.ends_with("pump") {
-                debug!("Mint {} does not end with 'pump', likely not a real pump.fun token", mint);
-                return Err("Not a valid pump.fun token (mint address doesn't end with 'pump')".into());
+                warn!("Mint {} does not end with 'pump' (unusual for pump.fun, but accepting)", mint);
             }
             
             // Compute bonding curve PDA if not already extracted
@@ -251,9 +252,9 @@ pub async fn fetch_transaction_details(
                                                             .or_else(|| v.as_str().map(|s| s.to_string())));
 
                                                     if let (Some(m), Some(c)) = (mint, creator) {
-                                                        // Validate mint address
+                                                        // Log warning if mint doesn't end with "pump" but continue processing
                                                         if !m.ends_with("pump") {
-                                                            continue;
+                                                            warn!("Inner instruction mint {} does not end with 'pump' (unusual but accepting)", m);
                                                         }
                                                         
                                                         let curve_addr = curve.unwrap_or_else(|| {

@@ -8,6 +8,26 @@ const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' ||
 let wasmBot: any = null
 let wasmInitialized = false
 
+// Load default settings from static JSON file
+async function loadDefaultSettings() {
+  try {
+    // Determine the base path for the static file
+    // In production (GitHub Pages), this needs to include the repo name
+    const basePath = import.meta.env.BASE_URL || '/'
+    const response = await fetch(`${basePath}bot-settings.json`)
+    if (!response.ok) {
+      console.warn('Could not load default settings from bot-settings.json')
+      return null
+    }
+    const settings = await response.json()
+    console.log('✓ Loaded default settings from bot-settings.json')
+    return settings
+  } catch (error) {
+    console.warn('Failed to load default settings:', error)
+    return null
+  }
+}
+
 // Initialize WASM if needed
 async function initWasm() {
   if (!USE_WASM) return true
@@ -24,8 +44,36 @@ async function initWasm() {
     // Note: wasm.init() is called automatically by #[wasm_bindgen(start)]
     // during wasm.default(), so we don't need to call it explicitly
     
-    // Create bot instance
+    // Create bot instance (this will load from localStorage if available)
     wasmBot = new wasm.SolBeastBot()
+    
+    // Check if settings are present, if not, try to load from static file
+    try {
+      const currentSettings = wasmBot.get_settings()
+      const settings = JSON.parse(currentSettings)
+      
+      // If settings look uninitialized or empty, load defaults
+      if (!settings.solana_ws_urls || settings.solana_ws_urls.length === 0) {
+        console.log('Settings appear uninitialized, loading defaults...')
+        const defaultSettings = await loadDefaultSettings()
+        if (defaultSettings) {
+          wasmBot.update_settings(JSON.stringify(defaultSettings))
+          console.log('✓ Applied default settings')
+        }
+      }
+    } catch (settingsError) {
+      console.warn('Could not verify settings, attempting to load defaults:', settingsError)
+      const defaultSettings = await loadDefaultSettings()
+      if (defaultSettings) {
+        try {
+          wasmBot.update_settings(JSON.stringify(defaultSettings))
+          console.log('✓ Applied default settings after error')
+        } catch (updateError) {
+          console.error('Failed to apply default settings:', updateError)
+        }
+      }
+    }
+    
     wasmInitialized = true
     console.log('✓ WASM bot initialized successfully')
     return true
@@ -75,7 +123,25 @@ export const botService = {
         } catch (err) {
           console.error('Failed to get WASM settings:', err)
           const errorMsg = err instanceof Error ? err.message : String(err)
-          throw new Error(`Failed to get bot settings: ${errorMsg}`)
+          
+          // If we get "unreachable" or other critical error, try to reinitialize with defaults
+          if (errorMsg.includes('unreachable') || errorMsg.includes('undefined')) {
+            console.log('Attempting to recover from settings error by loading defaults...')
+            const defaultSettings = await loadDefaultSettings()
+            if (defaultSettings) {
+              try {
+                wasmBot.update_settings(JSON.stringify(defaultSettings))
+                settingsJson = wasmBot.get_settings()
+                console.log('✓ Successfully recovered with default settings')
+              } catch (recoveryError) {
+                throw new Error(`Failed to recover bot settings. Please refresh the page and try again. Error: ${errorMsg}`)
+              }
+            } else {
+              throw new Error(`Failed to get bot settings and could not load defaults. Please refresh the page. Error: ${errorMsg}`)
+            }
+          } else {
+            throw new Error(`Failed to get bot settings: ${errorMsg}`)
+          }
         }
         
         // Parse and validate settings

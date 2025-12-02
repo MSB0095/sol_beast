@@ -62,10 +62,26 @@ pub struct LogEntry {
 impl SolBeastBot {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
+        // Try to load settings from localStorage, fallback to defaults
+        let settings = match sol_beast_core::wasm::load_settings::<BotSettings>() {
+            Ok(Some(saved_settings)) => {
+                info!("Loaded settings from localStorage");
+                saved_settings
+            },
+            Ok(None) => {
+                info!("No saved settings found, using defaults");
+                BotSettings::default()
+            },
+            Err(e) => {
+                error!("Failed to load settings from localStorage: {:?}, using defaults", e);
+                BotSettings::default()
+            }
+        };
+        
         let state = BotState {
             running: false,
             mode: "dry-run".to_string(),
-            settings: BotSettings::default(),
+            settings,
             holdings: Vec::new(),
             logs: Vec::new(),
             monitor: None,
@@ -257,7 +273,17 @@ impl SolBeastBot {
                 poisoned.into_inner()
             }
         };
-        state.settings = settings;
+        state.settings = settings.clone();
+        drop(state);
+        
+        // Automatically save to localStorage
+        sol_beast_core::wasm::save_settings(&settings)
+            .map_err(|e| {
+                error!("Failed to save settings to localStorage: {:?}", e);
+                JsValue::from_str(&format!("Settings updated but failed to save to localStorage: {:?}", e))
+            })?;
+        
+        info!("Settings updated and saved to localStorage");
         Ok(())
     }
     

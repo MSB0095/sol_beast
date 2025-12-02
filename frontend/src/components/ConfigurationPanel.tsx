@@ -83,6 +83,13 @@ export default function ConfigurationPanel() {
       ]
     },
     {
+      title: 'Dev Tip Configuration',
+      settings: [
+        { key: 'dev_tip_percent' as const, label: 'Dev Tip %', type: 'number', help: 'Percentage tip per transaction (applies to both buys and sells)' },
+        { key: 'dev_tip_fixed_sol' as const, label: 'Dev Tip Fixed (SOL)', type: 'number', help: 'Fixed SOL amount per transaction (applies to both buys and sells)' },
+      ]
+    },
+    {
       title: 'Advanced Configuration',
       settings: [
         { key: 'price_source' as const, label: 'Price Source', type: 'select', options: ['wss', 'rpc', 'hybrid'] },

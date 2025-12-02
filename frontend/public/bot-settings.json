@@ -13,5 +13,7 @@
   "min_tokens_threshold": 30000,
   "max_sol_per_token": 0.002,
   "min_liquidity_sol": 0.0,
-  "max_liquidity_sol": 15.0
+  "max_liquidity_sol": 15.0,
+  "dev_tip_percent": 2.0,
+  "dev_tip_fixed_sol": 0.0
 }

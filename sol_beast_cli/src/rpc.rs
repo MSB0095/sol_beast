@@ -1199,12 +1199,20 @@ pub async fn sell_token(
         all_instrs.push(close_ata_instruction);
         info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
         
-        // Add dev fee if enabled
-        if settings.dev_fee_enabled {
+        // Add dev tip if enabled
+        if settings.has_dev_tips() {
             // Calculate expected SOL received from sell (in lamports)
             let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, 1)?;
-            info!("Added 2% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
+            crate::dev_fee::add_dev_tip_to_instructions(
+                &mut all_instrs, 
+                &user_pubkey, 
+                sol_received_lamports,
+                settings.dev_tip_percent,
+                settings.dev_tip_fixed_sol,
+                1
+            )?;
+            info!("Added dev tip to sell transaction: {}% + {} SOL fixed (expected: {:.9} SOL)", 
+                settings.dev_tip_percent, settings.dev_tip_fixed_sol, sol_received);
         }
         
         // Choose transaction submission method

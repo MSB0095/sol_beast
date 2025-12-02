@@ -186,12 +186,20 @@ pub async fn buy_token(
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
         
-        // Add dev fee if enabled
-        if settings.dev_fee_enabled {
+        // Add dev tip if enabled
+        if settings.has_dev_tips() {
             // Calculate transaction amount in lamports (sol_amount is in SOL)
             let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports, 0)?;
-            info!("Added 2% dev fee to buy transaction ({} SOL)", sol_amount);
+            crate::dev_fee::add_dev_tip_to_instructions(
+                &mut all_instrs, 
+                &payer.pubkey(), 
+                transaction_lamports, 
+                settings.dev_tip_percent,
+                settings.dev_tip_fixed_sol,
+                0
+            )?;
+            info!("Added dev tip to buy transaction: {}% + {} SOL fixed ({} SOL buy)", 
+                settings.dev_tip_percent, settings.dev_tip_fixed_sol, sol_amount);
         }
         
         // Choose transaction submission method

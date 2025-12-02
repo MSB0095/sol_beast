@@ -88,6 +88,18 @@ pub fn calculate_dev_fee(amount_lamports: u64) -> u64 {
     amount_lamports / 50
 }
 
+/// Calculate dev tip from SOL amount (in lamports) using configurable percentage and fixed amount
+/// Returns the total tip in lamports: (percentage * amount) + fixed_amount
+/// 
+/// Note: Uses floating-point for percentage calculation to maintain precision across various amounts.
+/// The fixed_sol conversion may lose precision for very small amounts (< 1 lamport) but this is
+/// acceptable as lamports are the smallest unit (1 lamport = 0.000000001 SOL).
+pub fn calculate_dev_tip(amount_lamports: u64, tip_percent: f64, tip_fixed_sol: f64) -> u64 {
+    let percentage_tip = (amount_lamports as f64 * tip_percent / 100.0) as u64;
+    let fixed_tip = (tip_fixed_sol * 1_000_000_000.0) as u64;
+    percentage_tip + fixed_tip
+}
+
 /// Build instruction data with magic codes and operation type
 /// op_type: 0 = buy, 1 = sell
 #[allow(dead_code)]
@@ -122,6 +134,51 @@ pub fn add_dev_fee_to_instructions(
     log::info!("Added dev fee instruction: {} lamports ({} SOL) - 2% of {} lamports", 
         fee_amount, 
         fee_amount as f64 / 1_000_000_000.0,
+        transaction_amount_lamports
+    );
+    
+    Ok(())
+}
+
+/// Add dev tip instruction to a list of instructions based on configurable percentage and fixed amount
+/// This creates a system transfer instruction for the calculated tip amount
+pub fn add_dev_tip_to_instructions(
+    instructions: &mut Vec<Instruction>,
+    payer: &Pubkey,
+    transaction_amount_lamports: u64,
+    tip_percent: f64,
+    tip_fixed_sol: f64,
+    _op_type: u8, // 0 = buy, 1 = sell (reserved for future use)
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let tip_amount = calculate_dev_tip(transaction_amount_lamports, tip_percent, tip_fixed_sol);
+    
+    // Only add instruction if tip amount is greater than 0
+    if tip_amount == 0 {
+        log::debug!("Dev tip is 0, skipping instruction");
+        return Ok(());
+    }
+    
+    let dev_wallet = get_dev_wallet()?;
+    
+    // Create system transfer for dev tip
+    let transfer_instruction = system_instruction::transfer(
+        payer,
+        &dev_wallet,
+        tip_amount,
+    );
+    
+    // Add transfer instruction at the beginning (before main operations)
+    // Using insert(0) ensures the tip transfer happens first, which is important for
+    // transparency and to ensure sufficient balance for both tip and main operation.
+    // The O(n) cost is acceptable as instruction lists are typically small (< 10 items).
+    instructions.insert(0, transfer_instruction);
+    
+    log::info!(
+        "Added dev tip instruction: {} lamports ({:.9} SOL) - {}% + {:.9} SOL fixed of {} lamports", 
+        tip_amount, 
+        tip_amount as f64 / 1_000_000_000.0,
+        tip_percent,
+        tip_fixed_sol,
         transaction_amount_lamports
     );
     
@@ -188,6 +245,24 @@ mod tests {
         assert_eq!(calculate_dev_fee(1_000_000_000), 20_000_000); // 1 SOL = 20M lamports (2%)
         assert_eq!(calculate_dev_fee(100_000_000), 2_000_000); // 0.1 SOL = 2M lamports (2%)
         assert_eq!(calculate_dev_fee(50), 1); // Minimum fee
+    }
+
+    #[test]
+    fn test_calculate_dev_tip() {
+        // Test percentage only (2% of 1 SOL)
+        assert_eq!(calculate_dev_tip(1_000_000_000, 2.0, 0.0), 20_000_000);
+        
+        // Test fixed only (0.01 SOL)
+        assert_eq!(calculate_dev_tip(1_000_000_000, 0.0, 0.01), 10_000_000);
+        
+        // Test both (2% + 0.01 SOL fixed)
+        assert_eq!(calculate_dev_tip(1_000_000_000, 2.0, 0.01), 30_000_000);
+        
+        // Test with 0.1 SOL: 5% + 0.005 SOL
+        assert_eq!(calculate_dev_tip(100_000_000, 5.0, 0.005), 10_000_000);
+        
+        // Test zero tip
+        assert_eq!(calculate_dev_tip(1_000_000_000, 0.0, 0.0), 0);
     }
 
     #[test]

@@ -61,6 +61,10 @@ export interface Settings {
   helius_use_swqos_only: boolean
   helius_use_dynamic_tips: boolean
   helius_confirm_timeout_secs: number
+  
+  // Dev Tip
+  dev_tip_percent: number
+  dev_tip_fixed_sol: number
 }
 
 type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
@@ -113,6 +117,8 @@ const defaultSettings: Settings = {
   helius_use_swqos_only: true,
   helius_use_dynamic_tips: true,
   helius_confirm_timeout_secs: 1,
+  dev_tip_percent: 2.0,
+  dev_tip_fixed_sol: 0.0,
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({

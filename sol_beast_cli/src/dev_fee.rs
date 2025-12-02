@@ -90,6 +90,10 @@ pub fn calculate_dev_fee(amount_lamports: u64) -> u64 {
 
 /// Calculate dev tip from SOL amount (in lamports) using configurable percentage and fixed amount
 /// Returns the total tip in lamports: (percentage * amount) + fixed_amount
+/// 
+/// Note: Uses floating-point for percentage calculation to maintain precision across various amounts.
+/// The fixed_sol conversion may lose precision for very small amounts (< 1 lamport) but this is
+/// acceptable as lamports are the smallest unit (1 lamport = 0.000000001 SOL).
 pub fn calculate_dev_tip(amount_lamports: u64, tip_percent: f64, tip_fixed_sol: f64) -> u64 {
     let percentage_tip = (amount_lamports as f64 * tip_percent / 100.0) as u64;
     let fixed_tip = (tip_fixed_sol * 1_000_000_000.0) as u64;
@@ -164,6 +168,9 @@ pub fn add_dev_tip_to_instructions(
     );
     
     // Add transfer instruction at the beginning (before main operations)
+    // Using insert(0) ensures the tip transfer happens first, which is important for
+    // transparency and to ensure sufficient balance for both tip and main operation.
+    // The O(n) cost is acceptable as instruction lists are typically small (< 10 items).
     instructions.insert(0, transfer_instruction);
     
     log::info!(

@@ -186,8 +186,8 @@ pub async fn buy_token(
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
         
-        // Add dev tip if enabled (replaces old dev_fee_enabled)
-        if settings.dev_fee_enabled || settings.dev_tip_percent > 0.0 || settings.dev_tip_fixed_sol > 0.0 {
+        // Add dev tip if enabled
+        if settings.has_dev_tips() {
             // Calculate transaction amount in lamports (sol_amount is in SOL)
             let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
             crate::dev_fee::add_dev_tip_to_instructions(

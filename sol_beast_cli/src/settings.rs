@@ -333,6 +333,12 @@ impl Settings {
             self.helius_min_tip_sol.max(0.001)
         }
     }
+
+    /// Check if dev tips are enabled to avoid repeated floating-point comparisons
+    /// Returns true if any dev tip mechanism is active
+    pub fn has_dev_tips(&self) -> bool {
+        self.dev_fee_enabled || self.dev_tip_percent > 0.0 || self.dev_tip_fixed_sol > 0.0
+    }
 }
 
 #[cfg(test)]

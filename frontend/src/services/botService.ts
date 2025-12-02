@@ -5,8 +5,89 @@ import { API_BASE_URL } from '../config'
 const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
                  window.location.hostname.includes('github.io')
 
-let wasmBot: any = null
+// TypeScript interface for WASM bot methods
+interface WasmBot {
+  get_settings(): string
+  update_settings(settings: string): void
+  start(): void
+  stop(): void
+  is_running(): boolean
+  get_mode(): string
+  set_mode(mode: string): void
+  get_logs(): string
+  get_holdings(): string
+  test_rpc_connection(): Promise<string>
+  test_ws_connection(): Promise<string>
+  save_to_storage(): void
+  load_from_storage(): void
+}
+
+let wasmBot: WasmBot | null = null
 let wasmInitialized = false
+
+// Check if an error is a critical WASM error that requires recovery
+function isCriticalWasmError(err: unknown, errorMsg: string): boolean {
+  // Check for null or undefined errors (using == to catch both)
+  if (err === null || err === undefined) return true
+  
+  // Check for WASM panic indicators in error message
+  return (
+    errorMsg.includes('unreachable') || 
+    errorMsg.includes('undefined')
+  )
+}
+
+// Validate bot settings structure
+function validateSettings(settings: unknown): boolean {
+  if (!settings || typeof settings !== 'object') return false
+  
+  const s = settings as Record<string, unknown>
+  
+  // Validate required array fields
+  const hasValidArrays = (
+    Array.isArray(s.solana_ws_urls) &&
+    s.solana_ws_urls.length > 0 &&
+    Array.isArray(s.solana_rpc_urls) &&
+    s.solana_rpc_urls.length > 0
+  )
+  
+  // Validate required string fields
+  const hasValidStrings = (
+    typeof s.pump_fun_program === 'string' &&
+    s.pump_fun_program.length > 0 &&
+    typeof s.metadata_program === 'string' &&
+    s.metadata_program.length > 0
+  )
+  
+  return hasValidArrays && hasValidStrings
+}
+
+// Load default settings from static JSON file
+async function loadDefaultSettings() {
+  try {
+    // Determine the base path for the static file
+    // In production (GitHub Pages), this needs to include the repo name
+    const basePath = import.meta.env.BASE_URL || '/'
+    const response = await fetch(`${basePath}bot-settings.json`)
+    if (!response.ok) {
+      console.warn('Could not load default settings from bot-settings.json')
+      return null
+    }
+    const settings = await response.json()
+    
+    // Validate loaded settings before returning
+    if (!validateSettings(settings)) {
+      console.warn('Loaded settings from bot-settings.json are invalid')
+      return null
+    }
+    
+    console.log('✓ Loaded default settings from bot-settings.json')
+    return settings
+  } catch (error) {
+    console.warn('Failed to load default settings:', error)
+    return null
+  }
+}
 
 // Initialize WASM if needed
 async function initWasm() {
@@ -24,8 +105,36 @@ async function initWasm() {
     // Note: wasm.init() is called automatically by #[wasm_bindgen(start)]
     // during wasm.default(), so we don't need to call it explicitly
     
-    // Create bot instance
+    // Create bot instance (this will load from localStorage if available)
     wasmBot = new wasm.SolBeastBot()
+    
+    // Check if settings are present and valid, if not, try to load from static file
+    try {
+      const currentSettings = wasmBot.get_settings()
+      const settings = JSON.parse(currentSettings)
+      
+      // Validate settings structure
+      if (!validateSettings(settings)) {
+        console.log('Settings appear invalid or uninitialized, loading defaults...')
+        const defaultSettings = await loadDefaultSettings()
+        if (defaultSettings) {
+          wasmBot.update_settings(JSON.stringify(defaultSettings))
+          console.log('✓ Applied default settings')
+        }
+      }
+    } catch (settingsError) {
+      console.warn('Could not verify settings, attempting to load defaults:', settingsError)
+      const defaultSettings = await loadDefaultSettings()
+      if (defaultSettings) {
+        try {
+          wasmBot.update_settings(JSON.stringify(defaultSettings))
+          console.log('✓ Applied default settings after error')
+        } catch (updateError) {
+          console.error('Failed to apply default settings:', updateError)
+        }
+      }
+    }
+    
     wasmInitialized = true
     console.log('✓ WASM bot initialized successfully')
     return true
@@ -75,7 +184,26 @@ export const botService = {
         } catch (err) {
           console.error('Failed to get WASM settings:', err)
           const errorMsg = err instanceof Error ? err.message : String(err)
-          throw new Error(`Failed to get bot settings: ${errorMsg}`)
+          
+          // Attempt recovery for critical errors (WASM panics, uninitialized state, etc.)
+          if (isCriticalWasmError(err, errorMsg)) {
+            console.log('Critical error detected, attempting recovery by loading defaults...')
+            const defaultSettings = await loadDefaultSettings()
+            if (defaultSettings) {
+              try {
+                wasmBot.update_settings(JSON.stringify(defaultSettings))
+                settingsJson = wasmBot.get_settings()
+                console.log('✓ Successfully recovered with default settings')
+              } catch (recoveryError) {
+                const recoveryMsg = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+                throw new Error(`Failed to recover bot settings: ${recoveryMsg}. Original error: ${errorMsg}`)
+              }
+            } else {
+              throw new Error(`Failed to get bot settings and could not load defaults. Please refresh the page. Error: ${errorMsg}`)
+            }
+          } else {
+            throw new Error(`Failed to get bot settings: ${errorMsg}`)
+          }
         }
         
         // Parse and validate settings
@@ -86,12 +214,9 @@ export const botService = {
           throw new Error(`Failed to parse bot settings: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
         }
         
-        // Validate required settings
-        if (!settings.solana_ws_urls || settings.solana_ws_urls.length === 0) {
-          throw new Error('No WebSocket URL configured. Please configure settings before starting the bot.')
-        }
-        if (!settings.solana_rpc_urls || settings.solana_rpc_urls.length === 0) {
-          throw new Error('No RPC URL configured. Please configure settings before starting the bot.')
+        // Validate required settings using helper function
+        if (!validateSettings(settings)) {
+          throw new Error('Invalid bot settings. Please configure WebSocket and RPC URLs before starting the bot.')
         }
         
         // Start the bot

@@ -11,14 +11,16 @@ export default function ConfigurationPanel() {
   if (!settings) return <div>Loading settings...</div>
 
   const isBotStopped = runningState === 'stopped'
+  const isBotRunning = runningState === 'running'
 
   const handleSave = async () => {
-    if (!isBotStopped) {
-      return // Don't save if bot is running
-    }
     await saveSettings(settings)
-    setSuccessMessage('Settings saved successfully!')
-    setTimeout(() => setSuccessMessage(''), 3000)
+    if (isBotRunning) {
+      setSuccessMessage('Settings updated! Restart bot for WebSocket/Program changes.')
+    } else {
+      setSuccessMessage('Settings saved successfully!')
+    }
+    setTimeout(() => setSuccessMessage(''), 5000)
   }
 
   const handleChange = <K extends keyof typeof settings>(key: K, value: any) => {
@@ -97,12 +99,16 @@ export default function ConfigurationPanel() {
 
   return (
     <div className="space-y-8">
-      {!isBotStopped && (
+      {isBotRunning && (
         <div className="alert-warning rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
           <AlertCircle size={24} className="flex-shrink-0 mt-0.5 animate-pulse" />
           <div>
             <p className="font-bold uppercase tracking-widest text-sm mb-1">BOT IS RUNNING</p>
-            <p className="text-sm opacity-90">Stop the bot before saving configuration changes</p>
+            <p className="text-sm opacity-90">
+              You can update settings while running. Trading parameters (TP, SL, buy amount, etc.) apply to future trades.
+              <br />
+              <span className="font-semibold">⚠️ WebSocket URL and Program ID changes require bot restart.</span>
+            </p>
           </div>
         </div>
       )}
@@ -207,12 +213,11 @@ export default function ConfigurationPanel() {
       }}>
         <button
           onClick={handleSave}
-          disabled={saving || !isBotStopped}
+          disabled={saving}
           className="flex items-center gap-2 px-6 py-3 rounded-xl disabled:opacity-50 transition-all hover:scale-105"
-          title={!isBotStopped ? 'Stop the bot before saving settings' : ''}
         >
           <Save size={18} />
-          {saving ? 'SAVING...' : isBotStopped ? 'SAVE SETTINGS' : 'STOP BOT TO SAVE'}
+          {saving ? 'SAVING...' : 'SAVE SETTINGS'}
         </button>
       </div>
     </div>

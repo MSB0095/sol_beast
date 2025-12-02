@@ -62,10 +62,30 @@ pub struct LogEntry {
 impl SolBeastBot {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
+        // Settings loading hierarchy for WASM deployment:
+        // 1. Try localStorage (user's saved settings from previous session)
+        // 2. Fall back to built-in defaults if localStorage is empty or corrupted
+        // Note: The frontend will also try loading from static bot-settings.json
+        // if it detects settings are invalid after bot initialization.
+        let settings = match sol_beast_core::wasm::load_settings::<BotSettings>() {
+            Ok(Some(saved_settings)) => {
+                info!("Loaded settings from localStorage");
+                saved_settings
+            },
+            Ok(None) => {
+                info!("No saved settings found, using defaults");
+                BotSettings::default()
+            },
+            Err(e) => {
+                error!("Failed to load settings from localStorage: {:?}, using defaults", e);
+                BotSettings::default()
+            }
+        };
+        
         let state = BotState {
             running: false,
             mode: "dry-run".to_string(),
-            settings: BotSettings::default(),
+            settings,
             holdings: Vec::new(),
             logs: Vec::new(),
             monitor: None,
@@ -232,32 +252,83 @@ impl SolBeastBot {
         }
     }
     
-    /// Update settings (only when stopped)
+    /// Update settings
+    /// If bot is running and critical settings change (WebSocket URL, program ID),
+    /// the bot will need to be restarted manually for changes to take effect.
     #[wasm_bindgen]
     pub fn update_settings(&self, settings_json: &str) -> Result<(), JsValue> {
-        let state = match self.state.lock() {
+        // Parse settings first (outside any lock)
+        let settings: BotSettings = serde_json::from_str(settings_json)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
+        
+        // Acquire lock once and hold it to prevent race conditions
+        let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 info!("Mutex was poisoned in update_settings, recovering...");
                 poisoned.into_inner()
             }
         };
-        if state.running {
-            return Err(JsValue::from_str("Cannot update settings while bot is running"));
-        }
-        drop(state);
         
-        let settings: BotSettings = serde_json::from_str(settings_json)
-            .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
+        // Check if bot is running and if critical settings have changed
+        let is_running = state.running;
+        let needs_restart = if is_running {
+            let old_ws_url = state.settings.solana_ws_urls.first();
+            let new_ws_url = settings.solana_ws_urls.first();
+            let ws_changed = old_ws_url != new_ws_url;
+            
+            let program_changed = state.settings.pump_fun_program != settings.pump_fun_program;
+            
+            ws_changed || program_changed
+        } else {
+            false
+        };
         
+        // Update in-memory state first
+        state.settings = settings.clone();
+        drop(state); // Release lock before localStorage operation
+        
+        // Save to localStorage after successful state update
+        sol_beast_core::wasm::save_settings(&settings)
+            .map_err(|e| {
+                error!("Failed to save settings to localStorage: {:?}", e);
+                JsValue::from_str(&format!("Settings updated but failed to save to localStorage: {:?}", e))
+            })?;
+        
+        // Re-acquire lock to add log entries
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                info!("Mutex was poisoned in update_settings (second acquisition), recovering...");
+                info!("Mutex was poisoned in update_settings (log entry), recovering...");
                 poisoned.into_inner()
             }
         };
-        state.settings = settings;
+        
+        if is_running && needs_restart {
+            info!("Settings updated - bot restart required for WebSocket/program changes to take effect");
+            // Add a log entry to notify user
+            let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                .unwrap_or_else(|| "unknown".to_string());
+            state.logs.push(LogEntry {
+                timestamp,
+                level: "warn".to_string(),
+                message: "⚠️ Settings updated".to_string(),
+                details: Some("WebSocket URL or program ID changed. Please restart the bot for changes to take effect.".to_string()),
+            });
+        } else if is_running {
+            info!("Settings updated (non-critical changes, no restart needed)");
+            let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                .unwrap_or_else(|| "unknown".to_string());
+            state.logs.push(LogEntry {
+                timestamp,
+                level: "info".to_string(),
+                message: "✓ Settings updated".to_string(),
+                details: Some("Trading parameters updated. Changes will apply to future trades.".to_string()),
+            });
+        } else {
+            info!("Settings updated and saved to localStorage");
+        }
+        
         Ok(())
     }
     

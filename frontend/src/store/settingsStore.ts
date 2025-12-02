@@ -140,12 +140,18 @@ export const useSettingsStore = create<SettingsStore>((set) => ({
   saveSettings: async (updates) => {
     set({ saving: true, error: null })
     try {
+      // Merge updates with current settings to get full settings object
+      const currentSettings = useSettingsStore.getState().settings || defaultSettings
+      const fullSettings = { ...currentSettings, ...updates }
+      
       // Use botService which handles WASM/REST mode
-      await botService.updateSettings(updates)
-      set((state) => ({
-        settings: state.settings ? { ...state.settings, ...updates } : defaultSettings,
+      // For WASM, we need to pass the full settings object
+      await botService.updateSettings(fullSettings)
+      
+      set({
+        settings: fullSettings,
         saving: false,
-      }))
+      })
     } catch (err) {
       set({ 
         saving: false,

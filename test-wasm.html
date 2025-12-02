@@ -144,10 +144,12 @@
         let wasmModule = null;
         let pollInterval = null;
 
-        // Detect WASM module path based on environment
-        const WASM_PATH = window.location.pathname.includes('/sol_beast/') 
-            ? '/sol_beast/frontend/src/wasm/sol_beast_wasm.js'
-            : './frontend/src/wasm/sol_beast_wasm.js';
+        // Detect WASM module path - can be overridden via ?wasmPath=<path> query parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const WASM_PATH = urlParams.get('wasmPath') || 
+            (window.location.pathname.includes('/sol_beast/') 
+                ? '/sol_beast/frontend/src/wasm/sol_beast_wasm.js'
+                : './frontend/src/wasm/sol_beast_wasm.js');
 
         window.initWasm = async function() {
             try {
@@ -384,9 +386,11 @@
             entry.innerHTML = `<strong>[${timestamp}] ${level.toUpperCase()}</strong>: ${message}${details ? '<br>' + details : ''}`;
             logsDiv.insertBefore(entry, logsDiv.firstChild);
             
-            // Keep only last 50 entries
-            while (logsDiv.children.length > 50) {
-                logsDiv.removeChild(logsDiv.lastChild);
+            // Keep only last 50 entries - efficiently handle excess
+            if (logsDiv.children.length > 50) {
+                // Remove all excess entries at once
+                const toRemove = Array.from(logsDiv.children).slice(50);
+                toRemove.forEach(child => child.remove());
             }
         }
 
@@ -399,7 +403,9 @@
         }
 
         window.clearLogs = function() {
-            document.getElementById('logs').innerHTML = '<div style="color: #666;">Logs cleared</div>';
+            const logsDiv = document.getElementById('logs');
+            logsDiv.replaceChildren(); // Efficient way to clear all children
+            logsDiv.innerHTML = '<div style="color: #666;">Logs cleared</div>';
         };
 
         // Auto-initialize on load

@@ -79,9 +79,11 @@ export const botService = {
           wasmBot.start()
         } catch (err) {
           console.error('Failed to start WASM bot:', err)
-          // Pass through the error message from WASM - it's already detailed
-          const errMsg = err instanceof Error ? err.message : String(err)
-          throw new Error(errMsg)
+          // Re-throw to preserve error information
+          if (err instanceof Error) {
+            throw err
+          }
+          throw new Error(String(err))
         }
         return { success: true }
       } catch (error) {

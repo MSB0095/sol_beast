@@ -252,23 +252,41 @@ impl SolBeastBot {
         }
     }
     
-    /// Update settings (only when stopped)
+    /// Update settings
+    /// If bot is running and critical settings change (WebSocket URL, program ID),
+    /// the bot will need to be restarted manually for changes to take effect.
     #[wasm_bindgen]
     pub fn update_settings(&self, settings_json: &str) -> Result<(), JsValue> {
-        let state = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                info!("Mutex was poisoned in update_settings, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        if state.running {
-            return Err(JsValue::from_str("Cannot update settings while bot is running"));
-        }
-        drop(state);
-        
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
+        
+        // Check if bot is running and if critical settings have changed
+        let (is_running, needs_restart) = {
+            let state = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    info!("Mutex was poisoned in update_settings, recovering...");
+                    poisoned.into_inner()
+                }
+            };
+            
+            let is_running = state.running;
+            
+            // Check if critical settings that require restart have changed
+            let needs_restart = if is_running {
+                let old_ws_url = state.settings.solana_ws_urls.first();
+                let new_ws_url = settings.solana_ws_urls.first();
+                let ws_changed = old_ws_url != new_ws_url;
+                
+                let program_changed = state.settings.pump_fun_program != settings.pump_fun_program;
+                
+                ws_changed || program_changed
+            } else {
+                false
+            };
+            
+            (is_running, needs_restart)
+        };
         
         // Save to localStorage first (while we still own settings)
         sol_beast_core::wasm::save_settings(&settings)
@@ -286,7 +304,31 @@ impl SolBeastBot {
         };
         state.settings = settings;
         
-        info!("Settings updated and saved to localStorage");
+        if is_running && needs_restart {
+            info!("Settings updated - bot restart required for WebSocket/program changes to take effect");
+            // Add a log entry to notify user
+            let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                .unwrap_or_else(|| "unknown".to_string());
+            state.logs.push(LogEntry {
+                timestamp,
+                level: "warn".to_string(),
+                message: "⚠️ Settings updated".to_string(),
+                details: Some("WebSocket URL or program ID changed. Please restart the bot for changes to take effect.".to_string()),
+            });
+        } else if is_running {
+            info!("Settings updated (non-critical changes, no restart needed)");
+            let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                .unwrap_or_else(|| "unknown".to_string());
+            state.logs.push(LogEntry {
+                timestamp,
+                level: "info".to_string(),
+                message: "✓ Settings updated".to_string(),
+                details: Some("Trading parameters updated. Changes will apply to future trades.".to_string()),
+            });
+        } else {
+            info!("Settings updated and saved to localStorage");
+        }
+        
         Ok(())
     }
     

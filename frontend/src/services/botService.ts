@@ -51,7 +51,14 @@ export const botService = {
         // Ensure settings are synced before starting
         // Get current settings from WASM bot
         const settingsJson = wasmBot.get_settings()
-        const settings = JSON.parse(settingsJson)
+        
+        // Parse and validate settings
+        let settings
+        try {
+          settings = JSON.parse(settingsJson)
+        } catch (parseError) {
+          throw new Error(`Failed to parse bot settings: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
+        }
         
         // Validate required settings
         if (!settings.solana_ws_urls || settings.solana_ws_urls.length === 0) {

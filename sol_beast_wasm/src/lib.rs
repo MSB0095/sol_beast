@@ -113,7 +113,8 @@ impl SolBeastBot {
                 });
                 // Keep only last 100 logs
                 if s.logs.len() > 100 {
-                    s.logs.drain(0..1);
+                    let excess = s.logs.len() - 100;
+                    s.logs.drain(0..excess);
                 }
             }
         }));

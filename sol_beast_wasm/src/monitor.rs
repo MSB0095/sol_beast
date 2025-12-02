@@ -121,7 +121,8 @@ impl Monitor {
                                 if let (Some(logs), Some(sig)) = (logs, signature) {
                                     // Check if we've seen this signature before
                                     let is_new = {
-                                        let mut seen = seen_sigs.lock().unwrap();
+                                        let mut seen = seen_sigs.lock()
+                                            .expect("Failed to lock seen signatures");
                                         seen.insert(sig.to_string())
                                     };
 
@@ -215,7 +216,9 @@ impl Monitor {
         self.on_close = None;
 
         // Clear seen signatures
-        self.seen_signatures.lock().unwrap().clear();
+        self.seen_signatures.lock()
+            .expect("Failed to lock seen signatures for cleanup")
+            .clear();
 
         Ok(())
     }

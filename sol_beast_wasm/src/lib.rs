@@ -285,7 +285,6 @@ impl SolBeastBot {
             }
         };
         state.settings = settings;
-        // State is automatically dropped here
         
         info!("Settings updated and saved to localStorage");
         Ok(())

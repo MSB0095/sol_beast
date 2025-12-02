@@ -10,8 +10,8 @@ let wasmInitialized = false
 
 // Check if an error is a critical WASM error that requires recovery
 function isCriticalWasmError(err: unknown, errorMsg: string): boolean {
-  // Check for null/undefined errors
-  if (err == null) return true
+  // Check for null or undefined errors (using == to catch both)
+  if (err === null || err === undefined) return true
   
   // Check for WASM panic indicators in error message
   return (
@@ -26,12 +26,23 @@ function validateSettings(settings: unknown): boolean {
   
   const s = settings as Record<string, unknown>
   
-  return (
+  // Validate required array fields
+  const hasValidArrays = (
     Array.isArray(s.solana_ws_urls) &&
     s.solana_ws_urls.length > 0 &&
     Array.isArray(s.solana_rpc_urls) &&
     s.solana_rpc_urls.length > 0
   )
+  
+  // Validate required string fields
+  const hasValidStrings = (
+    typeof s.pump_fun_program === 'string' &&
+    s.pump_fun_program.length > 0 &&
+    typeof s.metadata_program === 'string' &&
+    s.metadata_program.length > 0
+  )
+  
+  return hasValidArrays && hasValidStrings
 }
 
 // Load default settings from static JSON file

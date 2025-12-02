@@ -120,7 +120,7 @@ impl SolBeastBot {
     /// Start the bot
     #[wasm_bindgen]
     pub fn start(&self) -> Result<(), JsValue> {
-        let mut state = match self.state.lock() {
+        let state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 info!("Mutex was poisoned in start, recovering...");
@@ -142,7 +142,7 @@ impl SolBeastBot {
         
         // Create logging callback that adds logs to state
         let state_for_logs = self.state.clone();
-        let log_callback: Arc<dyn Fn(String, String, String)> = Arc::new(move |level: String, message: String, details: String| {
+        let log_callback = Arc::new(move |level: String, message: String, details: String| {
             if let Ok(mut s) = state_for_logs.lock() {
                 let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
                     .unwrap_or_else(|| "unknown".to_string());

@@ -83,7 +83,7 @@ impl WasmWebSocket {
         
         self.subscriptions
             .lock()
-            .unwrap()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock subscriptions: {:?}", e)))?
             .insert(sub_id, pubkey.to_string());
 
         Ok(sub_id)
@@ -116,7 +116,10 @@ impl WasmWebSocket {
 
         self.send(&request.to_string())?;
         
-        self.subscriptions.lock().unwrap().remove(&sub_id);
+        self.subscriptions
+            .lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock subscriptions: {:?}", e)))?
+            .remove(&sub_id);
         
         Ok(())
     }

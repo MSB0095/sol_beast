@@ -48,6 +48,10 @@ pub struct BotSettings {
     pub max_sol_per_token: f64,
     pub min_liquidity_sol: f64,
     pub max_liquidity_sol: f64,
+    #[serde(default = "default_dev_tip_percent")]
+    pub dev_tip_percent: f64,
+    #[serde(default = "default_dev_tip_fixed_sol")]
+    pub dev_tip_fixed_sol: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -492,6 +496,11 @@ impl Default for BotSettings {
             max_sol_per_token: 0.002,
             min_liquidity_sol: 0.0,
             max_liquidity_sol: 15.0,
+            dev_tip_percent: 2.0,
+            dev_tip_fixed_sol: 0.0,
         }
     }
 }
+
+fn default_dev_tip_percent() -> f64 { 2.0 }
+fn default_dev_tip_fixed_sol() -> f64 { 0.0 }

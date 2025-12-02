@@ -15,7 +15,7 @@ This project is configured to deploy the frontend to GitHub Pages automatically.
 
 3. **Automatic Deployment**:
    - Every push to `main` branch triggers automatic deployment
-   - Pull request merges to `main` branch trigger automatic deployment
+   - Every commit and merge to `main` branch triggers automatic deployment
    - Manually trigger via Actions tab → "Deploy to GitHub Pages" → "Run workflow"
 
 ### Local Development

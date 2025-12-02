@@ -55,9 +55,15 @@ This file contains the default configuration for the bot on GitHub Pages. You ca
 
 1. **No Server Required**: The bot does not need any backend server or API
 2. **Browser-Only**: All bot logic runs in the user's browser
-3. **Public RPC**: Uses public Solana RPC endpoints (you can configure premium RPC services)
+3. **Public RPC Limitations**: ⚠️ The default public Solana RPC endpoints (`https://api.mainnet-beta.solana.com`) have **rate limits** and may provide **poor performance** for trading bots. For production use, **strongly recommended** to use premium RPC providers:
+   - QuickNode: https://www.quicknode.com/
+   - Alchemy: https://www.alchemy.com/
+   - Helius: https://www.helius.dev/
+   - Triton: https://triton.one/
+   - Chainstack: https://chainstack.com/
+   - For testing: Consider using devnet endpoints instead of mainnet
 4. **Dry-Run by Default**: Bot starts in dry-run mode for safety
-5. **Private Keys**: Private keys (if provided) stay in the browser's localStorage only
+5. **Private Keys**: See Security Considerations section for important warnings
 
 ### Deployment
 
@@ -96,10 +102,11 @@ Make sure:
 
 ### Security Considerations
 
-1. **Private Keys**: If you enter a private key, it's stored only in your browser's localStorage
-2. **No Server Transmission**: Private keys are never sent to any server
-3. **HTTPS**: GitHub Pages uses HTTPS, ensuring encrypted connections
-4. **Dry-Run Mode**: Always test in dry-run mode before using real funds
+1. **Private Keys**: ⚠️ **WARNING**: Storing private keys in browser localStorage exposes them in cleartext to any JavaScript running on the page (e.g., via XSS or compromised third-party scripts). **We strongly recommend using an external wallet integration** (Phantom, Solflare, etc.) instead of storing private keys. If you must persist a private key, encrypt it client-side using the Web Crypto API with a user-provided passphrase and non-extractable keys, and enforce a strict Content Security Policy (CSP).
+2. **No Server Transmission**: Private keys (if used) are never sent to any server
+3. **Local Transaction Signing**: Private keys are used locally in your browser to sign transactions. Signed transactions are then submitted directly to the Solana network; your private key never leaves your device.
+4. **HTTPS**: GitHub Pages uses HTTPS, ensuring encrypted connections
+5. **Dry-Run Mode**: Always test in dry-run mode before using real funds
 
 ### Customizing RPC Endpoints
 

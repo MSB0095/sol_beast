@@ -237,7 +237,7 @@ The solution is fully compatible with GitHub Pages deployment. No changes are ne
 ## Security
 
 - Settings are loaded from static JSON (safe)
-- Private keys (if any) stay in browser localStorage only
+- ⚠️ **Private keys should NOT be stored in browser localStorage** as they are exposed in cleartext to any JavaScript on the page. Instead, use external wallet integration (Phantom, Solflare, etc.) or encrypt keys client-side with Web Crypto API if persistence is required.
 - No server transmission of sensitive data
 - HTTPS enforced by GitHub Pages
 

@@ -5,7 +5,24 @@ import { API_BASE_URL } from '../config'
 const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
                  window.location.hostname.includes('github.io')
 
-let wasmBot: any = null
+// TypeScript interface for WASM bot methods
+interface WasmBot {
+  get_settings(): string
+  update_settings(settings: string): void
+  start(): void
+  stop(): void
+  is_running(): boolean
+  get_mode(): string
+  set_mode(mode: string): void
+  get_logs(): string
+  get_holdings(): string
+  test_rpc_connection(): Promise<string>
+  test_ws_connection(): Promise<string>
+  save_to_storage(): void
+  load_from_storage(): void
+}
+
+let wasmBot: WasmBot | null = null
 let wasmInitialized = false
 
 // Check if an error is a critical WASM error that requires recovery
@@ -57,6 +74,13 @@ async function loadDefaultSettings() {
       return null
     }
     const settings = await response.json()
+    
+    // Validate loaded settings before returning
+    if (!validateSettings(settings)) {
+      console.warn('Loaded settings from bot-settings.json are invalid')
+      return null
+    }
+    
     console.log('✓ Loaded default settings from bot-settings.json')
     return settings
   } catch (error) {
@@ -171,7 +195,8 @@ export const botService = {
                 settingsJson = wasmBot.get_settings()
                 console.log('✓ Successfully recovered with default settings')
               } catch (recoveryError) {
-                throw new Error(`Failed to recover bot settings. Please refresh the page and try again. Error: ${errorMsg}`)
+                const recoveryMsg = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+                throw new Error(`Failed to recover bot settings: ${recoveryMsg}. Original error: ${errorMsg}`)
               }
             } else {
               throw new Error(`Failed to get bot settings and could not load defaults. Please refresh the page. Error: ${errorMsg}`)

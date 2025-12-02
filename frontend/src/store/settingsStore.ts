@@ -80,8 +80,8 @@ interface SettingsStore {
 }
 
 const defaultSettings: Settings = {
-  solana_ws_urls: ['wss://solana-mainnet.core.chainstack.com/'],
-  solana_rpc_urls: ['https://solana-mainnet.core.chainstack.com/'],
+  solana_ws_urls: ['wss://api.mainnet-beta.solana.com/'],
+  solana_rpc_urls: ['https://api.mainnet-beta.solana.com/'],
   pump_fun_program: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
   metadata_program: 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s',
   tp_percent: 100,

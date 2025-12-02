@@ -299,8 +299,8 @@ impl SolBeastBot {
 impl Default for BotSettings {
     fn default() -> Self {
         Self {
-            solana_ws_urls: vec!["wss://solana-mainnet.core.chainstack.com/".to_string()],
-            solana_rpc_urls: vec!["https://solana-mainnet.core.chainstack.com/".to_string()],
+            solana_ws_urls: vec!["wss://api.mainnet-beta.solana.com/".to_string()],
+            solana_rpc_urls: vec!["https://api.mainnet-beta.solana.com/".to_string()],
             pump_fun_program: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".to_string(),
             metadata_program: "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s".to_string(),
             tp_percent: 100.0,

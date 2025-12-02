@@ -5,6 +5,8 @@ const fs = require('fs');
 const CopyPlugin = require('copy-webpack-plugin');
 
 const isProduction = process.env.NODE_ENV === 'production';
+// Allow base path to be configured via environment variable for easy deployment to different repositories
+const BASE_PATH = process.env.BASE_PATH || '/sol_beast/';
 
 module.exports = {
   mode: isProduction ? 'production' : 'development',
@@ -13,7 +15,7 @@ module.exports = {
     path: path.resolve(__dirname, 'dist'),
     filename: 'assets/[name]-[contenthash].js',
     chunkFilename: 'assets/[name]-[contenthash].js',
-    publicPath: isProduction ? '/sol_beast/' : '/',
+    publicPath: isProduction ? BASE_PATH : '/',
     clean: true,
     module: true,
     environment: {
@@ -78,7 +80,7 @@ module.exports = {
       'import.meta.env.MODE': JSON.stringify(isProduction ? 'production' : 'development'),
       'import.meta.env.DEV': JSON.stringify(!isProduction),
       'import.meta.env.PROD': JSON.stringify(isProduction),
-      'import.meta.env.BASE_URL': JSON.stringify(isProduction ? '/sol_beast/' : '/'),
+      'import.meta.env.BASE_URL': JSON.stringify(isProduction ? BASE_PATH : '/'),
       global: 'globalThis',
     }),
     new webpack.NormalModuleReplacementPlugin(/^process\/browser$/, 'process/browser.js'),

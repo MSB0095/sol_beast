@@ -48,7 +48,7 @@ The application automatically detects WASM mode in two ways:
 ```typescript
 // In frontend/src/services/botService.ts
 const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
-                 window.location.hostname.includes('github.io')
+                 window.location.hostname.endsWith('.github.io')
 ```
 
 1. **Environment Variable**: `VITE_USE_WASM=true` forces WASM mode
@@ -60,19 +60,33 @@ const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' ||
 
 #### 1. Repository Name in Base Path
 
-The base path must match your GitHub repository name:
+The base path must match your GitHub repository name. Both webpack and vite configs support the `BASE_PATH` environment variable:
 
 **Webpack Config** (`frontend/webpack.config.cjs`):
 ```javascript
-publicPath: isProduction ? '/sol_beast/' : '/',
+const BASE_PATH = process.env.BASE_PATH || '/sol_beast/'
+// ...
+publicPath: isProduction ? BASE_PATH : '/',
 ```
 
 **Vite Config** (`frontend/vite.config.ts`):
 ```javascript
-base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/',
+const BASE_PATH = process.env.BASE_PATH || '/sol_beast/'
+// ...
+base: process.env.NODE_ENV === 'production' ? BASE_PATH : '/',
 ```
 
-⚠️ **Important**: Replace `/sol_beast/` with `/your-repo-name/` if you fork this project.
+**To deploy to a different repository**, set the `BASE_PATH` environment variable:
+```bash
+# For a different repository name
+BASE_PATH=/my-repo/ npm run build:frontend-webpack
+
+# Or add to GitHub Actions workflow
+env:
+  BASE_PATH: /my-repo/
+```
+
+Alternatively, edit the default value in both config files to match your repository name.
 
 #### 2. GitHub Actions Workflow
 

@@ -1,9 +1,9 @@
 // Dual-mode bot service: WASM or REST API
 import { API_BASE_URL } from '../config'
 
-// Feature detection
+// Feature detection - automatically enable WASM mode on GitHub Pages
 const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
-                 window.location.hostname.includes('github.io')
+                 window.location.hostname.endsWith('.github.io')
 
 // TypeScript interface for WASM bot methods
 interface WasmBot {

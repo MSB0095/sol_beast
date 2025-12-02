@@ -49,4 +49,4 @@ features = ["wasm_js"]
 wasm-bindgen-test = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext"]
+wasm-opt = false

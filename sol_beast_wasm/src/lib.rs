@@ -105,8 +105,10 @@ impl SolBeastBot {
         let state_for_logs = self.state.clone();
         let log_callback = Arc::new(Mutex::new(move |level: String, message: String, details: String| {
             if let Ok(mut s) = state_for_logs.lock() {
+                let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                    .unwrap_or_else(|| "unknown".to_string());
                 s.logs.push(LogEntry {
-                    timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
+                    timestamp,
                     level,
                     message,
                     details: Some(details),
@@ -127,8 +129,10 @@ impl SolBeastBot {
         state.monitor = Some(monitor);
         state.running = true;
         
+        let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+            .unwrap_or_else(|| "unknown".to_string());
         state.logs.push(LogEntry {
-            timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
+            timestamp,
             level: "info".to_string(),
             message: "✓ Bot started successfully".to_string(),
             details: Some(format!("Mode: {}\nWebSocket: {}\nProgram: {}\n\nThe bot is now monitoring for new pump.fun tokens. Logs will appear as transactions are detected.", mode, ws_url, pump_fun_program)),
@@ -153,8 +157,10 @@ impl SolBeastBot {
         }
         
         state.running = false;
+        let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+            .unwrap_or_else(|| "unknown".to_string());
         state.logs.push(LogEntry {
-            timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
+            timestamp,
             level: "info".to_string(),
             message: "✓ Bot stopped successfully".to_string(),
             details: Some("Monitoring stopped, WebSocket closed, resources cleaned up".to_string()),

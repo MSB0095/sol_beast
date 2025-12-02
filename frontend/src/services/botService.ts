@@ -48,6 +48,27 @@ export const botService = {
   async start() {
     if (this.isWasmMode()) {
       try {
+        // Ensure settings are synced before starting
+        // Get current settings from WASM bot
+        const settingsJson = wasmBot.get_settings()
+        
+        // Parse and validate settings
+        let settings
+        try {
+          settings = JSON.parse(settingsJson)
+        } catch (parseError) {
+          throw new Error(`Failed to parse bot settings: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
+        }
+        
+        // Validate required settings
+        if (!settings.solana_ws_urls || settings.solana_ws_urls.length === 0) {
+          throw new Error('No WebSocket URL configured. Please configure settings before starting the bot.')
+        }
+        if (!settings.solana_rpc_urls || settings.solana_rpc_urls.length === 0) {
+          throw new Error('No RPC URL configured. Please configure settings before starting the bot.')
+        }
+        
+        // Start the bot
         wasmBot.start()
         return { success: true }
       } catch (error) {

@@ -278,7 +278,7 @@ impl SolBeastBot {
             }
         };
         state.settings = settings.clone();
-        drop(state);
+        // State is automatically dropped here
         
         // Automatically save to localStorage
         sol_beast_core::wasm::save_settings(&settings)

@@ -8,6 +8,29 @@ const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' ||
 let wasmBot: any = null
 let wasmInitialized = false
 
+// Check if an error is a critical WASM error that requires recovery
+function isCriticalWasmError(err: any, errorMsg: string): boolean {
+  return (
+    errorMsg.includes('unreachable') || 
+    errorMsg.includes('undefined') ||
+    errorMsg.includes('null') ||
+    err === null ||
+    err === undefined
+  )
+}
+
+// Validate bot settings structure
+function validateSettings(settings: any): boolean {
+  return (
+    settings &&
+    typeof settings === 'object' &&
+    Array.isArray(settings.solana_ws_urls) &&
+    settings.solana_ws_urls.length > 0 &&
+    Array.isArray(settings.solana_rpc_urls) &&
+    settings.solana_rpc_urls.length > 0
+  )
+}
+
 // Load default settings from static JSON file
 async function loadDefaultSettings() {
   try {
@@ -47,14 +70,14 @@ async function initWasm() {
     // Create bot instance (this will load from localStorage if available)
     wasmBot = new wasm.SolBeastBot()
     
-    // Check if settings are present, if not, try to load from static file
+    // Check if settings are present and valid, if not, try to load from static file
     try {
       const currentSettings = wasmBot.get_settings()
       const settings = JSON.parse(currentSettings)
       
-      // If settings look uninitialized or empty, load defaults
-      if (!settings.solana_ws_urls || settings.solana_ws_urls.length === 0) {
-        console.log('Settings appear uninitialized, loading defaults...')
+      // Validate settings structure
+      if (!validateSettings(settings)) {
+        console.log('Settings appear invalid or uninitialized, loading defaults...')
         const defaultSettings = await loadDefaultSettings()
         if (defaultSettings) {
           wasmBot.update_settings(JSON.stringify(defaultSettings))
@@ -124,17 +147,8 @@ export const botService = {
           console.error('Failed to get WASM settings:', err)
           const errorMsg = err instanceof Error ? err.message : String(err)
           
-          // Attempt recovery for critical errors
-          // These typically indicate WASM panics or uninitialized state
-          // Common error indicators: "unreachable" (WASM panic), "undefined" (JS interop issue)
-          const isCriticalError = 
-            errorMsg.includes('unreachable') || 
-            errorMsg.includes('undefined') ||
-            errorMsg.includes('null') ||
-            err === null ||
-            err === undefined
-          
-          if (isCriticalError) {
+          // Attempt recovery for critical errors (WASM panics, uninitialized state, etc.)
+          if (isCriticalWasmError(err, errorMsg)) {
             console.log('Critical error detected, attempting recovery by loading defaults...')
             const defaultSettings = await loadDefaultSettings()
             if (defaultSettings) {
@@ -161,12 +175,9 @@ export const botService = {
           throw new Error(`Failed to parse bot settings: ${parseError instanceof Error ? parseError.message : String(parseError)}`)
         }
         
-        // Validate required settings
-        if (!settings.solana_ws_urls || settings.solana_ws_urls.length === 0) {
-          throw new Error('No WebSocket URL configured. Please configure settings before starting the bot.')
-        }
-        if (!settings.solana_rpc_urls || settings.solana_rpc_urls.length === 0) {
-          throw new Error('No RPC URL configured. Please configure settings before starting the bot.')
+        // Validate required settings using helper function
+        if (!validateSettings(settings)) {
+          throw new Error('Invalid bot settings. Please configure WebSocket and RPC URLs before starting the bot.')
         }
         
         // Start the bot

@@ -2,6 +2,7 @@ const path = require('path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const webpack = require('webpack');
 const fs = require('fs');
+const CopyPlugin = require('copy-webpack-plugin');
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -77,9 +78,21 @@ module.exports = {
       'import.meta.env.MODE': JSON.stringify(isProduction ? 'production' : 'development'),
       'import.meta.env.DEV': JSON.stringify(!isProduction),
       'import.meta.env.PROD': JSON.stringify(isProduction),
+      'import.meta.env.BASE_URL': JSON.stringify(isProduction ? '/sol_beast/' : '/'),
       global: 'globalThis',
     }),
     new webpack.NormalModuleReplacementPlugin(/^process\/browser$/, 'process/browser.js'),
+    new CopyPlugin({
+      patterns: [
+        {
+          from: 'public',
+          to: '.',
+          globOptions: {
+            ignore: ['**/index.html'], // index.html is handled by HtmlWebpackPlugin
+          },
+        },
+      ],
+    }),
     {
       // Plugin to create .nojekyll file for GitHub Pages
       apply: (compiler) => {

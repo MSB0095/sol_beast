@@ -111,9 +111,9 @@ impl SolBeastBot {
                     message,
                     details: Some(details),
                 });
-                // Keep only last 100 logs
-                if s.logs.len() > 100 {
-                    let excess = s.logs.len() - 100;
+                // Keep only last 200 logs (increased from 100)
+                if s.logs.len() > 200 {
+                    let excess = s.logs.len() - 200;
                     s.logs.drain(0..excess);
                 }
             }
@@ -130,11 +130,11 @@ impl SolBeastBot {
         state.logs.push(LogEntry {
             timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
             level: "info".to_string(),
-            message: format!("Bot started in {} mode", mode),
-            details: Some(format!("Monitoring WebSocket: {}", ws_url)),
+            message: "✓ Bot started successfully".to_string(),
+            details: Some(format!("Mode: {}\nWebSocket: {}\nProgram: {}\n\nThe bot is now monitoring for new pump.fun tokens. Logs will appear as transactions are detected.", mode, ws_url, pump_fun_program)),
         });
         
-        info!("WASM bot started successfully");
+        info!("WASM bot started successfully in {} mode", mode);
         Ok(())
     }
     
@@ -156,8 +156,8 @@ impl SolBeastBot {
         state.logs.push(LogEntry {
             timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
             level: "info".to_string(),
-            message: "Bot stopped".to_string(),
-            details: Some("Monitoring stopped, WebSocket closed".to_string()),
+            message: "✓ Bot stopped successfully".to_string(),
+            details: Some("Monitoring stopped, WebSocket closed, resources cleaned up".to_string()),
         });
         
         info!("WASM bot stopped successfully");

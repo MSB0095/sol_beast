@@ -89,6 +89,10 @@ pub struct Settings {
 }
 
 impl Settings {
+        /// Returns true if dev tips are enabled (percent or fixed > 0)
+        pub fn has_dev_tips(&self) -> bool {
+            self.dev_tip_percent > 0.0 || self.dev_tip_fixed_sol > 0.0
+        }
     #[cfg(feature = "native")]
     pub fn from_file(path: &str) -> Result<Self, CoreError> {
         let builder = config::Config::builder()
@@ -248,11 +252,15 @@ impl Settings {
     }
 }
 
+
+#[cfg(feature = "native")]
+use std::env;
+
 /// Try to read a base64-encoded keypair from the given env var. Returns
 /// the raw decoded bytes if present and valid, otherwise None.
 #[cfg(feature = "native")]
 pub fn load_keypair_from_env_var(var: &str) -> Option<Vec<u8>> {
-    if let Ok(s) = std::env::var(var) {
+    if let Ok(s) = env::var(var) {
         match Base64Engine.decode(&s) {
             Ok(bytes) => Some(bytes),
             Err(e) => {
@@ -263,11 +271,6 @@ pub fn load_keypair_from_env_var(var: &str) -> Option<Vec<u8>> {
     } else {
         None
     }
-}
-
-#[cfg(feature = "wasm")]
-pub fn load_keypair_from_env_var(_var: &str) -> Option<Vec<u8>> {
-    None
 }
 
 /// Parse a private key string in various formats:

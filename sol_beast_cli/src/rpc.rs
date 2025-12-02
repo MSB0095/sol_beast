@@ -1,15 +1,12 @@
-use crate::{
-    error::AppError,
-    models::{
-    
+use crate::error::AppError;
+use crate::models::{
     BondingCurveState,
     PriceCache,
     RpcResponse,
     OffchainTokenMetadata,
-    },
-    settings::Settings,
 };
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
+use sol_beast_core::settings::Settings;
 
 /// Pump.fun `create` instruction discriminator: [24, 30, 200, 40, 5, 28, 7, 119]
 /// This is the 8-byte Anchor discriminator for the `create` instruction that creates new tokens.

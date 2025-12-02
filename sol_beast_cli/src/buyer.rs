@@ -1,11 +1,11 @@
 use serde_json::{json, Value};
 use crate::{
     models::{Holding, PriceCache},
-    settings::Settings,
     rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback},
     tx_builder::{BUY_DISCRIMINATOR, build_buy_instruction},
     idl::load_all_idls,
 };
+use sol_beast_core::settings::Settings;
 use solana_client::rpc_client::RpcClient;
 use std::{sync::Arc, collections::HashMap};
 use tokio::sync::Mutex;
@@ -163,7 +163,7 @@ pub async fn buy_token(
                 &payer_pubkey,
                 &fee_recipient,
                 creator_opt,
-                settings,
+                settings.as_ref(),
             )?
         };
         // ALWAYS create user's ATA when buying (even if exists, instruction will succeed idempotently)
@@ -187,7 +187,7 @@ pub async fn buy_token(
         all_instrs.push(instruction);
         
         // Add dev tip if enabled
-        if settings.has_dev_tips() {
+        if settings.as_ref().has_dev_tips() {
             // Calculate transaction amount in lamports (sol_amount is in SOL)
             let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
             crate::dev_fee::add_dev_tip_to_instructions(
@@ -299,7 +299,7 @@ pub async fn buy_token(
                 &sim_payer_pubkey,
                 &fee_recipient,
                 creator_opt,
-                settings,
+                settings.as_ref(),
             )?
         };
     // include any pre_instructions in the simulated tx (e.g., ATA creation)

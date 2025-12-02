@@ -1,4 +1,5 @@
 mod api;
+mod error;
 mod buyer;
 mod dev_fee;
 mod helius_sender;
@@ -56,9 +57,9 @@ static LAST_MAX_HELD_LOG: Lazy<tokio::sync::Mutex<Option<Instant>>> =
 const MAX_HELD_LOG_DEBOUNCE_SECS: u64 = 60;
 const API_PORT: u16 = 8080;
 const API_HOST: &str = "0.0.0.0";
+use sol_beast_core::settings::{load_keypair_from_env_var, parse_private_key_string, Settings};
 use crate::{
     models::{Holding, PriceCache},
-    settings::Settings,
     state::BuyRecord,
 };
 use chrono::Utc;
@@ -152,14 +153,14 @@ async fn main() -> Result<(), AppError> {
     // Load real keypair either from path or from JSON in config (optional)
     // Prefer base64 env var for keypairs to avoid storing keys on disk.
     let keypair: Option<std::sync::Arc<Keypair>> = if is_real {
-        if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_KEYPAIR_B64") {
+        if let Some(bytes) = load_keypair_from_env_var("SOL_BEAST_KEYPAIR_B64") {
             Some(std::sync::Arc::new(
                 Keypair::try_from(bytes.as_slice())
                     .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
             ))
         } else if let Some(pk_string) = settings.wallet_private_key_string.clone() {
             let bytes =
-                settings::parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
+                parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
             Some(std::sync::Arc::new(
                 Keypair::try_from(bytes.as_slice())
                     .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
@@ -186,7 +187,7 @@ async fn main() -> Result<(), AppError> {
     // Optional simulation keypair (used for dry-run signing). If not provided,
     // the code will fall back to generating an ephemeral Keypair at runtime.
     let simulate_keypair: Option<std::sync::Arc<Keypair>> = if let Some(bytes) =
-        settings::load_keypair_from_env_var("SOL_BEAST_SIMULATE_KEYPAIR_B64")
+        load_keypair_from_env_var("SOL_BEAST_SIMULATE_KEYPAIR_B64")
     {
         Some(std::sync::Arc::new(
             Keypair::try_from(bytes.as_slice())
@@ -194,7 +195,7 @@ async fn main() -> Result<(), AppError> {
         ))
     } else if let Some(pk_string) = settings.simulate_wallet_private_key_string.clone() {
         let bytes =
-            settings::parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
+            parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
         let kp = Keypair::try_from(bytes.as_slice())
             .map_err(|e| AppError::InvalidKeypair(e.to_string()))?;
         info!("Loaded simulate keypair, pubkey: {}", kp.pubkey());

@@ -10,7 +10,6 @@ export default function ConfigurationPanel() {
 
   if (!settings) return <div>Loading settings...</div>
 
-  const isBotStopped = runningState === 'stopped'
   const isBotRunning = runningState === 'running'
 
   const handleSave = async () => {

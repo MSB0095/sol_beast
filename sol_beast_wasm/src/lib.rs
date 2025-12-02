@@ -82,7 +82,8 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         state.settings = settings;
         Ok(())
     }
@@ -90,7 +91,8 @@ impl SolBeastBot {
     /// Start the bot
     #[wasm_bindgen]
     pub fn start(&self) -> Result<(), JsValue> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         if state.running {
             return Err(JsValue::from_str("Bot is already running"));
         }
@@ -145,7 +147,8 @@ impl SolBeastBot {
     /// Stop the bot
     #[wasm_bindgen]
     pub fn stop(&self) -> Result<(), JsValue> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         if !state.running {
             return Err(JsValue::from_str("Bot is not running"));
         }
@@ -173,13 +176,14 @@ impl SolBeastBot {
     /// Get bot status
     #[wasm_bindgen]
     pub fn is_running(&self) -> bool {
-        self.state.lock().unwrap().running
+        self.state.lock().map(|s| s.running).unwrap_or(false)
     }
     
     /// Set bot mode (dry-run or real)
     #[wasm_bindgen]
     pub fn set_mode(&self, mode: &str) -> Result<(), JsValue> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         if state.running {
             return Err(JsValue::from_str("Cannot change mode while bot is running"));
         }
@@ -193,13 +197,16 @@ impl SolBeastBot {
     /// Get current mode
     #[wasm_bindgen]
     pub fn get_mode(&self) -> String {
-        self.state.lock().unwrap().mode.clone()
+        self.state.lock()
+            .map(|s| s.mode.clone())
+            .unwrap_or_else(|_| "dry-run".to_string())
     }
     
     /// Update settings (only when stopped)
     #[wasm_bindgen]
     pub fn update_settings(&self, settings_json: &str) -> Result<(), JsValue> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         if state.running {
             return Err(JsValue::from_str("Cannot update settings while bot is running"));
         }
@@ -208,7 +215,8 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         state.settings = settings;
         Ok(())
     }
@@ -216,7 +224,8 @@ impl SolBeastBot {
     /// Get current settings as JSON
     #[wasm_bindgen]
     pub fn get_settings(&self) -> Result<String, JsValue> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         serde_json::to_string(&state.settings)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize settings: {}", e)))
     }
@@ -224,7 +233,8 @@ impl SolBeastBot {
     /// Get logs as JSON
     #[wasm_bindgen]
     pub fn get_logs(&self) -> Result<String, JsValue> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         serde_json::to_string(&state.logs)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize logs: {}", e)))
     }
@@ -232,7 +242,8 @@ impl SolBeastBot {
     /// Get holdings as JSON
     #[wasm_bindgen]
     pub fn get_holdings(&self) -> Result<String, JsValue> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         serde_json::to_string(&state.holdings)
             .map_err(|e| JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))
     }
@@ -242,7 +253,8 @@ impl SolBeastBot {
     pub async fn test_rpc_connection(&self) -> Result<String, JsValue> {
         use sol_beast_core::wasm::WasmRpcClient;
         
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         let rpc_url = state.settings.solana_rpc_urls.first()
             .ok_or_else(|| JsValue::from_str("No RPC URL configured"))?
             .clone();
@@ -259,7 +271,8 @@ impl SolBeastBot {
     pub async fn test_ws_connection(&self) -> Result<String, JsValue> {
         use sol_beast_core::wasm::WasmWebSocket;
         
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         let ws_url = state.settings.solana_ws_urls.first()
             .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
             .clone();
@@ -275,7 +288,8 @@ impl SolBeastBot {
     pub fn save_to_storage(&self) -> Result<(), JsValue> {
         use sol_beast_core::wasm::save_settings;
         
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
         save_settings(&state.settings)?;
         
         Ok(())
@@ -287,7 +301,8 @@ impl SolBeastBot {
         use sol_beast_core::wasm::load_settings;
         
         if let Some(settings) = load_settings::<BotSettings>()? {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock()
+                .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
             state.settings = settings;
         }
         

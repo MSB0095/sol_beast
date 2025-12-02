@@ -5,6 +5,10 @@ use wasm_bindgen::prelude::*;
 use sol_beast_core::models::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use log::info;
+
+mod monitor;
+use monitor::Monitor;
 
 // Initialize panic hook and logger for WASM
 #[wasm_bindgen(start)]
@@ -25,6 +29,7 @@ struct BotState {
     settings: BotSettings,
     holdings: Vec<Holding>,
     logs: Vec<LogEntry>,
+    monitor: Option<Monitor>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -63,6 +68,7 @@ impl SolBeastBot {
             settings: BotSettings::default(),
             holdings: Vec::new(),
             logs: Vec::new(),
+            monitor: None,
         };
         
         Self {
@@ -88,14 +94,46 @@ impl SolBeastBot {
         if state.running {
             return Err(JsValue::from_str("Bot is already running"));
         }
-        state.running = true;
+        
         let mode = state.mode.clone();
+        let ws_url = state.settings.solana_ws_urls.first()
+            .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
+            .clone();
+        let pump_fun_program = state.settings.pump_fun_program.clone();
+        
+        // Create logging callback that adds logs to state
+        let state_for_logs = self.state.clone();
+        let log_callback = Arc::new(Mutex::new(move |level: String, message: String, details: String| {
+            if let Ok(mut s) = state_for_logs.lock() {
+                s.logs.push(LogEntry {
+                    timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
+                    level,
+                    message,
+                    details: Some(details),
+                });
+                // Keep only last 100 logs
+                if s.logs.len() > 100 {
+                    s.logs.drain(0..1);
+                }
+            }
+        }));
+        
+        // Create and start monitor
+        let mut monitor = Monitor::new();
+        monitor.start(&ws_url, &pump_fun_program, log_callback)
+            .map_err(|e| JsValue::from_str(&format!("Failed to start monitor: {:?}", e)))?;
+        
+        state.monitor = Some(monitor);
+        state.running = true;
+        
         state.logs.push(LogEntry {
             timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
             level: "info".to_string(),
             message: format!("Bot started in {} mode", mode),
-            details: None,
+            details: Some(format!("Monitoring WebSocket: {}", ws_url)),
         });
+        
+        info!("WASM bot started successfully");
         Ok(())
     }
     
@@ -106,13 +144,22 @@ impl SolBeastBot {
         if !state.running {
             return Err(JsValue::from_str("Bot is not running"));
         }
+        
+        // Stop monitoring
+        if let Some(mut monitor) = state.monitor.take() {
+            monitor.stop()
+                .map_err(|e| JsValue::from_str(&format!("Failed to stop monitor: {:?}", e)))?;
+        }
+        
         state.running = false;
         state.logs.push(LogEntry {
             timestamp: js_sys::Date::new_0().to_iso_string().as_string().unwrap(),
             level: "info".to_string(),
             message: "Bot stopped".to_string(),
-            details: None,
+            details: Some("Monitoring stopped, WebSocket closed".to_string()),
         });
+        
+        info!("WASM bot stopped successfully");
         Ok(())
     }
     

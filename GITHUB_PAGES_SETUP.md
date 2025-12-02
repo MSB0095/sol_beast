@@ -185,7 +185,7 @@ new CopyPlugin({
 3. **Check botService.ts**: Verify WASM mode detection logic:
    ```typescript
    const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
-                    window.location.hostname.includes('github.io')
+                    window.location.hostname.endsWith('.github.io')
    ```
 
 ## Local Testing

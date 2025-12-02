@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use sol_beast_core::models::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use log::info;
+use log::{info, error};
 
 mod monitor;
 use monitor::Monitor;
@@ -191,7 +191,13 @@ impl SolBeastBot {
     /// Get bot status
     #[wasm_bindgen]
     pub fn is_running(&self) -> bool {
-        self.state.lock().map(|s| s.running).unwrap_or(false)
+        match self.state.lock() {
+            Ok(guard) => guard.running,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in is_running, recovering...");
+                poisoned.into_inner().running
+            }
+        }
     }
     
     /// Set bot mode (dry-run or real)
@@ -217,9 +223,13 @@ impl SolBeastBot {
     /// Get current mode
     #[wasm_bindgen]
     pub fn get_mode(&self) -> String {
-        self.state.lock()
-            .map(|s| s.mode.clone())
-            .unwrap_or_else(|_| "dry-run".to_string())
+        match self.state.lock() {
+            Ok(guard) => guard.mode.clone(),
+            Err(poisoned) => {
+                info!("Mutex was poisoned in get_mode, recovering...");
+                poisoned.into_inner().mode.clone()
+            }
+        }
     }
     
     /// Update settings (only when stopped)

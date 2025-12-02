@@ -82,8 +82,13 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
-        let mut state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in init_with_settings, recovering...");
+                poisoned.into_inner()
+            }
+        };
         state.settings = settings;
         Ok(())
     }
@@ -91,8 +96,13 @@ impl SolBeastBot {
     /// Start the bot
     #[wasm_bindgen]
     pub fn start(&self) -> Result<(), JsValue> {
-        let mut state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in start, recovering...");
+                poisoned.into_inner()
+            }
+        };
         if state.running {
             return Err(JsValue::from_str("Bot is already running"));
         }
@@ -147,8 +157,13 @@ impl SolBeastBot {
     /// Stop the bot
     #[wasm_bindgen]
     pub fn stop(&self) -> Result<(), JsValue> {
-        let mut state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in stop, recovering...");
+                poisoned.into_inner()
+            }
+        };
         if !state.running {
             return Err(JsValue::from_str("Bot is not running"));
         }
@@ -182,8 +197,13 @@ impl SolBeastBot {
     /// Set bot mode (dry-run or real)
     #[wasm_bindgen]
     pub fn set_mode(&self, mode: &str) -> Result<(), JsValue> {
-        let mut state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in set_mode, recovering...");
+                poisoned.into_inner()
+            }
+        };
         if state.running {
             return Err(JsValue::from_str("Cannot change mode while bot is running"));
         }
@@ -205,8 +225,13 @@ impl SolBeastBot {
     /// Update settings (only when stopped)
     #[wasm_bindgen]
     pub fn update_settings(&self, settings_json: &str) -> Result<(), JsValue> {
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in update_settings, recovering...");
+                poisoned.into_inner()
+            }
+        };
         if state.running {
             return Err(JsValue::from_str("Cannot update settings while bot is running"));
         }
@@ -215,8 +240,13 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
-        let mut state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in update_settings (2nd lock), recovering...");
+                poisoned.into_inner()
+            }
+        };
         state.settings = settings;
         Ok(())
     }
@@ -224,28 +254,68 @@ impl SolBeastBot {
     /// Get current settings as JSON
     #[wasm_bindgen]
     pub fn get_settings(&self) -> Result<String, JsValue> {
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
-        serde_json::to_string(&state.settings)
-            .map_err(|e| JsValue::from_str(&format!("Failed to serialize settings: {}", e)))
+        // Use a more robust locking mechanism that won't panic
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // If the mutex is poisoned, we can still use it
+                info!("Mutex was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Serialize settings with explicit error handling
+        match serde_json::to_string(&state.settings) {
+            Ok(json) => Ok(json),
+            Err(e) => {
+                error!("Failed to serialize settings: {}", e);
+                Err(JsValue::from_str(&format!("Failed to serialize settings: {}", e)))
+            }
+        }
     }
     
     /// Get logs as JSON
     #[wasm_bindgen]
     pub fn get_logs(&self) -> Result<String, JsValue> {
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
-        serde_json::to_string(&state.logs)
-            .map_err(|e| JsValue::from_str(&format!("Failed to serialize logs: {}", e)))
+        // Use a more robust locking mechanism that won't panic
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in get_logs, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Serialize logs with explicit error handling
+        match serde_json::to_string(&state.logs) {
+            Ok(json) => Ok(json),
+            Err(e) => {
+                error!("Failed to serialize logs: {}", e);
+                Err(JsValue::from_str(&format!("Failed to serialize logs: {}", e)))
+            }
+        }
     }
     
     /// Get holdings as JSON
     #[wasm_bindgen]
     pub fn get_holdings(&self) -> Result<String, JsValue> {
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
-        serde_json::to_string(&state.holdings)
-            .map_err(|e| JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))
+        // Use a more robust locking mechanism that won't panic
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in get_holdings, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Serialize holdings with explicit error handling
+        match serde_json::to_string(&state.holdings) {
+            Ok(json) => Ok(json),
+            Err(e) => {
+                error!("Failed to serialize holdings: {}", e);
+                Err(JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))
+            }
+        }
     }
     
     /// Connect to Solana RPC (for testing connection)
@@ -253,8 +323,13 @@ impl SolBeastBot {
     pub async fn test_rpc_connection(&self) -> Result<String, JsValue> {
         use sol_beast_core::wasm::WasmRpcClient;
         
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in test_rpc_connection, recovering...");
+                poisoned.into_inner()
+            }
+        };
         let rpc_url = state.settings.solana_rpc_urls.first()
             .ok_or_else(|| JsValue::from_str("No RPC URL configured"))?
             .clone();
@@ -271,8 +346,13 @@ impl SolBeastBot {
     pub async fn test_ws_connection(&self) -> Result<String, JsValue> {
         use sol_beast_core::wasm::WasmWebSocket;
         
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in test_ws_connection, recovering...");
+                poisoned.into_inner()
+            }
+        };
         let ws_url = state.settings.solana_ws_urls.first()
             .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
             .clone();
@@ -288,8 +368,13 @@ impl SolBeastBot {
     pub fn save_to_storage(&self) -> Result<(), JsValue> {
         use sol_beast_core::wasm::save_settings;
         
-        let state = self.state.lock()
-            .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in save_to_storage, recovering...");
+                poisoned.into_inner()
+            }
+        };
         save_settings(&state.settings)?;
         
         Ok(())
@@ -301,8 +386,13 @@ impl SolBeastBot {
         use sol_beast_core::wasm::load_settings;
         
         if let Some(settings) = load_settings::<BotSettings>()? {
-            let mut state = self.state.lock()
-                .map_err(|e| JsValue::from_str(&format!("Failed to lock state: {:?}", e)))?;
+            let mut state = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    info!("Mutex was poisoned in load_from_storage, recovering...");
+                    poisoned.into_inner()
+                }
+            };
             state.settings = settings;
         }
         

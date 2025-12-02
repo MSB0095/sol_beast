@@ -169,3 +169,22 @@ dev_fee_enabled = true
 
 # Optional: Override dev wallet address (use default if not specified)
 # dev_wallet_address = "YourDevWalletAddressHere"
+
+# ==================== Dev Tip Configuration ====================
+# Optional dev tip - flexible alternative/addition to fixed 2% dev fee
+# These tips apply to BOTH buy AND sell transactions
+
+# Dev tip percentage (default: 2.0 = 2% of transaction amount)
+# Set to 0 to disable percentage-based tips
+# Example: 2.0 = 2% of each transaction goes to dev wallet
+dev_tip_percent = 2.0
+
+# Dev tip fixed amount in SOL per transaction (default: 0.0)
+# Set to 0 to disable fixed tips
+# Example: 0.001 = 0.001 SOL per transaction to dev wallet
+# This is in ADDITION to percentage tip if both are set
+dev_tip_fixed_sol = 0.0
+
+# Note: Both tip types can be active simultaneously:
+# - If dev_tip_percent = 2.0 and dev_tip_fixed_sol = 0.001
+# - On a 1 SOL buy: tip = 0.02 SOL (2%) + 0.001 SOL (fixed) = 0.021 SOL total

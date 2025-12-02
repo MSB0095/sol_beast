@@ -81,6 +81,11 @@ pub struct Settings {
     pub dev_fee_enabled: bool,
     #[serde(default)]
     pub dev_wallet_address: Option<String>,
+    // Dev tip configuration - optional tips in addition to/instead of dev fee
+    #[serde(default = "default_dev_tip_percent")]
+    pub dev_tip_percent: f64,
+    #[serde(default = "default_dev_tip_fixed_sol")]
+    pub dev_tip_fixed_sol: f64,
 }
 
 impl Settings {
@@ -200,6 +205,12 @@ impl Settings {
         if other.simulate_wallet_private_key_string != self.simulate_wallet_private_key_string {
             self.simulate_wallet_private_key_string = other.simulate_wallet_private_key_string.clone();
         }
+        if other.dev_tip_percent != self.dev_tip_percent {
+            self.dev_tip_percent = other.dev_tip_percent;
+        }
+        if other.dev_tip_fixed_sol != self.dev_tip_fixed_sol {
+            self.dev_tip_fixed_sol = other.dev_tip_fixed_sol;
+        }
     }
 
     /// Validate settings ranges and constraints
@@ -224,6 +235,12 @@ impl Settings {
         }
         if self.max_liquidity_sol < self.min_liquidity_sol {
             return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
+        }
+        if self.dev_tip_percent < 0.0 {
+            return Err(AppError::Validation("dev_tip_percent must be >= 0".to_string()));
+        }
+        if self.dev_tip_fixed_sol < 0.0 {
+            return Err(AppError::Validation("dev_tip_fixed_sol must be >= 0".to_string()));
         }
         Ok(())
     }
@@ -300,6 +317,8 @@ fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
 fn default_helius_use_dynamic_tips() -> bool { true }
 fn default_helius_confirm_timeout_secs() -> u64 { 15 }
 fn default_dev_fee_enabled() -> bool { true }
+fn default_dev_tip_percent() -> f64 { 2.0 }
+fn default_dev_tip_fixed_sol() -> f64 { 0.0 }
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode

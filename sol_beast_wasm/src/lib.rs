@@ -253,7 +253,7 @@ impl SolBeastBot {
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                info!("Mutex was poisoned in update_settings (2nd lock), recovering...");
+                info!("Mutex was poisoned in update_settings (second acquisition), recovering...");
                 poisoned.into_inner()
             }
         };
@@ -264,17 +264,14 @@ impl SolBeastBot {
     /// Get current settings as JSON
     #[wasm_bindgen]
     pub fn get_settings(&self) -> Result<String, JsValue> {
-        // Use a more robust locking mechanism that won't panic
         let state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                // If the mutex is poisoned, we can still use it
-                info!("Mutex was poisoned, recovering...");
+                info!("Mutex was poisoned in get_settings, recovering...");
                 poisoned.into_inner()
             }
         };
         
-        // Serialize settings with explicit error handling
         match serde_json::to_string(&state.settings) {
             Ok(json) => Ok(json),
             Err(e) => {
@@ -287,7 +284,6 @@ impl SolBeastBot {
     /// Get logs as JSON
     #[wasm_bindgen]
     pub fn get_logs(&self) -> Result<String, JsValue> {
-        // Use a more robust locking mechanism that won't panic
         let state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -296,7 +292,6 @@ impl SolBeastBot {
             }
         };
         
-        // Serialize logs with explicit error handling
         match serde_json::to_string(&state.logs) {
             Ok(json) => Ok(json),
             Err(e) => {
@@ -309,7 +304,6 @@ impl SolBeastBot {
     /// Get holdings as JSON
     #[wasm_bindgen]
     pub fn get_holdings(&self) -> Result<String, JsValue> {
-        // Use a more robust locking mechanism that won't panic
         let state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -318,7 +312,6 @@ impl SolBeastBot {
             }
         };
         
-        // Serialize holdings with explicit error handling
         match serde_json::to_string(&state.holdings) {
             Ok(json) => Ok(json),
             Err(e) => {

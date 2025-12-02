@@ -9,25 +9,28 @@ let wasmBot: any = null
 let wasmInitialized = false
 
 // Check if an error is a critical WASM error that requires recovery
-function isCriticalWasmError(err: any, errorMsg: string): boolean {
+function isCriticalWasmError(err: unknown, errorMsg: string): boolean {
+  // Check for null/undefined errors
+  if (err == null) return true
+  
+  // Check for WASM panic indicators in error message
   return (
     errorMsg.includes('unreachable') || 
-    errorMsg.includes('undefined') ||
-    errorMsg.includes('null') ||
-    err === null ||
-    err === undefined
+    errorMsg.includes('undefined')
   )
 }
 
 // Validate bot settings structure
-function validateSettings(settings: any): boolean {
+function validateSettings(settings: unknown): boolean {
+  if (!settings || typeof settings !== 'object') return false
+  
+  const s = settings as Record<string, unknown>
+  
   return (
-    settings &&
-    typeof settings === 'object' &&
-    Array.isArray(settings.solana_ws_urls) &&
-    settings.solana_ws_urls.length > 0 &&
-    Array.isArray(settings.solana_rpc_urls) &&
-    settings.solana_rpc_urls.length > 0
+    Array.isArray(s.solana_ws_urls) &&
+    s.solana_ws_urls.length > 0 &&
+    Array.isArray(s.solana_rpc_urls) &&
+    s.solana_rpc_urls.length > 0
   )
 }
 

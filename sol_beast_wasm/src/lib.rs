@@ -270,6 +270,13 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
+        // Save to localStorage first (while we still own settings)
+        sol_beast_core::wasm::save_settings(&settings)
+            .map_err(|e| {
+                error!("Failed to save settings to localStorage: {:?}", e);
+                JsValue::from_str(&format!("Settings updated but failed to save to localStorage: {:?}", e))
+            })?;
+        
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -277,15 +284,8 @@ impl SolBeastBot {
                 poisoned.into_inner()
             }
         };
-        state.settings = settings.clone();
+        state.settings = settings;
         // State is automatically dropped here
-        
-        // Automatically save to localStorage
-        sol_beast_core::wasm::save_settings(&settings)
-            .map_err(|e| {
-                error!("Failed to save settings to localStorage: {:?}", e);
-                JsValue::from_str(&format!("Settings updated but failed to save to localStorage: {:?}", e))
-            })?;
         
         info!("Settings updated and saved to localStorage");
         Ok(())

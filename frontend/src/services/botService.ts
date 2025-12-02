@@ -79,11 +79,8 @@ export const botService = {
           wasmBot.start()
         } catch (err) {
           console.error('Failed to start WASM bot:', err)
-          // Check if error message indicates connection issues
+          // Pass through the error message from WASM - it's already detailed
           const errMsg = err instanceof Error ? err.message : String(err)
-          if (errMsg.includes('WebSocket') || errMsg.includes('connection') || errMsg.includes('network')) {
-            throw new Error(`Connection failed: ${errMsg}\n\nPossible causes:\n- Firewall blocking WebSocket connections\n- CORS policy preventing connection\n- Invalid WebSocket URL\n- Network connectivity issues\n\nCheck browser console for details.`)
-          }
           throw new Error(errMsg)
         }
         return { success: true }

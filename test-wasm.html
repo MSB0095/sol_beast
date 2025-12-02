@@ -144,12 +144,17 @@
         let wasmModule = null;
         let pollInterval = null;
 
+        // Detect WASM module path based on environment
+        const WASM_PATH = window.location.pathname.includes('/sol_beast/') 
+            ? '/sol_beast/frontend/src/wasm/sol_beast_wasm.js'
+            : './frontend/src/wasm/sol_beast_wasm.js';
+
         window.initWasm = async function() {
             try {
                 addLog('info', 'Initializing WASM module...', '');
                 
                 // Import the WASM module
-                wasmModule = await import('./frontend/src/wasm/sol_beast_wasm.js');
+                wasmModule = await import(WASM_PATH);
                 addLog('info', 'WASM module loaded', 'Module imported successfully');
                 
                 // Initialize the WASM

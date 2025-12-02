@@ -54,7 +54,20 @@ impl Monitor {
         // Create WebSocket connection
         let ws = WebSocket::new(ws_url)
             .map_err(|e| {
-                let err_msg = format!("Failed to create WebSocket: {:?}", e);
+                let err_msg = format!(
+                    "Failed to create WebSocket connection to '{}': {:?}\n\n\
+                    Possible causes:\n\
+                    - Invalid WebSocket URL format (should start with wss:// or ws://)\n\
+                    - Network connectivity issues\n\
+                    - Firewall blocking WebSocket connections\n\
+                    - Browser security restrictions\n\n\
+                    Try:\n\
+                    1. Verify the WebSocket URL is correct\n\
+                    2. Check browser console for CORS or network errors\n\
+                    3. Try a different Solana RPC provider\n\
+                    4. Disable browser extensions that might block connections",
+                    ws_url, e
+                );
                 error!("{}", err_msg);
                 if let Ok(mut cb) = log_callback.lock() {
                     cb(

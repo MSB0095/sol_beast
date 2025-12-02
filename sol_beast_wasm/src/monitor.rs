@@ -5,6 +5,7 @@ use web_sys::{WebSocket, MessageEvent, ErrorEvent, CloseEvent};
 use serde_json::Value;
 use log::{info, error};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashSet;
 
 /// Monitor state that tracks subscriptions and detected coins
@@ -15,8 +16,8 @@ pub struct Monitor {
     on_error: Option<wasm_bindgen::closure::Closure<dyn FnMut(ErrorEvent)>>,
     on_close: Option<wasm_bindgen::closure::Closure<dyn FnMut(CloseEvent)>>,
     on_open: Option<wasm_bindgen::closure::Closure<dyn FnMut(JsValue)>>,
-    message_count: Arc<Mutex<u64>>,
-    pump_fun_message_count: Arc<Mutex<u64>>,
+    message_count: Arc<AtomicU64>,
+    pump_fun_message_count: Arc<AtomicU64>,
 }
 
 impl Monitor {
@@ -28,8 +29,8 @@ impl Monitor {
             on_error: None,
             on_close: None,
             on_open: None,
-            message_count: Arc::new(Mutex::new(0)),
-            pump_fun_message_count: Arc::new(Mutex::new(0)),
+            message_count: Arc::new(AtomicU64::new(0)),
+            pump_fun_message_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -139,20 +140,14 @@ impl Monitor {
         let msg_count_for_handler = msg_count.clone();
         let pump_msg_count_for_handler = pump_msg_count.clone();
         let on_message = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: MessageEvent| {
-            // Increment total message count
-            let current_count = {
-                let mut count = msg_count_for_handler.lock()
-                    .expect("Failed to lock message count");
-                *count += 1;
-                *count
-            };
+            // Increment total message count atomically
+            let current_count = msg_count_for_handler.fetch_add(1, Ordering::Relaxed) + 1;
             
             // Log every 50 messages to show activity
             if current_count % 50 == 0 {
                 info!("Received {} total WebSocket messages", current_count);
                 if let Ok(mut cb) = log_cb_for_msg.lock() {
-                    let pump_count = *pump_msg_count_for_handler.lock()
-                        .expect("Failed to lock pump message count");
+                    let pump_count = pump_msg_count_for_handler.load(Ordering::Relaxed);
                     cb(
                         "info".to_string(),
                         "Monitor is active".to_string(),
@@ -166,12 +161,12 @@ impl Monitor {
                 
                 // Log the raw message for first few messages or occasionally
                 if current_count <= 5 || current_count % 100 == 0 {
-                    info!("WebSocket message #{}: {}", current_count, 
-                          if message.len() > 200 { 
-                              format!("{}...", &message[..200]) 
-                          } else { 
-                              message.clone() 
-                          });
+                    let preview = if message.len() > 200 { 
+                        format!("{}...", &message[..200]) 
+                    } else { 
+                        message.clone()
+                    };
+                    info!("WebSocket message #{}: {}", current_count, preview);
                 }
                 
                 // Parse the message
@@ -196,15 +191,7 @@ impl Monitor {
                         // Check if this is a log notification
                         if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
                             if method == "logsNotification" {
-                                // Increment pump.fun message count
-                                let pump_count = {
-                                    let mut count = pump_msg_count_for_handler.lock()
-                                        .expect("Failed to lock pump message count");
-                                    *count += 1;
-                                    *count
-                                };
-                                
-                                info!("Received logsNotification #{}", pump_count);
+                                info!("Received logsNotification");
                                 
                                 if let Some(params) = value
                                     .get("params")
@@ -219,17 +206,6 @@ impl Monitor {
                                     if let (Some(logs), Some(sig)) = (logs, signature) {
                                         info!("Processing transaction: {} (logs: {}, err: {})", 
                                               sig, logs.len(), err.is_some());
-                                        
-                                        // Log detailed info for this transaction
-                                        if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                            cb(
-                                                "info".to_string(),
-                                                format!("Transaction received (#{} total)", pump_count),
-                                                format!("Signature: {}\nLogs: {} entries\nError: {}", 
-                                                       sig, logs.len(), 
-                                                       if err.is_some() { "Yes" } else { "No" })
-                                            );
-                                        }
                                         
                                         // Check if we've seen this signature before
                                         let is_new = {
@@ -251,6 +227,19 @@ impl Monitor {
                                             .collect();
 
                                         if !pump_fun_logs.is_empty() {
+                                            // Increment pump.fun message count only when we detect pump.fun transactions
+                                            let pump_count = pump_msg_count_for_handler.fetch_add(1, Ordering::Relaxed) + 1;
+                                            
+                                            // Log detailed info for this pump.fun transaction
+                                            if let Ok(mut cb) = log_cb_for_msg.lock() {
+                                                cb(
+                                                    "info".to_string(),
+                                                    format!("Pump.fun transaction #{}", pump_count),
+                                                    format!("Signature: {}\nLogs: {} entries\nError: {}", 
+                                                           sig, logs.len(), 
+                                                           if err.is_some() { "Yes" } else { "No" })
+                                                );
+                                            }
                                             info!("✓ New pump.fun transaction detected: {}", sig);
                                             info!("  Matching logs: {:?}", pump_fun_logs);
                                             
@@ -290,15 +279,10 @@ impl Monitor {
                                             // 5. Execute purchase if conditions met
                                         } else {
                                             // Log that we received a message but it didn't match
-                                            if pump_count <= 10 || pump_count % 25 == 0 {
+                                            // Only log occasionally to avoid spam
+                                            let total_msg_count = msg_count_for_handler.load(Ordering::Relaxed);
+                                            if total_msg_count <= 10 || total_msg_count % 100 == 0 {
                                                 info!("Transaction {} does not contain pump.fun program ID", sig);
-                                                if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                                    cb(
-                                                        "info".to_string(),
-                                                        format!("Non-pump.fun transaction (#{} total)", pump_count),
-                                                        format!("Signature: {}\nThis transaction doesn't involve the pump.fun program", sig)
-                                                    );
-                                                }
                                             }
                                         }
                                     } else {

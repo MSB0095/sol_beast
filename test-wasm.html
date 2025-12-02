@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sol Beast WASM Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #fff;
+        }
+        .container {
+            background: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        h1, h2 {
+            color: #4CAF50;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        #logs {
+            background: #1a1a1a;
+            padding: 15px;
+            border-radius: 4px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+        .log-entry {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-left: 3px solid #4CAF50;
+            background: #252525;
+        }
+        .log-info { border-left-color: #4CAF50; }
+        .log-warn { border-left-color: #ff9800; }
+        .log-error { border-left-color: #f44336; }
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status-running { background: #4CAF50; }
+        .status-stopped { background: #f44336; }
+        .settings {
+            background: #1a1a1a;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .settings input, .settings textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 4px;
+        }
+        .error {
+            color: #f44336;
+            background: #3a1a1a;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🐺 Sol Beast WASM Test</h1>
+    <p>Standalone WASM bot testing without frontend dependencies</p>
+
+    <div class="container">
+        <h2>Bot Status</h2>
+        <div>
+            Status: <span class="status" id="status">Unknown</span>
+        </div>
+        <div style="margin-top: 10px;">
+            Mode: <strong id="mode">-</strong>
+        </div>
+        <div id="error-display"></div>
+    </div>
+
+    <div class="container">
+        <h2>Controls</h2>
+        <button onclick="initWasm()">Initialize WASM</button>
+        <button onclick="startBot()" id="startBtn" disabled>Start Bot</button>
+        <button onclick="stopBot()" id="stopBtn" disabled>Stop Bot</button>
+        <button onclick="setModeDryRun()">Set Dry-Run Mode</button>
+        <button onclick="setModeReal()">Set Real Mode</button>
+        <button onclick="testRpcConnection()">Test RPC Connection</button>
+        <button onclick="testWsConnection()">Test WebSocket Connection</button>
+        <button onclick="clearLogs()">Clear Logs</button>
+    </div>
+
+    <div class="container">
+        <h2>Settings</h2>
+        <div class="settings">
+            <label>WebSocket URL:</label>
+            <input type="text" id="wsUrl" value="wss://api.mainnet-beta.solana.com/" />
+            
+            <label>RPC URL:</label>
+            <input type="text" id="rpcUrl" value="https://api.mainnet-beta.solana.com/" />
+            
+            <label>Pump.fun Program:</label>
+            <input type="text" id="pumpProgram" value="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P" />
+            
+            <button onclick="updateSettings()">Update Settings</button>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>Logs</h2>
+        <div id="logs"></div>
+    </div>
+
+    <script type="module">
+        let wasmBot = null;
+        let wasmModule = null;
+        let pollInterval = null;
+
+        // Detect WASM module path - can be overridden via ?wasmPath=<path> query parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const WASM_PATH = urlParams.get('wasmPath') || 
+            (window.location.pathname.includes('/sol_beast/') 
+                ? '/sol_beast/frontend/src/wasm/sol_beast_wasm.js'
+                : './frontend/src/wasm/sol_beast_wasm.js');
+
+        window.initWasm = async function() {
+            try {
+                addLog('info', 'Initializing WASM module...', '');
+                
+                // Import the WASM module
+                wasmModule = await import(WASM_PATH);
+                addLog('info', 'WASM module loaded', 'Module imported successfully');
+                
+                // Initialize the WASM
+                await wasmModule.default();
+                addLog('info', 'WASM default initialized', 'Running module initialization');
+                
+                // Call init function
+                await wasmModule.init();
+                addLog('info', 'WASM init() called', 'Logger and panic hook set up');
+                
+                // Create bot instance
+                wasmBot = new wasmModule.SolBeastBot();
+                addLog('info', '✓ WASM bot created successfully', 'Bot instance ready');
+                
+                // Enable buttons
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = false;
+                
+                // Start polling status
+                startPolling();
+                
+                updateStatus();
+            } catch (error) {
+                addLog('error', 'WASM initialization failed', error.toString());
+                console.error('WASM init error:', error);
+                showError('Failed to initialize WASM: ' + error.toString());
+            }
+        };
+
+        window.startBot = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized. Click "Initialize WASM" first.');
+                return;
+            }
+            
+            try {
+                addLog('info', 'Starting bot...', '');
+                wasmBot.start();
+                addLog('info', '✓ Bot started successfully', '');
+                updateStatus();
+            } catch (error) {
+                addLog('error', 'Failed to start bot', error.toString());
+                console.error('Start error:', error);
+                showError('Failed to start bot: ' + error.toString());
+            }
+        };
+
+        window.stopBot = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized');
+                return;
+            }
+            
+            try {
+                addLog('info', 'Stopping bot...', '');
+                wasmBot.stop();
+                addLog('info', '✓ Bot stopped successfully', '');
+                updateStatus();
+            } catch (error) {
+                addLog('error', 'Failed to stop bot', error.toString());
+                console.error('Stop error:', error);
+                showError('Failed to stop bot: ' + error.toString());
+            }
+        };
+
+        window.setModeDryRun = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized');
+                return;
+            }
+            
+            try {
+                addLog('info', 'Setting dry-run mode...', '');
+                wasmBot.set_mode('dry-run');
+                addLog('info', '✓ Mode set to dry-run', '');
+                updateStatus();
+            } catch (error) {
+                addLog('error', 'Failed to set mode', error.toString());
+                console.error('Set mode error:', error);
+                showError('Failed to set mode: ' + error.toString());
+            }
+        };
+
+        window.setModeReal = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized');
+                return;
+            }
+            
+            try {
+                addLog('info', 'Setting real mode...', '');
+                wasmBot.set_mode('real');
+                addLog('info', '⚠️ Mode set to REAL', 'Warning: Real money will be used!');
+                updateStatus();
+            } catch (error) {
+                addLog('error', 'Failed to set mode', error.toString());
+                console.error('Set mode error:', error);
+                showError('Failed to set mode: ' + error.toString());
+            }
+        };
+
+        window.updateSettings = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized');
+                return;
+            }
+            
+            try {
+                const settings = {
+                    solana_ws_urls: [document.getElementById('wsUrl').value],
+                    solana_rpc_urls: [document.getElementById('rpcUrl').value],
+                    pump_fun_program: document.getElementById('pumpProgram').value,
+                    metadata_program: "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+                    tp_percent: 100.0,
+                    sl_percent: -50.0,
+                    timeout_secs: 50,
+                    buy_amount: 0.001,
+                    max_holded_coins: 4,
+                    slippage_bps: 500,
+                    min_tokens_threshold: 30000,
+                    max_sol_per_token: 0.002,
+                    min_liquidity_sol: 0.0,
+                    max_liquidity_sol: 15.0,
+                };
+                
+                addLog('info', 'Updating settings...', JSON.stringify(settings, null, 2));
+                wasmBot.update_settings(JSON.stringify(settings));
+                addLog('info', '✓ Settings updated', '');
+            } catch (error) {
+                addLog('error', 'Failed to update settings', error.toString());
+                console.error('Update settings error:', error);
+                showError('Failed to update settings: ' + error.toString());
+            }
+        };
+
+        window.testRpcConnection = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized');
+                return;
+            }
+            
+            try {
+                addLog('info', 'Testing RPC connection...', '');
+                const result = await wasmBot.test_rpc_connection();
+                addLog('info', '✓ RPC connection successful', result);
+            } catch (error) {
+                addLog('error', 'RPC connection failed', error.toString());
+                console.error('RPC test error:', error);
+                showError('RPC connection failed: ' + error.toString());
+            }
+        };
+
+        window.testWsConnection = async function() {
+            if (!wasmBot) {
+                showError('Bot not initialized');
+                return;
+            }
+            
+            try {
+                addLog('info', 'Testing WebSocket connection...', '');
+                const result = await wasmBot.test_ws_connection();
+                addLog('info', '✓ WebSocket connection successful', result);
+            } catch (error) {
+                addLog('error', 'WebSocket connection failed', error.toString());
+                console.error('WebSocket test error:', error);
+                showError('WebSocket connection failed: ' + error.toString());
+            }
+        };
+
+        function updateStatus() {
+            if (!wasmBot) return;
+            
+            try {
+                const running = wasmBot.is_running();
+                const mode = wasmBot.get_mode();
+                
+                const statusEl = document.getElementById('status');
+                statusEl.textContent = running ? 'Running' : 'Stopped';
+                statusEl.className = 'status ' + (running ? 'status-running' : 'status-stopped');
+                
+                document.getElementById('mode').textContent = mode;
+            } catch (error) {
+                console.error('Status update error:', error);
+            }
+        }
+
+        function startPolling() {
+            if (pollInterval) clearInterval(pollInterval);
+            
+            pollInterval = setInterval(() => {
+                if (!wasmBot) return;
+                
+                try {
+                    // Update status
+                    updateStatus();
+                    
+                    // Get and display logs from WASM
+                    const logsJson = wasmBot.get_logs();
+                    const logs = JSON.parse(logsJson);
+                    
+                    // Display latest logs (show last 10)
+                    const logsDiv = document.getElementById('logs');
+                    const displayLogs = logs.slice(-10).reverse();
+                    
+                    // Only update if logs changed
+                    const newHtml = displayLogs.map(log => 
+                        `<div class="log-entry log-${log.level}">
+                            <strong>[${log.timestamp}] ${log.level.toUpperCase()}</strong>: ${log.message}
+                            ${log.details ? '<br>' + log.details : ''}
+                        </div>`
+                    ).join('');
+                    
+                    if (logsDiv.innerHTML !== newHtml) {
+                        logsDiv.innerHTML = newHtml || '<div style="color: #666;">No logs yet</div>';
+                    }
+                } catch (error) {
+                    console.error('Polling error:', error);
+                }
+            }, 1000);
+        }
+
+        function addLog(level, message, details) {
+            const timestamp = new Date().toISOString();
+            const logsDiv = document.getElementById('logs');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${level}`;
+            entry.innerHTML = `<strong>[${timestamp}] ${level.toUpperCase()}</strong>: ${message}${details ? '<br>' + details : ''}`;
+            logsDiv.insertBefore(entry, logsDiv.firstChild);
+            
+            // Keep only last 50 entries - efficiently handle excess
+            if (logsDiv.children.length > 50) {
+                // Remove all excess entries at once
+                const toRemove = Array.from(logsDiv.children).slice(50);
+                toRemove.forEach(child => child.remove());
+            }
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error-display');
+            errorDiv.innerHTML = `<div class="error">❌ ${message}</div>`;
+            setTimeout(() => {
+                errorDiv.innerHTML = '';
+            }, 5000);
+        }
+
+        window.clearLogs = function() {
+            const logsDiv = document.getElementById('logs');
+            logsDiv.replaceChildren(); // Efficient way to clear all children
+            logsDiv.innerHTML = '<div style="color: #666;">Logs cleared</div>';
+        };
+
+        // Auto-initialize on load
+        addLog('info', 'Page loaded', 'Click "Initialize WASM" to start');
+    </script>
+</body>
+</html>

@@ -50,7 +50,13 @@ export const botService = {
       try {
         // Ensure settings are synced before starting
         // Get current settings from WASM bot
-        const settingsJson = wasmBot.get_settings()
+        let settingsJson
+        try {
+          settingsJson = wasmBot.get_settings()
+        } catch (err) {
+          console.error('Failed to get WASM settings:', err)
+          throw new Error(`Failed to get bot settings: ${err instanceof Error ? err.message : String(err)}`)
+        }
         
         // Parse and validate settings
         let settings
@@ -69,9 +75,19 @@ export const botService = {
         }
         
         // Start the bot
-        wasmBot.start()
+        try {
+          wasmBot.start()
+        } catch (err) {
+          console.error('Failed to start WASM bot:', err)
+          // Re-throw to preserve error information
+          if (err instanceof Error) {
+            throw err
+          }
+          throw new Error(String(err))
+        }
         return { success: true }
       } catch (error) {
+        console.error('Bot start error:', error)
         throw new Error(error instanceof Error ? error.message : String(error))
       }
     } else {
@@ -95,6 +111,7 @@ export const botService = {
         wasmBot.stop()
         return { success: true }
       } catch (error) {
+        console.error('Bot stop error:', error)
         throw new Error(error instanceof Error ? error.message : String(error))
       }
     } else {
@@ -118,6 +135,7 @@ export const botService = {
         wasmBot.set_mode(mode)
         return { success: true, mode }
       } catch (error) {
+        console.error('Set mode error:', error)
         throw new Error(error instanceof Error ? error.message : String(error))
       }
     } else {

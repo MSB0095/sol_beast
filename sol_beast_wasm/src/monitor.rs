@@ -54,7 +54,20 @@ impl Monitor {
         // Create WebSocket connection
         let ws = WebSocket::new(ws_url)
             .map_err(|e| {
-                let err_msg = format!("Failed to create WebSocket: {:?}", e);
+                let err_msg = format!(
+                    "Failed to create WebSocket connection to '{}': {:?}\n\n\
+                    Possible causes:\n\
+                    - Invalid WebSocket URL format (should start with wss:// or ws://)\n\
+                    - Network connectivity issues\n\
+                    - Firewall blocking WebSocket connections\n\
+                    - Browser security restrictions\n\n\
+                    Try:\n\
+                    1. Verify the WebSocket URL is correct\n\
+                    2. Check browser console for CORS or network errors\n\
+                    3. Try a different Solana RPC provider\n\
+                    4. Disable browser extensions that might block connections",
+                    ws_url, e
+                );
                 error!("{}", err_msg);
                 if let Ok(mut cb) = log_callback.lock() {
                     cb(
@@ -141,23 +154,30 @@ impl Monitor {
         let on_message = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: MessageEvent| {
             // Increment total message count
             let current_count = {
-                let mut count = msg_count_for_handler.lock()
-                    .expect("Failed to lock message count");
-                *count += 1;
-                *count
+                match msg_count_for_handler.lock() {
+                    Ok(mut count) => {
+                        *count += 1;
+                        *count
+                    },
+                    Err(e) => {
+                        error!("Failed to lock message count: {:?}", e);
+                        return;
+                    }
+                }
             };
             
             // Log every 50 messages to show activity
             if current_count % 50 == 0 {
                 info!("Received {} total WebSocket messages", current_count);
                 if let Ok(mut cb) = log_cb_for_msg.lock() {
-                    let pump_count = *pump_msg_count_for_handler.lock()
-                        .expect("Failed to lock pump message count");
-                    cb(
-                        "info".to_string(),
-                        "Monitor is active".to_string(),
-                        format!("Total messages: {} | Pump.fun messages: {}", current_count, pump_count)
-                    );
+                    if let Ok(pump_count_guard) = pump_msg_count_for_handler.lock() {
+                        let pump_count = *pump_count_guard;
+                        cb(
+                            "info".to_string(),
+                            "Monitor is active".to_string(),
+                            format!("Total messages: {} | Pump.fun messages: {}", current_count, pump_count)
+                        );
+                    }
                 }
             }
             
@@ -179,8 +199,7 @@ impl Monitor {
                     Ok(value) => {
                         // Check if this is a subscription confirmation
                         if let Some(result) = value.get("result") {
-                            if result.is_u64() {
-                                let sub_id = result.as_u64().unwrap();
+                            if let Some(sub_id) = result.as_u64() {
                                 info!("✓ Subscription confirmed with ID: {}", sub_id);
                                 if let Ok(mut cb) = log_cb_for_msg.lock() {
                                     cb(
@@ -190,6 +209,8 @@ impl Monitor {
                                     );
                                 }
                                 return;
+                            } else {
+                                info!("Received result that is not a u64: {:?}", result);
                             }
                         }
 
@@ -198,10 +219,16 @@ impl Monitor {
                             if method == "logsNotification" {
                                 // Increment pump.fun message count
                                 let pump_count = {
-                                    let mut count = pump_msg_count_for_handler.lock()
-                                        .expect("Failed to lock pump message count");
-                                    *count += 1;
-                                    *count
+                                    match pump_msg_count_for_handler.lock() {
+                                        Ok(mut count) => {
+                                            *count += 1;
+                                            *count
+                                        },
+                                        Err(e) => {
+                                            error!("Failed to lock pump message count: {:?}", e);
+                                            return;
+                                        }
+                                    }
                                 };
                                 
                                 info!("Received logsNotification #{}", pump_count);
@@ -233,9 +260,13 @@ impl Monitor {
                                         
                                         // Check if we've seen this signature before
                                         let is_new = {
-                                            let mut seen = seen_sigs.lock()
-                                                .expect("Failed to lock seen signatures");
-                                            seen.insert(sig.to_string())
+                                            match seen_sigs.lock() {
+                                                Ok(mut seen) => seen.insert(sig.to_string()),
+                                                Err(e) => {
+                                                    error!("Failed to lock seen signatures: {:?}", e);
+                                                    return;
+                                                }
+                                            }
                                         };
 
                                         if !is_new {
@@ -432,9 +463,9 @@ impl Monitor {
         self.on_close = None;
 
         // Clear seen signatures
-        self.seen_signatures.lock()
-            .expect("Failed to lock seen signatures for cleanup")
-            .clear();
+        if let Ok(mut seen) = self.seen_signatures.lock() {
+            seen.clear();
+        }
 
         Ok(())
     }

@@ -137,9 +137,12 @@ impl SolBeastBot {
             .clone();
         let pump_fun_program = state.settings.pump_fun_program.clone();
         
+        // Drop the lock before creating callbacks and starting monitor to avoid recursive locking
+        drop(state);
+        
         // Create logging callback that adds logs to state
         let state_for_logs = self.state.clone();
-        let log_callback = Arc::new(Mutex::new(move |level: String, message: String, details: String| {
+        let log_callback: Arc<dyn Fn(String, String, String)> = Arc::new(move |level: String, message: String, details: String| {
             if let Ok(mut s) = state_for_logs.lock() {
                 let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
                     .unwrap_or_else(|| "unknown".to_string());
@@ -155,13 +158,21 @@ impl SolBeastBot {
                     s.logs.drain(0..excess);
                 }
             }
-        }));
+        });
         
         // Create and start monitor
         let mut monitor = Monitor::new();
         monitor.start(&ws_url, &pump_fun_program, log_callback)
             .map_err(|e| JsValue::from_str(&format!("Failed to start monitor: {:?}", e)))?;
         
+        // Re-acquire lock to update state
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in start (after monitor), recovering...");
+                poisoned.into_inner()
+            }
+        };
         state.monitor = Some(monitor);
         state.running = true;
         

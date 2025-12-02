@@ -38,18 +38,16 @@ impl Monitor {
         &mut self,
         ws_url: &str,
         pump_fun_program: &str,
-        log_callback: Arc<Mutex<dyn FnMut(String, String, String)>>,
+        log_callback: Arc<dyn Fn(String, String, String)>,
     ) -> Result<(), JsValue> {
         info!("Starting WASM monitor for pump.fun program: {}", pump_fun_program);
         
         // Log the start attempt
-        if let Ok(mut cb) = log_callback.lock() {
-            cb(
-                "info".to_string(),
-                "Initializing monitor".to_string(),
-                format!("Connecting to WebSocket: {}\nTarget program: {}", ws_url, pump_fun_program)
-            );
-        }
+        log_callback(
+            "info".to_string(),
+            "Initializing monitor".to_string(),
+            format!("Connecting to WebSocket: {}\nTarget program: {}", ws_url, pump_fun_program)
+        );
 
         // Create WebSocket connection
         let ws = WebSocket::new(ws_url)
@@ -69,13 +67,11 @@ impl Monitor {
                     ws_url, e
                 );
                 error!("{}", err_msg);
-                if let Ok(mut cb) = log_callback.lock() {
-                    cb(
-                        "error".to_string(),
-                        "WebSocket creation failed".to_string(),
-                        err_msg.clone()
-                    );
-                }
+                log_callback(
+                    "error".to_string(),
+                    "WebSocket creation failed".to_string(),
+                    err_msg.clone()
+                );
                 JsValue::from_str(&err_msg)
             })?;
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
@@ -93,13 +89,11 @@ impl Monitor {
             info!("WebSocket connection established successfully");
             
             // Log connection success
-            if let Ok(mut cb) = log_cb_for_open.lock() {
-                cb(
-                    "info".to_string(),
-                    "WebSocket connected".to_string(),
-                    "Preparing to subscribe to program logs".to_string()
-                );
-            }
+            log_cb_for_open(
+                "info".to_string(),
+                "WebSocket connected".to_string(),
+                "Preparing to subscribe to program logs".to_string()
+            );
             
             // Subscribe to pump.fun program logs
             let subscribe_msg = serde_json::json!({
@@ -116,33 +110,27 @@ impl Monitor {
                 info!("Sending subscription request: {}", msg_str);
                 if let Err(e) = ws_for_open.send_with_str(&msg_str) {
                     error!("Failed to send subscription: {:?}", e);
-                    if let Ok(mut cb) = log_cb_for_open.lock() {
-                        cb(
-                            "error".to_string(),
-                            "Subscription failed".to_string(),
-                            format!("Error: {:?}", e)
-                        );
-                    }
+                    log_cb_for_open(
+                        "error".to_string(),
+                        "Subscription failed".to_string(),
+                        format!("Error: {:?}", e)
+                    );
                 } else {
                     info!("Successfully sent logsSubscribe request");
                     // Log to UI
-                    if let Ok(mut cb) = log_cb_for_open.lock() {
-                        cb(
-                            "info".to_string(),
-                            "Subscription request sent".to_string(),
-                            format!("Waiting for confirmation from Solana node\nMonitoring program: {}", pump_prog_for_sub)
-                        );
-                    }
+                    log_cb_for_open(
+                        "info".to_string(),
+                        "Subscription request sent".to_string(),
+                        format!("Waiting for confirmation from Solana node\nMonitoring program: {}", pump_prog_for_sub)
+                    );
                 }
             } else {
                 error!("Failed to serialize subscription message");
-                if let Ok(mut cb) = log_cb_for_open.lock() {
-                    cb(
-                        "error".to_string(),
-                        "Subscription serialization failed".to_string(),
-                        "Could not create subscription JSON".to_string()
-                    );
-                }
+                log_cb_for_open(
+                    "error".to_string(),
+                    "Subscription serialization failed".to_string(),
+                    "Could not create subscription JSON".to_string()
+                );
             }
         }) as Box<dyn FnMut(_)>);
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
@@ -169,15 +157,13 @@ impl Monitor {
             // Log every 50 messages to show activity
             if current_count % 50 == 0 {
                 info!("Received {} total WebSocket messages", current_count);
-                if let Ok(mut cb) = log_cb_for_msg.lock() {
-                    if let Ok(pump_count_guard) = pump_msg_count_for_handler.lock() {
-                        let pump_count = *pump_count_guard;
-                        cb(
-                            "info".to_string(),
-                            "Monitor is active".to_string(),
-                            format!("Total messages: {} | Pump.fun messages: {}", current_count, pump_count)
-                        );
-                    }
+                if let Ok(pump_count_guard) = pump_msg_count_for_handler.lock() {
+                    let pump_count = *pump_count_guard;
+                    log_cb_for_msg(
+                        "info".to_string(),
+                        "Monitor is active".to_string(),
+                        format!("Total messages: {} | Pump.fun messages: {}", current_count, pump_count)
+                    );
                 }
             }
             
@@ -201,13 +187,11 @@ impl Monitor {
                         if let Some(result) = value.get("result") {
                             if let Some(sub_id) = result.as_u64() {
                                 info!("✓ Subscription confirmed with ID: {}", sub_id);
-                                if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                    cb(
-                                        "info".to_string(),
-                                        "✓ Subscription confirmed".to_string(),
-                                        format!("Subscription ID: {}\nNow actively monitoring for pump.fun transactions", sub_id)
-                                    );
-                                }
+                                log_cb_for_msg(
+                                    "info".to_string(),
+                                    "✓ Subscription confirmed".to_string(),
+                                    format!("Subscription ID: {}\nNow actively monitoring for pump.fun transactions", sub_id)
+                                );
                                 return;
                             } else {
                                 info!("Received result that is not a u64: {:?}", result);
@@ -248,15 +232,13 @@ impl Monitor {
                                               sig, logs.len(), err.is_some());
                                         
                                         // Log detailed info for this transaction
-                                        if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                            cb(
-                                                "info".to_string(),
-                                                format!("Transaction received (#{} total)", pump_count),
-                                                format!("Signature: {}\nLogs: {} entries\nError: {}", 
-                                                       sig, logs.len(), 
-                                                       if err.is_some() { "Yes" } else { "No" })
-                                            );
-                                        }
+                                        log_cb_for_msg(
+                                            "info".to_string(),
+                                            format!("Transaction received (#{} total)", pump_count),
+                                            format!("Signature: {}\nLogs: {} entries\nError: {}", 
+                                                   sig, logs.len(), 
+                                                   if err.is_some() { "Yes" } else { "No" })
+                                        );
                                         
                                         // Check if we've seen this signature before
                                         let is_new = {
@@ -304,14 +286,12 @@ impl Monitor {
                                             };
                                             
                                             // Log the detection with details
-                                            if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                                cb(
-                                                    "info".to_string(),
-                                                    "🎯 New pump.fun transaction detected!".to_string(),
-                                                    format!("Signature: {}\nLogs with pump.fun: {}\n{}\n\nNext steps:\n1. Fetch transaction details\n2. Extract token mint address\n3. Get token metadata\n4. Apply buy heuristics\n5. Execute purchase if conditions met", 
-                                                           sig, pump_fun_logs.len(), instr_info)
-                                                );
-                                            }
+                                            log_cb_for_msg(
+                                                "info".to_string(),
+                                                "🎯 New pump.fun transaction detected!".to_string(),
+                                                format!("Signature: {}\nLogs with pump.fun: {}\n{}\n\nNext steps:\n1. Fetch transaction details\n2. Extract token mint address\n3. Get token metadata\n4. Apply buy heuristics\n5. Execute purchase if conditions met", 
+                                                       sig, pump_fun_logs.len(), instr_info)
+                                            );
 
                                             // In a full implementation, we would:
                                             // 1. Fetch transaction details via RPC
@@ -323,24 +303,20 @@ impl Monitor {
                                             // Log that we received a message but it didn't match
                                             if pump_count <= 10 || pump_count % 25 == 0 {
                                                 info!("Transaction {} does not contain pump.fun program ID", sig);
-                                                if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                                    cb(
-                                                        "info".to_string(),
-                                                        format!("Non-pump.fun transaction (#{} total)", pump_count),
-                                                        format!("Signature: {}\nThis transaction doesn't involve the pump.fun program", sig)
-                                                    );
-                                                }
+                                                log_cb_for_msg(
+                                                    "info".to_string(),
+                                                    format!("Non-pump.fun transaction (#{} total)", pump_count),
+                                                    format!("Signature: {}\nThis transaction doesn't involve the pump.fun program", sig)
+                                                );
                                             }
                                         }
                                     } else {
                                         error!("logsNotification missing logs or signature");
-                                        if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                            cb(
-                                                "warn".to_string(),
-                                                "Incomplete transaction data".to_string(),
-                                                "Received logsNotification without proper logs or signature".to_string()
-                                            );
-                                        }
+                                        log_cb_for_msg(
+                                            "warn".to_string(),
+                                            "Incomplete transaction data".to_string(),
+                                            "Received logsNotification without proper logs or signature".to_string()
+                                        );
                                     }
                                 } else {
                                     error!("logsNotification has unexpected structure");
@@ -352,42 +328,36 @@ impl Monitor {
                         } else if value.get("error").is_some() {
                             // This is an error response
                             error!("Received error from WebSocket: {:?}", value.get("error"));
-                            if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                cb(
-                                    "error".to_string(),
-                                    "WebSocket error response".to_string(),
-                                    format!("{:?}", value.get("error"))
-                                );
-                            }
+                            log_cb_for_msg(
+                                "error".to_string(),
+                                "WebSocket error response".to_string(),
+                                format!("{:?}", value.get("error"))
+                            );
                         }
                     },
                     Err(e) => {
                         error!("Failed to parse WebSocket message: {}", e);
                         if current_count <= 5 {
-                            if let Ok(mut cb) = log_cb_for_msg.lock() {
-                                cb(
-                                    "warn".to_string(),
-                                    "Message parsing failed".to_string(),
-                                    format!("Error: {}\nMessage preview: {}", e, 
-                                           if message.len() > 100 { 
-                                               format!("{}...", &message[..100]) 
-                                           } else { 
-                                               message.clone() 
-                                           })
-                                );
-                            }
+                            log_cb_for_msg(
+                                "warn".to_string(),
+                                "Message parsing failed".to_string(),
+                                format!("Error: {}\nMessage preview: {}", e, 
+                                       if message.len() > 100 { 
+                                           format!("{}...", &message[..100]) 
+                                       } else { 
+                                           message.clone() 
+                                       })
+                            );
                         }
                     }
                 }
             } else {
                 error!("Received non-text WebSocket message");
-                if let Ok(mut cb) = log_cb_for_msg.lock() {
-                    cb(
-                        "warn".to_string(),
-                        "Non-text message received".to_string(),
-                        "WebSocket sent binary or other non-text data".to_string()
-                    );
-                }
+                log_cb_for_msg(
+                    "warn".to_string(),
+                    "Non-text message received".to_string(),
+                    "WebSocket sent binary or other non-text data".to_string()
+                );
             }
         }) as Box<dyn FnMut(_)>);
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
@@ -398,13 +368,11 @@ impl Monitor {
             let error_msg = format!("WebSocket error - Type: {:?}, Message: {}", 
                                    e.type_(), e.message());
             error!("{}", error_msg);
-            if let Ok(mut cb) = log_cb_for_err.lock() {
-                cb(
-                    "error".to_string(),
-                    "❌ WebSocket error occurred".to_string(),
-                    error_msg
-                );
-            }
+            log_cb_for_err(
+                "error".to_string(),
+                "❌ WebSocket error occurred".to_string(),
+                error_msg
+            );
         }) as Box<dyn FnMut(_)>);
         ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
@@ -429,13 +397,11 @@ impl Monitor {
                                    e.reason(),
                                    e.was_clean());
             info!("WebSocket closed: {}", close_msg);
-            if let Ok(mut cb) = log_cb_for_close.lock() {
-                cb(
-                    "warn".to_string(),
-                    "⚠️ WebSocket connection closed".to_string(),
-                    close_msg
-                );
-            }
+            log_cb_for_close(
+                "warn".to_string(),
+                "⚠️ WebSocket connection closed".to_string(),
+                close_msg
+            );
         }) as Box<dyn FnMut(_)>);
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 

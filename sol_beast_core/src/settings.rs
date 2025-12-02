@@ -329,6 +329,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "native")]
     fn load_example_config() {
         // This test validates that `Settings::from_file` can load the example
         // config without panicking and that a couple of fields match expected

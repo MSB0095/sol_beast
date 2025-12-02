@@ -124,9 +124,18 @@ export const botService = {
           console.error('Failed to get WASM settings:', err)
           const errorMsg = err instanceof Error ? err.message : String(err)
           
-          // If we get "unreachable" or other critical error, try to reinitialize with defaults
-          if (errorMsg.includes('unreachable') || errorMsg.includes('undefined')) {
-            console.log('Attempting to recover from settings error by loading defaults...')
+          // Attempt recovery for critical errors
+          // These typically indicate WASM panics or uninitialized state
+          // Common error indicators: "unreachable" (WASM panic), "undefined" (JS interop issue)
+          const isCriticalError = 
+            errorMsg.includes('unreachable') || 
+            errorMsg.includes('undefined') ||
+            errorMsg.includes('null') ||
+            err === null ||
+            err === undefined
+          
+          if (isCriticalError) {
+            console.log('Critical error detected, attempting recovery by loading defaults...')
             const defaultSettings = await loadDefaultSettings()
             if (defaultSettings) {
               try {

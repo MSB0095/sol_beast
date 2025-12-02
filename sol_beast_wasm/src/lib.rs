@@ -62,7 +62,11 @@ pub struct LogEntry {
 impl SolBeastBot {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        // Try to load settings from localStorage, fallback to defaults
+        // Settings loading hierarchy for GitHub Pages deployment:
+        // 1. Try localStorage (user's saved settings from previous session)
+        // 2. Fall back to built-in defaults if localStorage is empty or corrupted
+        // Note: The frontend will also try loading from static bot-settings.json
+        // if it detects settings are invalid after bot initialization.
         let settings = match sol_beast_core::wasm::load_settings::<BotSettings>() {
             Ok(Some(saved_settings)) => {
                 info!("Loaded settings from localStorage");

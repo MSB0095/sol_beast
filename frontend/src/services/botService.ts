@@ -10,23 +10,33 @@ let wasmInitialized = false
 
 // Initialize WASM if needed
 async function initWasm() {
-  if (!USE_WASM || wasmInitialized) return
+  if (!USE_WASM) return true
+  if (wasmInitialized) return true
   
   try {
+    console.log('Initializing WASM module...')
     // Dynamically import WASM module
     const wasm = await import('../wasm/sol_beast_wasm')
-    await wasm.default() // Initialize WASM
-    await wasm.init() // Call our init function
+    
+    // Initialize WASM (this calls wasm-bindgen initialization)
+    await wasm.default()
+    
+    // Note: wasm.init() is called automatically by #[wasm_bindgen(start)]
+    // during wasm.default(), so we don't need to call it explicitly
+    
+    // Create bot instance
     wasmBot = new wasm.SolBeastBot()
     wasmInitialized = true
-    console.log('✓ WASM bot initialized')
+    console.log('✓ WASM bot initialized successfully')
+    return true
   } catch (error) {
-    console.warn('WASM initialization failed, falling back to REST API:', error)
+    console.error('WASM initialization failed:', error)
+    // Reset state on failure
+    wasmBot = null
+    wasmInitialized = false
     // Fall back to REST API
     return false
   }
-  
-  return true
 }
 
 // Bot Service Interface
@@ -47,9 +57,13 @@ export const botService = {
   // Start bot
   async start() {
     if (this.isWasmMode()) {
-      // Verify wasmBot is initialized
-      if (!wasmBot) {
-        throw new Error('WASM bot is not initialized. Please wait for initialization to complete.')
+      // Ensure initialization is complete
+      if (!wasmInitialized || !wasmBot) {
+        console.log('WASM not fully initialized, attempting to initialize...')
+        const success = await initWasm()
+        if (!success || !wasmBot) {
+          throw new Error('WASM bot initialization failed. Please check browser console for details.')
+        }
       }
       
       try {

@@ -11,6 +11,7 @@ pub mod idl;
 pub mod settings;
 pub mod buyer;
 pub mod rpc_client;
+pub mod transaction_service;
 
 #[cfg(feature = "native")]
 pub mod native;
@@ -27,3 +28,4 @@ pub use rpc_client::*;
 pub use tx_parser::*;
 pub use metadata::*;
 pub use storage_trait::*;
+pub use transaction_service::*;

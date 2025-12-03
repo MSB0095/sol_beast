@@ -6,12 +6,19 @@ declare module '*/wasm/sol_beast_wasm' {
   export function init(): Promise<void>
   export class SolBeastBot {
     constructor()
-    start(): Promise<any>
-    stop(): Promise<any>
-    get_state(): Promise<any>
-    get_stats(): Promise<any>
-    get_logs(): Promise<any>
-    get_detected_coins(): Promise<any>
-    set_mode(mode: string): Promise<any>
+    start(): void
+    stop(): void
+    is_running(): boolean
+    get_mode(): string
+    set_mode(mode: string): void
+    get_settings(): string
+    update_settings(settings: string): void
+    get_logs(): string
+    get_holdings(): string
+    get_detected_tokens(): string
+    test_rpc_connection(): Promise<string>
+    test_ws_connection(): Promise<string>
+    save_to_storage(): void
+    load_from_storage(): void
   }
 }

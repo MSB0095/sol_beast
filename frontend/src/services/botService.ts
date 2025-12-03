@@ -1,5 +1,5 @@
 // Dual-mode bot service: WASM or REST API
-import { API_BASE_URL } from '../config'
+import { API_BASE_URL, API_DETECTED_COINS_URL } from '../config'
 
 // Feature detection - automatically enable WASM mode on GitHub Pages
 const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
@@ -16,6 +16,7 @@ interface WasmBot {
   set_mode(mode: string): void
   get_logs(): string
   get_holdings(): string
+  get_detected_tokens(): string
   test_rpc_connection(): Promise<string>
   test_ws_connection(): Promise<string>
   save_to_storage(): void
@@ -418,6 +419,27 @@ export const botService = {
       const response = await fetch(`${API_BASE_URL}/holdings`)
       if (!response.ok) {
         throw new Error('Failed to fetch holdings')
+      }
+      return response.json()
+    }
+  },
+
+  // Get detected tokens (Phase 2.5 feature)
+  async getDetectedTokens() {
+    if (this.isWasmMode()) {
+      if (!wasmBot) {
+        throw new Error('WASM bot is not initialized')
+      }
+      try {
+        const json = wasmBot.get_detected_tokens()
+        return JSON.parse(json)
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
+    } else {
+      const response = await fetch(`${API_DETECTED_COINS_URL}`)
+      if (!response.ok) {
+        throw new Error('Failed to fetch detected tokens')
       }
       return response.json()
     }

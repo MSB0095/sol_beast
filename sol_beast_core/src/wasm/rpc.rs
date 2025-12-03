@@ -1,10 +1,14 @@
 // WASM RPC Client using browser fetch API
+use crate::rpc_client::{RpcClient, RpcResult};
+use crate::error::CoreError;
+use async_trait::async_trait;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+use log::debug;
 
 #[derive(Serialize, Deserialize)]
 struct RpcRequest {
@@ -146,6 +150,156 @@ impl WasmRpcClient {
         result["value"]
             .as_array()
             .ok_or_else(|| JsValue::from_str("Invalid token accounts response"))
+            .map(|arr| arr.clone())
+    }
+}
+
+// Implement the RpcClient trait for WasmRpcClient
+#[async_trait(?Send)]
+impl RpcClient for WasmRpcClient {
+    async fn get_latest_blockhash(&self) -> RpcResult<String> {
+        debug!("WASM RPC: get_latest_blockhash");
+        let params = json!([]);
+        let result: Value = self.call("getLatestBlockhash", params)
+            .await
+            .map_err(|e| CoreError::Rpc(format!("getLatestBlockhash failed: {:?}", e)))?;
+        
+        result["value"]["blockhash"]
+            .as_str()
+            .ok_or_else(|| CoreError::ParseError("Invalid blockhash response".to_string()))
+            .map(|s| s.to_string())
+    }
+    
+    async fn get_account_info(&self, pubkey: &str) -> RpcResult<Option<Value>> {
+        debug!("WASM RPC: get_account_info for {}", pubkey);
+        let params = json!([pubkey, { "encoding": "base64", "commitment": "confirmed" }]);
+        let result: Value = self.call("getAccountInfo", params)
+            .await
+            .map_err(|e| CoreError::Rpc(format!("getAccountInfo failed: {:?}", e)))?;
+        
+        Ok(result.get("value").cloned())
+    }
+    
+    async fn get_transaction(&self, signature: &str) -> RpcResult<Option<Value>> {
+        debug!("WASM RPC: get_transaction for {}", signature);
+        let params = json!([
+            signature,
+            {
+                "encoding": "jsonParsed",
+                "commitment": "confirmed",
+                "maxSupportedTransactionVersion": 0
+            }
+        ]);
+        
+        let result: Value = self.call("getTransaction", params)
+            .await
+            .map_err(|e| CoreError::Rpc(format!("getTransaction failed: {:?}", e)))?;
+        
+        // Transaction might not exist yet, return None if null
+        if result.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
+    }
+    
+    async fn send_transaction(&self, transaction: &[u8]) -> RpcResult<String> {
+        debug!("WASM RPC: send_transaction");
+        
+        // Encode transaction as base64
+        use base64::{Engine as _, engine::general_purpose::STANDARD as Base64Engine};
+        let tx_base64 = Base64Engine.encode(transaction);
+        
+        let params = json!([
+            tx_base64,
+            {
+                "encoding": "base64",
+                "skipPreflight": false,
+                "preflightCommitment": "confirmed"
+            }
+        ]);
+        
+        self.call("sendTransaction", params)
+            .await
+            .map_err(|e| CoreError::Transaction(format!("sendTransaction failed: {:?}", e)))
+    }
+    
+    async fn get_token_account_balance(&self, pubkey: &str) -> RpcResult<u64> {
+        debug!("WASM RPC: get_token_account_balance for {}", pubkey);
+        let params = json!([pubkey]);
+        let result: Value = self.call("getTokenAccountBalance", params)
+            .await
+            .map_err(|e| CoreError::Rpc(format!("getTokenAccountBalance failed: {:?}", e)))?;
+        
+        // Parse amount from response
+        result["value"]["amount"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| CoreError::ParseError("Invalid token balance response".to_string()))
+    }
+    
+    async fn get_multiple_accounts(&self, pubkeys: &[String]) -> RpcResult<Vec<Option<Value>>> {
+        debug!("WASM RPC: get_multiple_accounts for {} keys", pubkeys.len());
+        let params = json!([pubkeys, { "encoding": "base64", "commitment": "confirmed" }]);
+        let result: Value = self.call("getMultipleAccounts", params)
+            .await
+            .map_err(|e| CoreError::Rpc(format!("getMultipleAccounts failed: {:?}", e)))?;
+        
+        let accounts_array = result["value"]
+            .as_array()
+            .ok_or_else(|| CoreError::ParseError("Invalid multiple accounts response".to_string()))?;
+        
+        let mut accounts = Vec::new();
+        for account in accounts_array {
+            if account.is_null() {
+                accounts.push(None);
+            } else {
+                accounts.push(Some(account.clone()));
+            }
+        }
+        
+        Ok(accounts)
+    }
+    
+    async fn simulate_transaction(&self, transaction: &[u8]) -> RpcResult<Value> {
+        debug!("WASM RPC: simulate_transaction");
+        
+        // Encode transaction as base64
+        use base64::{Engine as _, engine::general_purpose::STANDARD as Base64Engine};
+        let tx_base64 = Base64Engine.encode(transaction);
+        
+        let params = json!([
+            tx_base64,
+            {
+                "encoding": "base64",
+                "commitment": "confirmed"
+            }
+        ]);
+        
+        self.call("simulateTransaction", params)
+            .await
+            .map_err(|e| CoreError::Transaction(format!("simulateTransaction failed: {:?}", e)))
+    }
+    
+    async fn get_program_accounts(&self, program_id: &str, filters: Option<Value>) -> RpcResult<Vec<Value>> {
+        debug!("WASM RPC: get_program_accounts for {}", program_id);
+        
+        let mut config = serde_json::json!({
+            "encoding": "base64",
+            "commitment": "confirmed"
+        });
+        
+        if let Some(f) = filters {
+            config["filters"] = f;
+        }
+        
+        let params = json!([program_id, config]);
+        let result: Value = self.call("getProgramAccounts", params)
+            .await
+            .map_err(|e| CoreError::Rpc(format!("getProgramAccounts failed: {:?}", e)))?;
+        
+        result.as_array()
+            .ok_or_else(|| CoreError::ParseError("Invalid program accounts response".to_string()))
             .map(|arr| arr.clone())
     }
 }

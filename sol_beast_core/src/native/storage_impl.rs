@@ -5,7 +5,7 @@ use crate::error::CoreError;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::PathBuf;
-use log::{debug, warn};
+use log::debug;
 
 /// File-based storage backend for native (CLI) mode
 pub struct FileStorage {

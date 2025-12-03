@@ -29,7 +29,7 @@ impl HttpClient for WasmHttpClient {
         debug!("Fetching URL via WASM: {}", url);
         
         // Create request
-        let mut opts = RequestInit::new();
+        let opts = RequestInit::new();
         opts.set_method("GET");
         opts.set_mode(RequestMode::Cors);
         

@@ -108,13 +108,8 @@ pub async fn fetch_bonding_curve_state<C: RpcClient + ?Sized>(
 /// Formula: (virtual_sol_lamports / 1e9) / (virtual_token_base_units / 1e6)
 /// Simplifies to (virtual_sol_lamports / virtual_token_base_units) * 1e-3
 pub fn calculate_price_from_bonding_curve(state: &BondingCurveState) -> f64 {
-    if state.virtual_token_reserves == 0 {
-        return 0.0;
-    }
-    
-    let vsol = state.virtual_sol_reserves as f64;
-    let vtok = state.virtual_token_reserves as f64;
-    (vsol / vtok) * 1e-3
+    // Delegate to the existing method in BondingCurveState
+    state.spot_price_sol_per_token().unwrap_or(0.0)
 }
 
 /// Calculate liquidity in SOL from bonding curve state

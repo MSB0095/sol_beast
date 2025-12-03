@@ -18,6 +18,9 @@ rand = { workspace = true }
 once_cell = { workspace = true }
 futures-util = { workspace = true }
 
+# Additional dependencies for core functionality
+async-trait = "0.1"
+
 # Solana dependencies
 solana-program = { workspace = true }
 solana-sdk = { workspace = true }

@@ -130,6 +130,29 @@ export default function NewCoinsPanel() {
       }
       
       console.log('Transaction confirmed!')
+      
+      // Step 10: Record the holding (Phase 4)
+      try {
+        const metadata = {
+          name: token.name,
+          symbol: token.symbol,
+          image: token.image_uri,
+          description: token.description,
+        }
+        
+        botService.addHolding(
+          token.mint,
+          BigInt(txData.tokenAmount),
+          txData.buyAmountSol / (txData.tokenAmount / 1_000_000),  // Calculate actual price per token
+          metadata
+        )
+        
+        console.log('Holding recorded successfully')
+      } catch (holdingErr) {
+        console.error('Failed to record holding:', holdingErr)
+        // Don't fail the whole transaction if holding record fails
+      }
+      
       alert(`Transaction confirmed!\n\nToken purchased successfully.\n\nView on Solscan: https://solscan.io/tx/${signature}`)
       
     } catch (err) {

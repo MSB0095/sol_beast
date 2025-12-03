@@ -4,6 +4,7 @@ import { botService } from '../services/botService'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
 import { Transaction, TransactionInstruction, PublicKey, Connection } from '@solana/web3.js'
+import { walletConnectRequiredToast, loadingToast, updateLoadingToast, transactionToastWithLink, errorToast } from '../utils/toast.tsx'
 
 // DetectedToken interface matching the backend structure
 interface DetectedToken {
@@ -67,17 +68,21 @@ export default function NewCoinsPanel() {
   
   const handleBuyToken = async (token: DetectedToken) => {
     if (!connected || !publicKey) {
-      alert('Please connect your wallet first')
+      walletConnectRequiredToast()
       return
     }
     
     setBuyingToken(token.mint)
+    const toastId = loadingToast('Building transaction...')
+    
     try {
       console.log('Building buy transaction for token:', token.mint)
       
       // Step 1: Build transaction using WASM bot
       const txData = botService.buildBuyTransaction(token.mint, publicKey.toBase58())
       console.log('Transaction data:', txData)
+      
+      updateLoadingToast(toastId, true, 'Transaction built', 'Awaiting wallet signature...')
       
       // Step 2: Decode instruction data from base64
       const instructionData = Buffer.from(txData.data, 'base64')
@@ -116,7 +121,10 @@ export default function NewCoinsPanel() {
       const signature = await sendTransaction(transaction, connection)
       
       console.log('Transaction sent:', signature)
-      alert(`Transaction submitted!\n\nSignature: ${signature}\n\nView on Solscan: https://solscan.io/tx/${signature}`)
+      transactionToastWithLink(signature, 'buy', 'submitted')
+      
+      // Show loading toast for confirmation
+      const confirmToastId = loadingToast('Confirming transaction...')
       
       // Step 9: Wait for confirmation
       const confirmation = await connection.confirmTransaction({
@@ -130,11 +138,12 @@ export default function NewCoinsPanel() {
       }
       
       console.log('Transaction confirmed!')
-      alert(`Transaction confirmed!\n\nToken purchased successfully.\n\nView on Solscan: https://solscan.io/tx/${signature}`)
+      updateLoadingToast(confirmToastId, true, 'Transaction confirmed!', 'Purchase successful')
+      transactionToastWithLink(signature, 'buy', 'confirmed')
       
     } catch (err) {
       console.error('Buy failed:', err)
-      alert(`Failed to buy token: ${err instanceof Error ? err.message : String(err)}`)
+      errorToast('Failed to buy token', err instanceof Error ? err.message : String(err))
     } finally {
       setBuyingToken(null)
     }

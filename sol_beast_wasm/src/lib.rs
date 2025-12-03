@@ -16,7 +16,7 @@ const DEFAULT_CACHE_CAPACITY: usize = 1000;
 const DEFAULT_PRICE_CACHE_TTL_SECS: u64 = 60;
 const MAX_FETCH_RETRIES: u8 = 3;
 const MAX_DETECTED_TOKENS: usize = 50;
-const FALLBACK_ESTIMATED_PRICE: f64 = 0.00001; // Fallback if bonding curve fetch fails
+const PLACEHOLDER_ESTIMATED_PRICE: f64 = 0.00001; // Phase 3 will fetch real prices
 
 // Initialize panic hook and logger for WASM
 #[wasm_bindgen(start)]
@@ -695,41 +695,24 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
         }
     };
     
-    // Step 3: Fetch bonding curve state and calculate real price
-    use sol_beast_core::rpc_client::{fetch_bonding_curve_state, calculate_price_from_bonding_curve, calculate_liquidity_sol};
-    
-    let (bonding_curve_state, estimated_price, liquidity_sol) = match fetch_bonding_curve_state(
-        &parsed_tx.mint,
-        &parsed_tx.bonding_curve,
-        &rpc_client,
-    ).await {
-        Ok(state) => {
-            let price = calculate_price_from_bonding_curve(&state);
-            let liquidity = calculate_liquidity_sol(&state);
-            info!("Fetched bonding curve state: price={:.8} SOL, liquidity={:.4} SOL", price, liquidity);
-            (Some(state), price, Some(liquidity))
-        },
-        Err(e) => {
-            warn!("Failed to fetch bonding curve state for {}: {:?}, using fallback price", parsed_tx.mint, e);
-            (None, FALLBACK_ESTIMATED_PRICE, None)
-        }
-    };
-    
-    // Step 4: Evaluate buy heuristics with real price and bonding curve state
+    // Step 3: Evaluate buy heuristics
+    // For now, we'll use placeholder values for price and bonding curve state
+    // In Phase 3, we'll fetch actual price from bonding curve
     let buy_amount = core_settings.buy_amount;
+    let estimated_price = PLACEHOLDER_ESTIMATED_PRICE;
     
     let evaluation = evaluate_buy_heuristics(
         &parsed_tx.mint,
         buy_amount,
         estimated_price,
-        bonding_curve_state.as_ref(),
+        None, // No bonding curve state yet - Phase 3
         &core_settings,
     );
     
     info!("Buy evaluation for {}: should_buy={}, reason={}", 
           parsed_tx.mint, evaluation.should_buy, evaluation.reason);
     
-    // Step 5: Extract metadata fields from TokenMetadata
+    // Step 4: Extract metadata fields from TokenMetadata
     let name = metadata.offchain.as_ref().and_then(|m| m.name.clone())
         .or_else(|| metadata.onchain.as_ref().map(|m| m.name.clone()));
     let symbol = metadata.offchain.as_ref().and_then(|m| m.symbol.clone())
@@ -754,7 +737,7 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
         evaluation_reason: evaluation.reason.clone(),
         token_amount: Some(evaluation.token_amount),
         buy_price_sol: Some(evaluation.buy_price_sol),
-        liquidity_sol
+        liquidity_sol: None, // Phase 3 will add this
     };
     
     // Add to state
@@ -777,13 +760,11 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
             message: format!("{} Token evaluated: {}", result_icon, 
                            symbol.as_deref().unwrap_or(&parsed_tx.mint)),
             details: Some(format!(
-                "Name: {}\nSymbol: {}\nMint: {}\nCreator: {}\nPrice: {:.8} SOL\nLiquidity: {:.4} SOL\n\nEvaluation: {}",
+                "Name: {}\nSymbol: {}\nMint: {}\nCreator: {}\n\nEvaluation: {}\n\nNote: Price is estimated. Phase 3 will add real price fetching.",
                 name.as_deref().unwrap_or("Unknown"),
                 symbol.as_deref().unwrap_or("Unknown"),
                 parsed_tx.mint,
                 parsed_tx.creator,
-                estimated_price,
-                liquidity_sol.unwrap_or(0.0),
                 evaluation.reason
             )),
         });

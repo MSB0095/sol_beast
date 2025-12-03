@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Coins, ExternalLink, TrendingUp, Clock, User, CheckCircle, XCircle, ShoppingCart, Loader2 } from 'lucide-react'
+import { Coins, ExternalLink, TrendingUp, Clock, User, CheckCircle, XCircle } from 'lucide-react'
 import { botService } from '../services/botService'
-import { useWallet } from '@solana/wallet-adapter-react'
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
 
 // DetectedToken interface matching the backend structure
 interface DetectedToken {
@@ -30,9 +28,6 @@ export default function NewCoinsPanel() {
   const [tokens, setTokens] = useState<DetectedToken[]>([])
   const [filter, setFilter] = useState<'all' | 'pass' | 'fail'>('all')
   const [error, setError] = useState<string | null>(null)
-  const [buyingToken, setBuyingToken] = useState<string | null>(null)
-  
-  const { publicKey, connected } = useWallet()
 
   useEffect(() => {
     const fetchTokens = async () => {
@@ -63,25 +58,6 @@ export default function NewCoinsPanel() {
 
   const passCount = tokens.filter(t => t.should_buy).length
   const failCount = tokens.filter(t => !t.should_buy).length
-  
-  const handleBuyToken = async (token: DetectedToken) => {
-    if (!connected || !publicKey) {
-      alert('Please connect your wallet first')
-      return
-    }
-    
-    setBuyingToken(token.mint)
-    try {
-      // TODO: Implement actual transaction building and submission
-      // This will be completed in the next phase
-      alert(`Buy functionality coming soon!\n\nToken: ${token.name || token.symbol}\nMint: ${token.mint}\n\nThis feature requires:\n- Transaction building with tx_builder\n- Wallet signing\n- Transaction submission via RPC`)
-    } catch (err) {
-      console.error('Buy failed:', err)
-      alert(`Failed to buy token: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      setBuyingToken(null)
-    }
-  }
 
   if (error) {
     return (
@@ -282,7 +258,7 @@ export default function NewCoinsPanel() {
                   )}
                 </div>
 
-                {/* Mint Address */}
+                {/* Mint Address (Bottom) */}
                 <div className="mt-3 pt-3 border-t border-gray-700">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-mono text-gray-500 truncate">
@@ -311,37 +287,6 @@ export default function NewCoinsPanel() {
                     </div>
                   </div>
                 </div>
-                
-                {/* Buy Button (only for tokens that passed evaluation) */}
-                {token.should_buy && (
-                  <div className="mt-3 pt-3 border-t border-gray-700">
-                    {connected ? (
-                      <button
-                        onClick={() => handleBuyToken(token)}
-                        disabled={buyingToken === token.mint}
-                        className={`w-full py-2 px-4 rounded-lg font-semibold transition-all flex items-center justify-center gap-2 ${
-                          buyingToken === token.mint
-                            ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
-                            : 'bg-gradient-to-r from-green-600 to-green-400 hover:from-green-700 hover:to-green-500 text-white shadow-glow'
-                        }`}
-                      >
-                        {buyingToken === token.mint ? (
-                          <>
-                            <Loader2 size={16} className="animate-spin" />
-                            <span>Processing...</span>
-                          </>
-                        ) : (
-                          <>
-                            <ShoppingCart size={16} />
-                            <span>Buy Token</span>
-                          </>
-                        )}
-                      </button>
-                    ) : (
-                      <WalletMultiButton className="!w-full !bg-gradient-to-r !from-purple-600 !to-blue-600 hover:!from-purple-700 hover:!to-blue-700" />
-                    )}
-                  </div>
-                )}
               </div>
             </div>
           </div>

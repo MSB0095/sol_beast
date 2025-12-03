@@ -1,5 +1,7 @@
 {
-  "_comment": "⚠️ WARNING: Free public Solana RPC endpoints have rate limits and may provide poor performance. For production use, consider premium RPC providers (QuickNode, Alchemy, Helius, etc.). For testing, consider devnet endpoints. See GITHUB_PAGES_SETUP.md for details.",
+  "_comment": "⚠️ IMPORTANT: Public Solana RPC endpoints DO NOT support WebSocket connections from browsers due to CORS restrictions. For WASM mode to work, you MUST use a premium RPC provider that supports browser WebSockets (Helius, QuickNode, Alchemy, etc.) or run your own RPC proxy. See GITHUB_PAGES_SETUP.md for details.",
+  "_example_helius": "wss://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY",
+  "_example_quicknode": "wss://your-endpoint.quiknode.pro/YOUR_API_KEY/",
   "solana_ws_urls": ["wss://api.mainnet-beta.solana.com"],
   "solana_rpc_urls": ["https://api.mainnet-beta.solana.com"],
   "pump_fun_program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",

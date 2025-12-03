@@ -62,15 +62,9 @@ export default defineConfig({
     },
     rollupOptions: {
       output: {
-        manualChunks: {
-          'wallet-adapter': [
-            '@solana/wallet-adapter-base',
-            '@solana/wallet-adapter-react',
-            '@solana/wallet-adapter-react-ui',
-            '@solana/wallet-adapter-wallets',
-          ],
-          'solana-web3': ['@solana/web3.js'],
-        }
+        // Let Vite automatically handle chunking to avoid circular dependency issues
+        // Manual chunking of @solana/web3.js causes "Cannot access before initialization" errors
+        manualChunks: undefined
       }
     }
   }

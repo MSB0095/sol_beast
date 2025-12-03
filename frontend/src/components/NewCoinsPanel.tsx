@@ -178,7 +178,12 @@ export default function NewCoinsPanel() {
 
                 {/* Description */}
                 {token.description && (
-                  <p className="text-xs text-gray-400 mb-3 line-clamp-2">
+                  <p className="text-xs text-gray-400 mb-3 overflow-hidden" style={{ 
+                    display: '-webkit-box',
+                    WebkitLineClamp: 2,
+                    WebkitBoxOrient: 'vertical',
+                    lineClamp: 2
+                  }}>
                     {token.description}
                   </p>
                 )}

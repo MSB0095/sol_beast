@@ -142,6 +142,32 @@ export default function NewCoinsPanel() {
       updateLoadingToast(confirmToastId, true, 'Transaction confirmed!', 'Purchase successful')
       transactionToastWithLink(signature, 'buy', 'confirmed')
       
+      // Step 10: Record the holding (Phase 4)
+      try {
+        const metadata = {
+          name: token.name,
+          symbol: token.symbol,
+          image: token.image_uri,
+          description: token.description,
+        }
+        
+        // Calculate price per token (txData.tokenAmount is in base units, typically 6 decimals for SPL tokens)
+        const tokenDecimals = 6 // pump.fun tokens use 6 decimals
+        const pricePerToken = txData.buyAmountSol / (txData.tokenAmount / Math.pow(10, tokenDecimals))
+        
+        botService.addHolding(
+          token.mint,
+          BigInt(txData.tokenAmount),
+          pricePerToken,
+          metadata
+        )
+        
+        console.log('Holding recorded successfully')
+      } catch (holdingErr) {
+        console.error('Failed to record holding:', holdingErr)
+        // Don't fail the whole transaction if holding record fails
+      }
+      
     } catch (err) {
       console.error('Buy failed:', err)
       

@@ -548,18 +548,74 @@ Progress toward "can buy tokens":
 
 **Limitations**:
 - Uses creator address as fee recipient (works for most cases, properly documented)
-- Uses alerts for feedback (should be replaced with toast notifications in future)
-- Holdings not updated after purchase (Phase 4 work)
 
-#### 5. Phase 4 Implementation (Future PR)
-**Goal**: Add position management
+#### 5. Phase 4: Holdings Management ✅ COMPLETED (PR #62)
+**Goal**: Track purchased tokens and manage positions with TP/SL/timeout
 
 **Tasks**:
-- [ ] Holdings tracking with localStorage persistence
-- [ ] TP/SL/timeout monitoring
-- [ ] Automatic or manual sell execution
+- ✅ Add holding state management in WASM
+- ✅ Implement localStorage persistence for holdings
+- ✅ Create price monitoring system
+- ✅ Add TP/SL/timeout detection
+- ✅ Build sell transaction flow
+- ✅ Update Holdings UI with live data
+- ✅ Implement sell execution via wallet
+- ✅ Add P&L display
 
-**Estimated Time**: 25-35 hours
+**Completed**: December 3, 2025
+
+**Implementation Details**:
+
+**Backend (WASM methods)**:
+1. `add_holding(mint, amount, buy_price, metadata)` - Records purchase
+   - Tracks with timestamp, amount, buy price, metadata
+   - Handles duplicate purchases (averages price)
+   - Persists to localStorage immediately
+
+2. `monitor_holdings()` - Async monitoring (call every 10 seconds)
+   - Fetches current prices from bonding curve
+   - Calculates profit/loss percentage
+   - Detects TP/SL/timeout conditions
+   - Returns JSON with sell recommendations
+
+3. `build_sell_transaction(mint, user_pubkey)` - Builds sell instruction
+   - Similar to buy transaction builder
+   - Applies slippage to min SOL output
+   - Returns JSON for signing
+
+4. `remove_holding(mint, profit_percent, reason)` - Cleanup after sell
+   - Removes from state and localStorage
+   - Logs trade result to UI
+
+**Frontend Integration**:
+1. NewCoinsPanel - Auto-records holdings after buy (with toast notifications)
+2. HoldingsPanel - Complete rewrite:
+   - Fetches holdings every 5 seconds
+   - Monitors for TP/SL/timeout every 10 seconds
+   - Shows yellow alert box when conditions met
+   - "Sell Now" buttons for triggered conditions
+   - Manual sell button for each holding
+   - Complete sell flow with wallet signing
+   - Real-time hold time display
+   - Solscan links for each token
+
+**Storage**:
+- Holdings persist to `localStorage` key: `sol_beast_holdings`
+- Loaded automatically on page reload
+- Updated after every buy/sell
+
+**Features**:
+- Live P&L calculation
+- Hold time tracking (minutes:seconds)
+- Visual alerts for TP/SL/timeout
+- One-click sell from alerts
+- Manual sell anytime
+- Transaction confirmation tracking
+- Automatic holding removal after sell
+
+**Limitations**:
+- Manual sell uses estimated price from buy_price (frontend should fetch current price first for better accuracy)
+- No historical trades display (Phase 5)
 
 ### Success Metrics
 - ✅ Phase 1: Bot compiles and runs - **ACHIEVED**

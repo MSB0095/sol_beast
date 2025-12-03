@@ -4,7 +4,7 @@ import { botService } from '../services/botService'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
 import { Transaction, TransactionInstruction, PublicKey, Connection } from '@solana/web3.js'
-import { walletConnectRequiredToast, loadingToast, updateLoadingToast, transactionToastWithLink, errorToast } from '../utils/toast.tsx'
+import { walletConnectRequiredToast, loadingToast, updateLoadingToast, transactionToastWithLink, errorToast } from '../utils/toast'
 
 // DetectedToken interface matching the backend structure
 interface DetectedToken {

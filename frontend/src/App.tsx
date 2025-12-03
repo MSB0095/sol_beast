@@ -11,7 +11,7 @@ import NewCoinsPanel from './components/NewCoinsPanel'
 import TradingHistory from './components/TradingHistory'
 import ProfilePanel from './components/ProfilePanel'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { Toaster } from './utils/toast.tsx'
+import { Toaster } from './utils/toast'
 import './App.css'
 
 function App() {

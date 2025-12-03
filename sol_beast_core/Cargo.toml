@@ -65,7 +65,14 @@ web-sys = { workspace = true, optional = true, features = [
     "Headers",
     "console",
 ] }
-getrandom = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true, features = ["js"] }
+
+# Explicitly add getrandom 0.3 with wasm_js feature for ahash and other deps
+[dependencies.getrandom_v03]
+package = "getrandom"
+version = "0.3"
+features = ["wasm_js"]
+optional = true
 
 [features]
 default = []
@@ -82,5 +89,6 @@ wasm = [
     "js-sys",
     "web-sys",
     "getrandom",
+    "getrandom_v03",
     "serde-wasm-bindgen",
 ]

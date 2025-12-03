@@ -48,6 +48,9 @@ pub enum CoreError {
     
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 // Alias for backward compatibility

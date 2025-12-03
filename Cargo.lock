@@ -3875,6 +3875,7 @@ dependencies = [
 name = "sol_beast_wasm"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "console_error_panic_hook",
  "getrandom 0.2.16",
  "getrandom 0.3.4",
@@ -3884,6 +3885,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "sol_beast_core",
+ "solana-pubkey",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

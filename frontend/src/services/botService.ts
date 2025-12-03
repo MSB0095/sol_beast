@@ -17,6 +17,7 @@ interface WasmBot {
   get_logs(): string
   get_holdings(): string
   get_detected_tokens(): string
+  build_buy_transaction(mint: string, userPubkey: string): string
   test_rpc_connection(): Promise<string>
   test_ws_connection(): Promise<string>
   save_to_storage(): void
@@ -442,6 +443,23 @@ export const botService = {
         throw new Error('Failed to fetch detected tokens')
       }
       return response.json()
+    }
+  },
+  
+  // Build buy transaction (Phase 3.3 feature - WASM only for now)
+  buildBuyTransaction(mint: string, userPubkey: string) {
+    if (this.isWasmMode()) {
+      if (!wasmBot) {
+        throw new Error('WASM bot is not initialized')
+      }
+      try {
+        const json = wasmBot.build_buy_transaction(mint, userPubkey)
+        return JSON.parse(json)
+      } catch (error) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
+    } else {
+      throw new Error('Transaction building is only supported in WASM mode. Please enable WASM mode to build and submit transactions.')
     }
   },
 

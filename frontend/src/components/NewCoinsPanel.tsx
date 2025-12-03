@@ -3,6 +3,7 @@ import { Coins, ExternalLink, TrendingUp, Clock, User, CheckCircle, XCircle, Sho
 import { botService } from '../services/botService'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
+import { Transaction, TransactionInstruction, PublicKey, Connection } from '@solana/web3.js'
 
 // DetectedToken interface matching the backend structure
 interface DetectedToken {
@@ -32,7 +33,7 @@ export default function NewCoinsPanel() {
   const [error, setError] = useState<string | null>(null)
   const [buyingToken, setBuyingToken] = useState<string | null>(null)
   
-  const { publicKey, connected } = useWallet()
+  const { publicKey, connected, sendTransaction } = useWallet()
 
   useEffect(() => {
     const fetchTokens = async () => {
@@ -72,9 +73,65 @@ export default function NewCoinsPanel() {
     
     setBuyingToken(token.mint)
     try {
-      // TODO: Implement actual transaction building and submission
-      // This will be completed in the next phase
-      alert(`Buy functionality coming soon!\n\nToken: ${token.name || token.symbol}\nMint: ${token.mint}\n\nThis feature requires:\n- Transaction building with tx_builder\n- Wallet signing\n- Transaction submission via RPC`)
+      console.log('Building buy transaction for token:', token.mint)
+      
+      // Step 1: Build transaction using WASM bot
+      const txData = botService.buildBuyTransaction(token.mint, publicKey.toBase58())
+      console.log('Transaction data:', txData)
+      
+      // Step 2: Decode instruction data from base64
+      const instructionData = Buffer.from(txData.data, 'base64')
+      
+      // Step 3: Convert accounts to web3.js format
+      const keys = txData.accounts.map((acc: any) => ({
+        pubkey: new PublicKey(acc.pubkey),
+        isSigner: acc.isSigner,
+        isWritable: acc.isWritable,
+      }))
+      
+      // Step 4: Create transaction instruction
+      const instruction = new TransactionInstruction({
+        programId: new PublicKey(txData.programId),
+        keys,
+        data: instructionData,
+      })
+      
+      // Step 5: Create transaction
+      const transaction = new Transaction().add(instruction)
+      
+      // Step 6: Get RPC connection
+      const settings = await botService.getSettings()
+      const rpcUrl = settings.solana_rpc_urls?.[0] || 'https://api.mainnet-beta.solana.com'
+      const connection = new Connection(rpcUrl, 'confirmed')
+      
+      // Step 7: Get recent blockhash
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash()
+      transaction.recentBlockhash = blockhash
+      transaction.lastValidBlockHeight = lastValidBlockHeight
+      transaction.feePayer = publicKey
+      
+      console.log('Requesting wallet signature...')
+      
+      // Step 8: Sign and send transaction
+      const signature = await sendTransaction(transaction, connection)
+      
+      console.log('Transaction sent:', signature)
+      alert(`Transaction submitted!\n\nSignature: ${signature}\n\nView on Solscan: https://solscan.io/tx/${signature}`)
+      
+      // Step 9: Wait for confirmation
+      const confirmation = await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      }, 'confirmed')
+      
+      if (confirmation.value.err) {
+        throw new Error('Transaction failed: ' + JSON.stringify(confirmation.value.err))
+      }
+      
+      console.log('Transaction confirmed!')
+      alert(`Transaction confirmed!\n\nToken purchased successfully.\n\nView on Solscan: https://solscan.io/tx/${signature}`)
+      
     } catch (err) {
       console.error('Buy failed:', err)
       alert(`Failed to buy token: ${err instanceof Error ? err.message : String(err)}`)

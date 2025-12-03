@@ -16,6 +16,7 @@ declare module '*/wasm/sol_beast_wasm' {
     get_logs(): string
     get_holdings(): string
     get_detected_tokens(): string
+    build_buy_transaction(mint: string, userPubkey: string): string
     test_rpc_connection(): Promise<string>
     test_ws_connection(): Promise<string>
     save_to_storage(): void

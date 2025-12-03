@@ -122,17 +122,20 @@ pub async fn fetch_complete_token_metadata<R: RpcClient + ?Sized, H: HttpClient>
 
 /// Fetch current price from bonding curve
 /// 
-/// This is a placeholder for price fetching logic that should be centralized.
-/// The actual implementation depends on the bonding curve structure.
+/// NOTE: This function is now deprecated. Use `fetch_bonding_curve_state` and 
+/// `calculate_price_from_bonding_curve` from rpc_client.rs instead.
+/// Those functions provide more complete information including liquidity.
+#[deprecated(note = "Use fetch_bonding_curve_state and calculate_price_from_bonding_curve from rpc_client.rs")]
 pub async fn fetch_token_price<R: RpcClient + ?Sized>(
-    _mint: &str,
-    _bonding_curve: &str,
-    _rpc_client: &R,
+    mint: &str,
+    bonding_curve: &str,
+    rpc_client: &R,
 ) -> TxServiceResult<f64> {
-    // TODO: Implement actual price fetching from bonding curve
-    // This requires fetching the bonding curve account and parsing its state
-    warn!("fetch_token_price not yet implemented");
-    Err(CoreError::NotImplemented("Price fetching not yet implemented".to_string()))
+    use crate::rpc_client::{fetch_bonding_curve_state, calculate_price_from_bonding_curve};
+    
+    let state = fetch_bonding_curve_state(mint, bonding_curve, rpc_client).await?;
+    let price = calculate_price_from_bonding_curve(&state);
+    Ok(price)
 }
 
 #[cfg(test)]

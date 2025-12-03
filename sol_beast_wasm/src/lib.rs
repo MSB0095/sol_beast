@@ -5,7 +5,7 @@ use wasm_bindgen::prelude::*;
 use sol_beast_core::models::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use log::{info, error};
+use log::{info, error, warn};
 
 mod monitor;
 use monitor::Monitor;
@@ -524,6 +524,86 @@ impl SolBeastBot {
                 Err(JsValue::from_str(&format!("Failed to serialize detected tokens: {}", e)))
             }
         }
+    }
+    
+    /// Build buy transaction for a detected token (Phase 3.3 feature)
+    /// Returns a JSON object with transaction data that can be signed and submitted
+    #[wasm_bindgen]
+    pub fn build_buy_transaction(&self, mint: &str, user_pubkey: &str) -> Result<String, JsValue> {
+        use sol_beast_core::tx_builder::build_buy_instruction;
+        use solana_pubkey::Pubkey;
+        
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in build_buy_transaction, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Find the detected token
+        let token = state.detected_tokens.iter()
+            .find(|t| t.mint == mint)
+            .ok_or_else(|| JsValue::from_str("Token not found in detected tokens"))?;
+        
+        // Parse public keys
+        let user_pk = user_pubkey.parse::<Pubkey>()
+            .map_err(|e| JsValue::from_str(&format!("Invalid user public key: {}", e)))?;
+        let creator_pk = token.creator.parse::<Pubkey>()
+            .map_err(|e| JsValue::from_str(&format!("Invalid creator address: {}", e)))?;
+        let program_pk = state.settings.pump_fun_program.parse::<Pubkey>()
+            .map_err(|e| JsValue::from_str(&format!("Invalid program address: {}", e)))?;
+        
+        // Get fee recipient from bonding curve (for now use a placeholder)
+        // TODO: Fetch actual fee recipient from bonding curve account
+        let fee_recipient = creator_pk; // Placeholder
+        
+        // Calculate amount and max sol cost
+        let buy_amount_sol = state.settings.buy_amount;
+        let price_per_token = token.buy_price_sol.unwrap_or(FALLBACK_ESTIMATED_PRICE);
+        let token_amount = (buy_amount_sol / price_per_token) as u64;
+        let slippage_multiplier = 1.0 + (state.settings.slippage_bps as f64 / 10000.0);
+        let max_sol_cost = (buy_amount_sol * slippage_multiplier * 1_000_000_000.0) as u64; // Convert to lamports
+        
+        // Build instruction using core tx_builder
+        let core_settings = state.settings.to_core_settings();
+        let instruction = build_buy_instruction(
+            &program_pk,
+            mint,
+            token_amount,
+            max_sol_cost,
+            Some(true), // track_volume
+            &user_pk,
+            &fee_recipient,
+            Some(creator_pk),
+            &core_settings,
+        ).map_err(|e| JsValue::from_str(&format!("Failed to build instruction: {}", e)))?;
+        
+        // Serialize instruction to JSON format compatible with web3.js
+        let accounts_json: Vec<serde_json::Value> = instruction.accounts.iter().map(|acc| {
+            serde_json::json!({
+                "pubkey": acc.pubkey.to_string(),
+                "isSigner": acc.is_signer,
+                "isWritable": acc.is_writable,
+            })
+        }).collect();
+        
+        // Encode instruction data as base64
+        use base64::Engine;
+        let base64_engine = base64::engine::general_purpose::STANDARD;
+        let data_base64 = base64_engine.encode(&instruction.data);
+        
+        let result = serde_json::json!({
+            "programId": instruction.program_id.to_string(),
+            "accounts": accounts_json,
+            "data": data_base64,
+            "tokenAmount": token_amount,
+            "maxSolCost": max_sol_cost,
+            "buyAmountSol": buy_amount_sol,
+        });
+        
+        serde_json::to_string(&result)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize instruction: {}", e)))
     }
     
     /// Connect to Solana RPC (for testing connection)

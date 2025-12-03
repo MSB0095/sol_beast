@@ -45,6 +45,9 @@ pub enum CoreError {
     
     #[error("Not found: {0}")]
     NotFound(String),
+    
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 // Alias for backward compatibility

@@ -216,16 +216,126 @@ If automated trading is the goal, focus development effort on CLI mode:
 5. FAQ for common issues
 6. Migration guide (CLI → WASM or vice versa)
 
+## 🎯 Code Centralization Directives
+
+### Architecture Principles
+
+**Goal**: Achieve 100% feature parity between CLI and WASM modes by centralizing all business logic in `sol_beast_core` and minimizing `sol_beast_wasm` to only browser-specific bindings.
+
+### What Belongs Where
+
+#### `sol_beast_core/` - Platform-Agnostic Business Logic
+**SHOULD CONTAIN:**
+- ✅ All buy/sell heuristics and evaluation logic
+- ✅ Transaction parsing and metadata extraction
+- ✅ Token validation and risk assessment
+- ✅ Price calculations and bonding curve math
+- ✅ Holdings management and position tracking
+- ✅ TP/SL/timeout detection logic
+- ✅ Transaction building (buy/sell instructions)
+- ✅ Abstract traits for platform-specific operations:
+  - `RpcClient` trait for network operations
+  - `StorageBackend` trait for persistence
+  - `WebSocketClient` trait for real-time monitoring
+  - `WalletAdapter` trait for transaction signing
+
+**MUST NOT CONTAIN:**
+- ❌ Direct use of `tokio` (use `async-trait` instead)
+- ❌ Direct use of `reqwest` (use trait abstraction)
+- ❌ File I/O operations (use trait abstraction)
+- ❌ Platform-specific WebSocket implementations
+
+#### `sol_beast_wasm/` - WASM Bindings Only
+**SHOULD CONTAIN:**
+- ✅ `#[wasm_bindgen]` interface definitions
+- ✅ Browser API adapters (fetch, localStorage, WebSocket)
+- ✅ Implementation of core traits using web-sys
+- ✅ JS value conversions and serialization
+- ✅ Minimal glue code to connect core to browser
+
+**MUST NOT CONTAIN:**
+- ❌ Business logic or heuristics
+- ❌ Transaction parsing or validation
+- ❌ Buy/sell decision making
+- ❌ Price calculations
+- ❌ Duplicated code from CLI
+
+#### `sol_beast_cli/` - Native Runtime Only
+**SHOULD CONTAIN:**
+- ✅ Implementation of core traits using tokio/reqwest
+- ✅ CLI-specific argument parsing
+- ✅ REST API server implementation
+- ✅ File-based configuration loading
+- ✅ Native WebSocket implementation
+
+**MUST NOT CONTAIN:**
+- ❌ Business logic that should be in core
+- ❌ Duplicated heuristics or validation
+- ❌ Duplicated transaction building
+
+### Migration Checklist
+
+#### Phase 1: RPC Layer Centralization
+- [ ] Move all RPC response parsing to `sol_beast_core/src/rpc_client.rs`
+- [ ] Create `RpcClient` trait implementations:
+  - [ ] Native implementation in `sol_beast_core/src/native/rpc.rs`
+  - [ ] WASM implementation in `sol_beast_core/src/wasm/rpc.rs`
+- [ ] Remove duplicate RPC code from `sol_beast_cli/src/rpc.rs`
+
+#### Phase 2: Monitor Abstraction
+- [ ] Create `Monitor` trait in `sol_beast_core/src/monitor.rs`
+- [ ] Implement trait in `sol_beast_core/src/native/monitor.rs`
+- [ ] Implement trait in `sol_beast_core/src/wasm/monitor.rs`
+- [ ] Remove duplicate monitor code from CLI and WASM crates
+
+#### Phase 3: Transaction Processing
+- [ ] Move transaction parsing to `sol_beast_core/src/tx_parser.rs`
+- [ ] Move metadata fetching to `sol_beast_core/src/metadata.rs`
+- [ ] Ensure all parsing logic is platform-agnostic
+
+#### Phase 4: Holdings Management
+- [ ] Create `StorageBackend` trait in `sol_beast_core/src/storage.rs`
+- [ ] Implement file-based storage for native
+- [ ] Implement localStorage-based storage for WASM
+- [ ] Move position tracking to core
+
+#### Phase 5: Wallet Integration
+- [ ] Create `WalletAdapter` trait in `sol_beast_core/src/wallet.rs`
+- [ ] Implement Keypair adapter for native (existing)
+- [ ] Implement browser wallet adapter for WASM
+- [ ] Support transaction signing in both modes
+
+### Testing Strategy
+
+Each centralized module in `sol_beast_core` must:
+1. Have unit tests that run without platform features
+2. Use feature gates (`#[cfg(feature = "native")]` / `#[cfg(feature = "wasm")]`) only for trait implementations
+3. Have integration tests for both native and WASM implementations
+4. Document which platform-specific features are required
+
+### Success Criteria
+
+✅ **Feature Parity**: WASM mode can do everything CLI mode can do
+✅ **No Duplication**: Zero duplicated business logic between crates
+✅ **Maintainability**: Bug fixes in one place benefit both modes
+✅ **Testability**: Core logic can be tested without platform dependencies
+✅ **Documentation**: Clear guidelines for where new code belongs
+
 ## 🔗 Related Files
 
-- `/sol_beast_wasm/src/lib.rs` - Main WASM bot implementation
-- `/sol_beast_wasm/src/monitor.rs` - WebSocket monitoring
-- `/sol_beast_core/src/wasm/` - WASM-specific implementations
+- `/sol_beast_core/src/lib.rs` - Core library exports
+- `/sol_beast_core/src/rpc_client.rs` - RPC client trait and helpers
+- `/sol_beast_core/src/buyer.rs` - Buy heuristics (centralized)
+- `/sol_beast_core/src/native/` - Native trait implementations
+- `/sol_beast_core/src/wasm/` - WASM trait implementations
+- `/sol_beast_wasm/src/lib.rs` - WASM bindings
+- `/sol_beast_wasm/src/monitor.rs` - WASM-specific monitoring
+- `/sol_beast_cli/src/main.rs` - CLI entry point
+- `/sol_beast_cli/src/rpc.rs` - CLI RPC operations (to be migrated)
 - `/frontend/src/services/botService.ts` - Dual-mode service adapter
-- `/frontend/src/store/botStore.ts` - Bot state management
 
 ---
 
-*Generated: 2025-12-03*
+*Updated: 2025-12-03*
 *Author: GitHub Copilot*
-*Status: Development in Progress*
+*Status: Development in Progress - Phase 1: Planning & Architecture*

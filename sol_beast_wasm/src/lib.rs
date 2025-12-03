@@ -53,6 +53,59 @@ pub struct BotSettings {
     pub dev_tip_percent: f64,
     #[serde(default = "default_dev_tip_fixed_sol")]
     pub dev_tip_fixed_sol: f64,
+    #[serde(default = "default_enable_safer_sniping")]
+    pub enable_safer_sniping: bool,
+}
+
+impl BotSettings {
+    /// Convert BotSettings to core Settings
+    pub fn to_core_settings(&self) -> sol_beast_core::settings::Settings {
+        sol_beast_core::settings::Settings {
+            solana_ws_urls: self.solana_ws_urls.clone(),
+            solana_rpc_urls: self.solana_rpc_urls.clone(),
+            pump_fun_program: self.pump_fun_program.clone(),
+            metadata_program: self.metadata_program.clone(),
+            wallet_keypair_path: None,
+            wallet_keypair_json: None,
+            wallet_private_key_string: None,
+            simulate_wallet_private_key_string: None,
+            tp_percent: self.tp_percent,
+            sl_percent: self.sl_percent,
+            timeout_secs: self.timeout_secs,
+            cache_capacity: 1000,
+            price_cache_ttl_secs: 60,
+            buy_amount: self.buy_amount,
+            price_source: "wss".to_string(),
+            rotate_rpc: false,
+            rpc_rotate_interval_secs: 60,
+            max_holded_coins: self.max_holded_coins,
+            max_subs_per_wss: 4,
+            sub_ttl_secs: 900,
+            wss_subscribe_timeout_secs: 6,
+            max_create_to_buy_secs: 6,
+            bonding_curve_strict: false,
+            bonding_curve_log_debounce_secs: 300,
+            simulate_wallet_keypair_json: None,
+            min_tokens_threshold: self.min_tokens_threshold,
+            max_sol_per_token: self.max_sol_per_token,
+            slippage_bps: self.slippage_bps,
+            enable_safer_sniping: self.enable_safer_sniping,
+            min_liquidity_sol: self.min_liquidity_sol,
+            max_liquidity_sol: self.max_liquidity_sol,
+            helius_sender_enabled: false,
+            helius_api_key: None,
+            helius_sender_endpoint: "https://sender.helius-rpc.com/fast".to_string(),
+            helius_min_tip_sol: 0.001,
+            helius_priority_fee_multiplier: 1.2,
+            helius_use_swqos_only: false,
+            helius_use_dynamic_tips: true,
+            helius_confirm_timeout_secs: 15,
+            dev_fee_enabled: false,
+            dev_wallet_address: None,
+            dev_tip_percent: self.dev_tip_percent,
+            dev_tip_fixed_sol: self.dev_tip_fixed_sol,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -185,9 +238,22 @@ impl SolBeastBot {
             }
         });
         
+        // Create signature processing callback
+        let state_for_processing = self.state.clone();
+        let signature_callback = Arc::new(move |signature: String| {
+            // Clone what we need for the async task
+            let state = state_for_processing.clone();
+            
+            // Spawn async task to process the signature
+            wasm_bindgen_futures::spawn_local(async move {
+                // Process the transaction asynchronously
+                process_detected_signature(signature, state).await;
+            });
+        });
+        
         // Create and start monitor
         let mut monitor = Monitor::new();
-        monitor.start(&ws_url, &pump_fun_program, log_callback)
+        monitor.start(&ws_url, &pump_fun_program, log_callback, Some(signature_callback))
             .map_err(|e| JsValue::from_str(&format!("Failed to start monitor: {:?}", e)))?;
         
         // Re-acquire lock to update state
@@ -534,6 +600,170 @@ impl SolBeastBot {
     }
 }
 
+/// Process a detected pump.fun signature
+/// This is called asynchronously when the monitor detects a new transaction
+async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState>>) {
+    use sol_beast_core::wasm::{WasmRpcClient, WasmHttpClient};
+    use sol_beast_core::transaction_service::{fetch_and_parse_transaction, fetch_complete_token_metadata};
+    use sol_beast_core::buyer::evaluate_buy_heuristics;
+    use log::{info, error, warn};
+    
+    info!("Processing detected signature: {}", signature);
+    
+    // Get settings and configuration from state
+    let (rpc_url, metadata_program, pump_fun_program, core_settings) = {
+        match state.lock() {
+            Ok(s) => {
+                let rpc_url = s.settings.solana_rpc_urls.first().cloned()
+                    .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+                let metadata_program = s.settings.metadata_program.clone();
+                let pump_fun_program = s.settings.pump_fun_program.clone();
+                let core_settings = s.settings.to_core_settings();
+                (rpc_url, metadata_program, pump_fun_program, core_settings)
+            },
+            Err(e) => {
+                error!("Failed to lock state in process_detected_signature: {:?}", e);
+                return;
+            }
+        }
+    };
+    
+    // Create RPC and HTTP clients
+    let rpc_client = WasmRpcClient::new(rpc_url);
+    let http_client = WasmHttpClient::new();
+    
+    // Step 1: Fetch and parse transaction
+    let parsed_tx = match fetch_and_parse_transaction(
+        &signature,
+        &rpc_client,
+        &pump_fun_program,
+        3, // max retries
+    ).await {
+        Ok(tx) => {
+            info!("Successfully parsed transaction: mint={}, creator={}", tx.mint, tx.creator);
+            tx
+        },
+        Err(e) => {
+            error!("Failed to fetch/parse transaction {}: {:?}", signature, e);
+            // Log to UI
+            if let Ok(mut s) = state.lock() {
+                let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                    .unwrap_or_else(|| "unknown".to_string());
+                s.logs.push(LogEntry {
+                    timestamp,
+                    level: "error".to_string(),
+                    message: format!("Failed to process transaction"),
+                    details: Some(format!("Signature: {}\nError: {:?}", signature, e)),
+                });
+            }
+            return;
+        }
+    };
+    
+    // Step 2: Fetch token metadata
+    let metadata = match fetch_complete_token_metadata(
+        &parsed_tx.mint,
+        &metadata_program,
+        &rpc_client,
+        &http_client,
+    ).await {
+        Ok(meta) => {
+            let name = meta.offchain.as_ref().and_then(|m| m.name.clone())
+                .or_else(|| meta.onchain.as_ref().map(|m| m.name.clone()));
+            let symbol = meta.offchain.as_ref().and_then(|m| m.symbol.clone())
+                .or_else(|| meta.onchain.as_ref().map(|m| m.symbol.clone()));
+            info!("Successfully fetched metadata for {}: name={:?}, symbol={:?}", 
+                  parsed_tx.mint, name, symbol);
+            meta
+        },
+        Err(e) => {
+            warn!("Failed to fetch metadata for {}: {:?}", parsed_tx.mint, e);
+            // Continue without metadata
+            sol_beast_core::metadata::TokenMetadata {
+                onchain: None,
+                offchain: None,
+                raw_account_data: None,
+            }
+        }
+    };
+    
+    // Step 3: Evaluate buy heuristics
+    // For now, we'll use placeholder values for price and bonding curve state
+    // In Phase 3, we'll fetch actual price from bonding curve
+    let buy_amount = core_settings.buy_amount;
+    let estimated_price = 0.00001; // Placeholder - Phase 3 will fetch real price
+    
+    let evaluation = evaluate_buy_heuristics(
+        &parsed_tx.mint,
+        buy_amount,
+        estimated_price,
+        None, // No bonding curve state yet - Phase 3
+        &core_settings,
+    );
+    
+    info!("Buy evaluation for {}: should_buy={}, reason={}", 
+          parsed_tx.mint, evaluation.should_buy, evaluation.reason);
+    
+    // Step 4: Extract metadata fields from TokenMetadata
+    let name = metadata.offchain.as_ref().and_then(|m| m.name.clone())
+        .or_else(|| metadata.onchain.as_ref().map(|m| m.name.clone()));
+    let symbol = metadata.offchain.as_ref().and_then(|m| m.symbol.clone())
+        .or_else(|| metadata.onchain.as_ref().map(|m| m.symbol.clone()));
+    let image_uri = metadata.offchain.as_ref().and_then(|m| m.image.clone());
+    let description = metadata.offchain.as_ref().and_then(|m| m.description.clone());
+    
+    // Create DetectedToken and store in state
+    let detected_token = DetectedToken {
+        signature: signature.clone(),
+        mint: parsed_tx.mint.clone(),
+        creator: parsed_tx.creator.clone(),
+        bonding_curve: parsed_tx.bonding_curve.clone(),
+        holder_address: parsed_tx.holder_address.clone(),
+        timestamp: js_sys::Date::new_0().to_iso_string().as_string()
+            .unwrap_or_else(|| "unknown".to_string()),
+        name: name.clone(),
+        symbol: symbol.clone(),
+        image_uri,
+        description,
+        should_buy: evaluation.should_buy,
+        evaluation_reason: evaluation.reason.clone(),
+        token_amount: Some(evaluation.token_amount),
+        buy_price_sol: Some(evaluation.buy_price_sol),
+        liquidity_sol: None, // Phase 3 will add this
+    };
+    
+    // Add to state
+    if let Ok(mut s) = state.lock() {
+        s.detected_tokens.push(detected_token.clone());
+        
+        // Keep only last 50 detected tokens
+        if s.detected_tokens.len() > 50 {
+            let excess = s.detected_tokens.len() - 50;
+            s.detected_tokens.drain(0..excess);
+        }
+        
+        // Log to UI
+        let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+            .unwrap_or_else(|| "unknown".to_string());
+        let result_icon = if evaluation.should_buy { "✅" } else { "❌" };
+        s.logs.push(LogEntry {
+            timestamp,
+            level: if evaluation.should_buy { "info" } else { "warn" }.to_string(),
+            message: format!("{} Token evaluated: {}", result_icon, 
+                           symbol.as_deref().unwrap_or(&parsed_tx.mint)),
+            details: Some(format!(
+                "Name: {}\nSymbol: {}\nMint: {}\nCreator: {}\n\nEvaluation: {}\n\nNote: Price is estimated. Phase 3 will add real price fetching.",
+                name.as_deref().unwrap_or("Unknown"),
+                symbol.as_deref().unwrap_or("Unknown"),
+                parsed_tx.mint,
+                parsed_tx.creator,
+                evaluation.reason
+            )),
+        });
+    }
+    
+    info!("Successfully processed transaction {}", signature);
+}
 
 impl Default for BotSettings {
     fn default() -> Self {
@@ -554,9 +784,11 @@ impl Default for BotSettings {
             max_liquidity_sol: 15.0,
             dev_tip_percent: 2.0,
             dev_tip_fixed_sol: 0.0,
+            enable_safer_sniping: false,
         }
     }
 }
 
 fn default_dev_tip_percent() -> f64 { 2.0 }
 fn default_dev_tip_fixed_sol() -> f64 { 0.0 }
+fn default_enable_safer_sniping() -> bool { false }

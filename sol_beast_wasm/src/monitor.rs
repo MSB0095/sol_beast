@@ -39,6 +39,7 @@ impl Monitor {
         ws_url: &str,
         pump_fun_program: &str,
         log_callback: Arc<dyn Fn(String, String, String)>,
+        signature_callback: Option<Arc<dyn Fn(String)>>,
     ) -> Result<(), JsValue> {
         info!("Starting WASM monitor for pump.fun program: {}", pump_fun_program);
         
@@ -139,6 +140,7 @@ impl Monitor {
         let log_cb_for_msg = log_callback.clone();
         let msg_count_for_handler = msg_count.clone();
         let pump_msg_count_for_handler = pump_msg_count.clone();
+        let sig_callback = signature_callback.clone();
         let on_message = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: MessageEvent| {
             // Increment total message count
             let current_count = {
@@ -289,16 +291,14 @@ impl Monitor {
                                             log_cb_for_msg(
                                                 "info".to_string(),
                                                 "🎯 New pump.fun transaction detected!".to_string(),
-                                                format!("Signature: {}\nLogs with pump.fun: {}\n{}\n\nNext steps:\n1. Fetch transaction details\n2. Extract token mint address\n3. Get token metadata\n4. Apply buy heuristics\n5. Execute purchase if conditions met", 
+                                                format!("Signature: {}\nLogs with pump.fun: {}\n{}\n\nProcessing transaction...", 
                                                        sig, pump_fun_logs.len(), instr_info)
                                             );
 
-                                            // In a full implementation, we would:
-                                            // 1. Fetch transaction details via RPC
-                                            // 2. Extract mint, creator, bonding curve addresses
-                                            // 3. Fetch token metadata
-                                            // 4. Apply buy heuristics
-                                            // 5. Execute purchase if conditions met
+                                            // Phase 2: Notify callback to process the signature
+                                            if let Some(ref callback) = sig_callback {
+                                                callback(sig.to_string());
+                                            }
                                         } else {
                                             // Log that we received a message but it didn't match
                                             if pump_count <= 10 || pump_count % 25 == 0 {

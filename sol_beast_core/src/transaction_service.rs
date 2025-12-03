@@ -42,8 +42,11 @@ pub async fn fetch_and_parse_transaction<R: RpcClient + ?Sized>(
             }
             Err(e) => {
                 // Handle transient errors with retry
+                // Check if error is retryable (rate limiting)
+                // TODO: Consider adding is_retryable() method to RpcClient trait
                 let err_str = format!("{:?}", e);
-                if (err_str.contains("Too many requests") || err_str.contains("429")) && attempts < max_retries {
+                let is_rate_limit = err_str.contains("Too many requests") || err_str.contains("429");
+                if is_rate_limit && attempts < max_retries {
                     let backoff_ms = 250 * attempts as u64;
                     debug!("Rate limited fetching tx {} (attempt {}), backing off {}ms", signature, attempts, backoff_ms);
                     
@@ -52,16 +55,7 @@ pub async fn fetch_and_parse_transaction<R: RpcClient + ?Sized>(
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     
                     #[cfg(feature = "wasm")]
-                    {
-                        use wasm_bindgen_futures::JsFuture;
-                        
-                        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-                            let window = web_sys::window().expect("no window");
-                            window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, backoff_ms as i32)
-                                .expect("setTimeout failed");
-                        });
-                        let _ = JsFuture::from(promise).await;
-                    }
+                    crate::wasm::sleep_ms(backoff_ms).await;
                     
                     continue;
                 }

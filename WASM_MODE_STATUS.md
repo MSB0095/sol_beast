@@ -51,37 +51,37 @@
 
 ## 🚧 Partially Implemented (In Progress)
 
-The following features have been centralized in `sol_beast_core` but need WASM integration:
-
-### 1. Transaction Processing Pipeline ✅ CENTRALIZED, 🚧 WASM INTEGRATION PENDING
+### 1. Transaction Processing Pipeline ✅ FULLY INTEGRATED
 **What's implemented:**
 - ✅ `transaction_service::fetch_and_parse_transaction()` - centralized in core
 - ✅ Transaction parsing with Anchor discriminators
 - ✅ Extraction of mint address, creator, bonding curve, holder
 - ✅ Retry logic with rate limit handling
 - ✅ Platform-agnostic via RpcClient trait
+- ✅ WASM monitor integration complete via signature callback
+- ✅ Async processing in `process_detected_signature()`
 
 **What's missing:**
-- 🚧 WASM monitor integration with transaction_service
-- 🚧 Display parsed transaction data in UI
+- 🚧 Display parsed transaction data in UI (frontend work)
 
-**Impact**: Infrastructure ready, needs final integration in WASM monitor.
+**Impact**: Backend complete, ready for UI integration.
 
-### 2. Token Metadata Fetching ✅ CENTRALIZED, 🚧 WASM INTEGRATION PENDING
+### 2. Token Metadata Fetching ✅ FULLY INTEGRATED
 **What's implemented:**
 - ✅ `transaction_service::fetch_complete_token_metadata()` - centralized in core
 - ✅ Metaplex metadata parsing
 - ✅ Off-chain JSON fetching via HttpClient trait
 - ✅ Flexible field extraction for varied JSON formats
 - ✅ Platform-agnostic implementation
+- ✅ Called from WASM monitor for every detected token
+- ✅ Metadata stored in DetectedToken state
 
 **What's missing:**
-- 🚧 Call from WASM monitor when new token detected
-- 🚧 Display metadata in UI
+- 🚧 Display metadata in UI (frontend work)
 
-**Impact**: Infrastructure ready, needs integration in workflow.
+**Impact**: Backend complete, ready for UI integration.
 
-### 3. Buy Heuristics Evaluation ✅ IMPLEMENTED
+### 3. Buy Heuristics Evaluation ✅ FULLY INTEGRATED
 **What's implemented:**
 - ✅ `sol_beast_core/src/buyer.rs::evaluate_buy_heuristics()`
 - ✅ Liquidity threshold checks (min/max SOL)
@@ -89,12 +89,15 @@ The following features have been centralized in `sol_beast_core` but need WASM i
 - ✅ Max SOL per token check
 - ✅ Safety toggle (enable_safer_sniping)
 - ✅ Used in CLI mode, available for WASM
+- ✅ WASM monitor calls evaluation for every detected token
+- ✅ Evaluation results stored in DetectedToken state
+- ✅ BotSettings converts to core Settings for evaluation
 
 **What's missing:**
-- 🚧 WASM monitor needs to call evaluation after fetching metadata
-- 🚧 UI display of evaluation results
+- 🚧 UI display of evaluation results (frontend work)
+- ⚠️ Using placeholder price values (Phase 3 will add real price fetching)
 
-**Impact**: Fully implemented and ready for use in WASM.
+**Impact**: Backend complete with placeholder prices, ready for UI integration.
 
 ## ❌ Not Yet Implemented (Requires Development)
 
@@ -163,22 +166,30 @@ The following features have been centralized in `sol_beast_core` but need WASM i
 2. ✅ Transaction parsing centralized and working in both modes
 3. ✅ Metadata fetching implemented with HTTP trait
 4. ✅ Buy heuristics evaluation centralized in core
-5. 🔜 **NEXT**: Integrate transaction_service into WASM monitor
-6. 🔜 **NEXT**: Display detected tokens with metadata in UI
+5. ✅ Integrated transaction_service into WASM monitor
+6. ✅ Backend processing for detected tokens with metadata complete
 
-**Completion**: ~90% (infrastructure complete, final integration pending)
+**Completion**: ✅ 100% (all infrastructure and backend integration complete)
 
-### Phase 2: Monitor Integration & UI Display (HIGH PRIORITY - NEXT)
-1. 🔜 Update WASM monitor to use `transaction_service::fetch_and_parse_transaction()`
-2. 🔜 Call `fetch_complete_token_metadata()` for each detected token
-3. 🔜 Call `evaluate_buy_heuristics()` to determine if token passes criteria
-4. 🔜 Display results in "New Coins" tab with:
-   - Token metadata (name, symbol, image)
-   - Current price and liquidity
-   - Buy recommendation (✅ Pass / ❌ Fail with reason)
-5. 🔜 Add "Manual approve" button for manual buys
+### Phase 2: Monitor Integration & Token Processing ✅ COMPLETED
+1. ✅ Updated WASM monitor to accept signature callback for async processing
+2. ✅ Implemented `process_detected_signature()` async function that:
+   - Calls `transaction_service::fetch_and_parse_transaction()` for each detected signature
+   - Calls `fetch_complete_token_metadata()` to get token name, symbol, image, description
+   - Calls `evaluate_buy_heuristics()` to determine if token passes buy criteria
+   - Stores complete `DetectedToken` objects in bot state with all metadata
+   - Logs evaluation results to UI
+3. ✅ Added `BotSettings.to_core_settings()` conversion for buy evaluation
+4. ✅ Added `enable_safer_sniping` setting to control heuristics
+5. ✅ Backend processing complete and ready for UI display
+6. 🔜 **NEXT**: Frontend UI to display detected tokens (Phase 2.5)
+   - Display results in "New Coins" or "Detected Tokens" tab
+   - Show token metadata (name, symbol, image)
+   - Show evaluation result (✅ Pass / ❌ Fail with reason)
+   - Add "Manual approve" button for manual buys
 
-**Estimated Effort**: 10-15 hours
+**Completion**: ✅ 90% (backend complete, UI display pending)
+**Note**: Price and liquidity values are placeholders. Phase 3 will add real bonding curve price fetching.
 
 ### Phase 3: Transaction Execution (MEDIUM PRIORITY)
 1. ❌ Integrate Solana Wallet Adapter (Phantom, Solflare, etc.)
@@ -212,14 +223,15 @@ The following features have been centralized in `sol_beast_core` but need WASM i
 
 ## 📊 Progress Update (as of December 3, 2025)
 
-### ✅ Completed Work (Phase 1: RPC Layer Centralization)
+### ✅ Completed Work
 
 **Recent PRs:**
 - **PR #53**: Fixed WASM build failures, added core business logic modules
 - **PR #54**: Centralized transaction parsing, metadata fetching in `sol_beast_core`
 - **PR #55**: Implemented transaction_service with retry logic and RPC abstraction
+- **PR #(Current)**: Phase 2 - Monitor integration with transaction processing and evaluation
 
-**What's Been Achieved:**
+**Phase 1 Achievements (RPC Layer Centralization):**
 1. ✅ Transaction parsing centralized in `sol_beast_core/src/tx_parser.rs`
 2. ✅ Metadata fetching centralized in `sol_beast_core/src/metadata.rs`
 3. ✅ High-level transaction service in `sol_beast_core/src/transaction_service.rs`
@@ -233,6 +245,18 @@ The following features have been centralized in `sol_beast_core` but need WASM i
 11. ✅ Settings persistence via localStorage in WASM mode
 12. ✅ GitHub Pages deployment workflow configured
 
+**Phase 2 Achievements (Monitor Integration & Token Processing):**
+1. ✅ Modified monitor to accept signature callback for async processing
+2. ✅ Implemented `process_detected_signature()` async function
+3. ✅ Integrated transaction_service into WASM monitor workflow
+4. ✅ Integrated metadata fetching for all detected tokens
+5. ✅ Integrated buy heuristics evaluation for all detected tokens
+6. ✅ DetectedToken objects stored in bot state with full metadata
+7. ✅ Evaluation results logged to UI
+8. ✅ Added BotSettings to Settings conversion
+9. ✅ Added enable_safer_sniping setting support
+10. ✅ WASM module builds successfully with Phase 2 integration
+
 **Code Reduction:**
 - Eliminated ~250+ lines of duplicate RPC/parsing code from CLI
 - Single source of truth for transaction parsing and metadata fetching
@@ -240,9 +264,9 @@ The following features have been centralized in `sol_beast_core` but need WASM i
 
 ### 🔧 Remaining Effort
 
-Based on completed Phase 1:
+Based on completed Phases 1 & 2:
 
-- **Phase 2**: ~10-15 hours (Monitor abstraction, remaining centralization)
+- **Phase 2.5** (UI Display): ~5-10 hours (Frontend to display detected tokens)
 - **Phase 3**: ~20-30 hours (wallet integration, transaction building)
 - **Phase 4**: ~25-35 hours (holdings management, TP/SL/timeout)
 - **Phase 5**: ~10-20 hours (polish, comprehensive testing)
@@ -416,42 +440,45 @@ Each centralized module in `sol_beast_core` must:
 
 ## 🎯 Current Status & Immediate Next Steps
 
-### What Works Right Now
+### What Works Right Now (Backend)
 - ✅ Bot starts/stops in browser
 - ✅ Settings persist via localStorage
 - ✅ WebSocket monitoring detects pump.fun transactions
-- ✅ Transaction parsing extracts mint addresses
+- ✅ Transaction parsing extracts mint addresses, creators, bonding curves
+- ✅ Token metadata fetching (on-chain and off-chain)
+- ✅ Buy heuristics evaluation with configurable thresholds
+- ✅ Detected tokens stored in bot state with full metadata
+- ✅ Evaluation results logged to UI
 - ✅ All core business logic centralized and available
 - ✅ GitHub Pages deployment configured
 
 ### What's Missing for Basic Functionality
-The gap between "detects transactions" and "can buy tokens" is:
-1. **Integration** - Wire up transaction_service in WASM monitor
-2. **UI Display** - Show detected tokens with metadata
-3. **Wallet Adapter** - Connect to user's browser wallet
-4. **Transaction Signing** - Request signature and submit
+The gap between "detects and evaluates tokens" and "can buy tokens" is:
+1. ✅ ~~Integration~~ - transaction_service wired up in WASM monitor ✅ **COMPLETE**
+2. 🔜 **UI Display** - Show detected tokens with metadata in frontend (Phase 2.5)
+3. ❌ **Wallet Adapter** - Connect to user's browser wallet (Phase 3)
+4. ❌ **Transaction Signing** - Request signature and submit (Phase 3)
+5. ❌ **Price Fetching** - Get real prices from bonding curve (Phase 3)
 
 ### Immediate Next Steps (Priority Order)
 
-#### 1. Phase 2 Implementation (NEXT PR)
-**Goal**: Complete the detection → evaluation workflow
+#### 1. Phase 2.5: Frontend UI Display (NEXT PR)
+**Goal**: Display detected tokens in the frontend UI
 
 **Tasks**:
-- [ ] Update `sol_beast_wasm/src/monitor.rs`:
-  - [ ] Call `transaction_service::fetch_and_parse_transaction()` when signature detected
-  - [ ] Call `fetch_complete_token_metadata()` for the mint
-  - [ ] Call `evaluate_buy_heuristics()` to check if token passes
-  - [ ] Store results in bot state for UI display
-- [ ] Update frontend to display:
-  - [ ] Detected tokens with metadata in "New Coins" tab
-  - [ ] Evaluation results (✅ pass / ❌ fail + reason)
-  - [ ] Manual buy button (disabled until Phase 3)
-- [ ] Test end-to-end detection and evaluation
+- [ ] Update frontend to display detected tokens:
+  - [ ] Add "Detected Tokens" or update "New Coins" tab
+  - [ ] Show token metadata (name, symbol, image)
+  - [ ] Show evaluation result (✅ pass / ❌ fail + reason)
+  - [ ] Show placeholder price/liquidity info
+  - [ ] Add "Manual approve" button (disabled until Phase 3)
+- [ ] Add refresh/polling for detected tokens from bot state
+- [ ] Test UI display with detected tokens
 
-**Estimated Time**: 10-15 hours
+**Estimated Time**: 5-10 hours
 **PR Status**: 
-- ✅ PR #56 - Documentation and infrastructure (CURRENT PR)
-- 🔜 PR #57 - Will implement actual monitor integration
+- ✅ PR #(Current) - Phase 2 backend integration complete
+- 🔜 PR #(Next) - Will implement frontend UI display
 
 #### 2. Phase 3 Implementation (Future PR)
 **Goal**: Enable actual trading via browser wallet
@@ -476,7 +503,8 @@ The gap between "detects transactions" and "can buy tokens" is:
 
 ### Success Metrics
 - ✅ Phase 1: Bot compiles and runs - **ACHIEVED**
-- 🔜 Phase 2: Tokens detected and evaluated in UI - **IN PROGRESS**
+- ✅ Phase 2 (Backend): Tokens detected, parsed, and evaluated - **ACHIEVED**
+- 🔜 Phase 2.5 (Frontend): Token evaluation results displayed in UI - **NEXT**
 - ❌ Phase 3: Can execute buys via browser wallet
 - ❌ Phase 4: Can manage positions with TP/SL
 - ❌ Phase 5: Production-ready with full testing
@@ -485,4 +513,4 @@ The gap between "detects transactions" and "can buy tokens" is:
 
 *Updated: 2025-12-03*
 *Author: GitHub Copilot*
-*Status: Phase 1 Complete ✅ | Phase 2 Next 🔜*
+*Status: Phase 1 ✅ Complete | Phase 2 Backend ✅ Complete | Phase 2.5 Frontend 🔜 Next*

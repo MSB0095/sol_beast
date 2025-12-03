@@ -17,7 +17,7 @@ Complete the final 10% of WASM implementation to achieve 100% feature parity wit
 **Replaced browser `alert()` calls with modern toast notifications using react-hot-toast**
 
 #### Files Created
-- `frontend/src/utils/toast.ts` - Centralized toast utility with custom styles and helper functions
+- `frontend/src/utils/toast.tsx` - Centralized toast utility with custom styles and helper functions
 
 #### Features Implemented
 - ✅ Custom toast styles matching app theme (dark mode, purple accents)
@@ -171,7 +171,7 @@ transactionToastWithLink(signature, 'buy', 'confirmed')
 
 ### Toast Utility Architecture
 
-**File**: `frontend/src/utils/toast.ts`
+**File**: `frontend/src/utils/toast.tsx`
 
 **Key Components**:
 1. **Toaster Component**: Exported for use in App.tsx

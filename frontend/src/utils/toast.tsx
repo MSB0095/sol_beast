@@ -109,6 +109,15 @@ export const transactionToastWithLink = (
   const action = type === 'buy' ? 'Purchase' : 'Sale'
   const statusText = status === 'submitted' ? 'Submitted' : 'Confirmed'
   
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(signature)
+      toast.success('Signature copied to clipboard!', { duration: 2000 })
+    } catch (err) {
+      console.error('Failed to copy signature:', err)
+    }
+  }
+  
   return toast.custom(
     (t: Toast) => (
       <div
@@ -124,9 +133,13 @@ export const transactionToastWithLink = (
             <p className="text-sm font-semibold text-white">
               {action} {statusText}!
             </p>
-            <p className="mt-1 text-xs text-gray-400 font-mono break-all">
+            <button
+              onClick={copyToClipboard}
+              className="mt-1 text-xs text-gray-400 font-mono break-all hover:text-purple-400 transition-colors cursor-pointer text-left"
+              title="Click to copy signature"
+            >
               {signature.slice(0, 16)}...{signature.slice(-16)}
-            </p>
+            </button>
           </div>
           <button
             onClick={() => toast.dismiss(t.id)}

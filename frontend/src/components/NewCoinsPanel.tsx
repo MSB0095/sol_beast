@@ -74,6 +74,7 @@ export default function NewCoinsPanel() {
     
     setBuyingToken(token.mint)
     const toastId = loadingToast('Building transaction...')
+    let confirmToastId: string | undefined
     
     try {
       console.log('Building buy transaction for token:', token.mint)
@@ -124,7 +125,7 @@ export default function NewCoinsPanel() {
       transactionToastWithLink(signature, 'buy', 'submitted')
       
       // Show loading toast for confirmation
-      const confirmToastId = loadingToast('Confirming transaction...')
+      confirmToastId = loadingToast('Confirming transaction...')
       
       // Step 9: Wait for confirmation
       const confirmation = await connection.confirmTransaction({
@@ -143,7 +144,16 @@ export default function NewCoinsPanel() {
       
     } catch (err) {
       console.error('Buy failed:', err)
-      errorToast('Failed to buy token', err instanceof Error ? err.message : String(err))
+      
+      // Determine which toast to update based on where the error occurred
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      if (confirmToastId) {
+        // Error occurred during confirmation
+        updateLoadingToast(confirmToastId, false, 'Transaction failed', errorMessage)
+      } else {
+        // Error occurred before transaction was sent
+        updateLoadingToast(toastId, false, 'Transaction failed', errorMessage)
+      }
     } finally {
       setBuyingToken(null)
     }

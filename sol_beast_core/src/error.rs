@@ -39,6 +39,12 @@ pub enum CoreError {
     
     #[error("Transaction error: {0}")]
     Transaction(String),
+    
+    #[error("Parse error: {0}")]
+    ParseError(String),
+    
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 // Alias for backward compatibility

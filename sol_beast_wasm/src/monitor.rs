@@ -365,12 +365,13 @@ impl Monitor {
         // Setup error handler
         let log_cb_for_err = log_callback.clone();
         let on_error = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: ErrorEvent| {
-            let error_msg = format!("WebSocket error - Type: {:?}, Message: {}", 
-                                   e.type_(), e.message());
+            // ErrorEvent.message() can cause issues in some browsers, so use type only
+            let error_msg = format!("WebSocket error occurred - Type: {:?}. This usually means the WebSocket endpoint rejected the connection (CORS, authentication, or other issues).", 
+                                   e.type_());
             error!("{}", error_msg);
             log_cb_for_err(
                 "error".to_string(),
-                "❌ WebSocket error occurred".to_string(),
+                "❌ WebSocket connection error".to_string(),
                 error_msg
             );
         }) as Box<dyn FnMut(_)>);

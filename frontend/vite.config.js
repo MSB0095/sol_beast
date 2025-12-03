@@ -13,6 +13,8 @@ function createNoJekyllPlugin() {
         }
     };
 }
+// Allow base path to be configured via environment variable for easy deployment to different repositories
+var BASE_PATH = process.env.BASE_PATH || '/sol_beast/';
 // https://vitejs.dev/config/
 export default defineConfig({
     plugins: [
@@ -28,7 +30,7 @@ export default defineConfig({
         }),
         createNoJekyllPlugin(),
     ],
-    base: process.env.NODE_ENV === 'production' ? '/sol_beast/' : '/',
+    base: process.env.NODE_ENV === 'production' ? BASE_PATH : '/',
     define: {
         'global': 'globalThis',
     },
@@ -57,15 +59,9 @@ export default defineConfig({
         },
         rollupOptions: {
             output: {
-                manualChunks: {
-                    'wallet-adapter': [
-                        '@solana/wallet-adapter-base',
-                        '@solana/wallet-adapter-react',
-                        '@solana/wallet-adapter-react-ui',
-                        '@solana/wallet-adapter-wallets',
-                    ],
-                    'solana-web3': ['@solana/web3.js'],
-                }
+                // Let Vite automatically handle chunking to avoid circular dependency issues
+                // Manual chunking of @solana/web3.js causes "Cannot access before initialization" errors
+                manualChunks: undefined
             }
         }
     }

@@ -39,8 +39,17 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      - name: Install mdbook
+        run: |
+          mkdir -p ~/.cargo/bin
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.40/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C ~/.cargo/bin
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Build WASM
         run: ./build-wasm.sh
+
+      - name: Build Documentation
+        run: ./build-docs.sh
 
       - name: Install dependencies
         working-directory: ./frontend
@@ -52,6 +61,11 @@ jobs:
         env:
           NODE_ENV: 'production'
           VITE_USE_WASM: 'true'
+
+      - name: Copy documentation to dist
+        run: |
+          mkdir -p ./frontend/dist/sol_beast_docs
+          cp -r ./sol_beast_docs/book/* ./frontend/dist/sol_beast_docs/
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

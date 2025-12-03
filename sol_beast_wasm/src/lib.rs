@@ -35,10 +35,22 @@ struct BotState {
     running: bool,
     mode: String, // "dry-run" or "real"
     settings: BotSettings,
-    holdings: Vec<Holding>,
+    holdings: Vec<HoldingWithMint>,
     logs: Vec<LogEntry>,
     monitor: Option<Monitor>,
     detected_tokens: Vec<DetectedToken>, // Phase 2: Track detected tokens
+}
+
+/// Holdings with mint address (for WASM serialization to frontend)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct HoldingWithMint {
+    pub mint: String,
+    pub amount: u64,
+    pub buy_price: f64,
+    pub buy_time: String, // ISO 8601 timestamp
+    pub metadata: Option<OffchainTokenMetadata>,
+    pub onchain: Option<OnchainFullMetadata>,
+    pub onchain_raw: Option<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -526,6 +538,350 @@ impl SolBeastBot {
         }
     }
     
+    /// Add a holding after successful purchase (Phase 4 feature)
+    /// Call this after a buy transaction is confirmed
+    #[wasm_bindgen]
+    pub fn add_holding(
+        &self,
+        mint: &str,
+        amount: u64,
+        buy_price: f64,
+        metadata_json: Option<String>,
+    ) -> Result<(), JsValue> {
+        use chrono::Utc;
+        
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in add_holding, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Parse metadata if provided
+        let metadata = if let Some(json) = metadata_json {
+            match serde_json::from_str(&json) {
+                Ok(meta) => Some(meta),
+                Err(e) => {
+                    warn!("Failed to parse metadata JSON: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        // Check if already holding this token
+        if let Some(existing) = state.holdings.iter_mut().find(|h| h.mint == mint) {
+            // Update existing holding (average price)
+            let total_old = existing.amount as f64 * existing.buy_price;
+            let total_new = amount as f64 * buy_price;
+            let new_total_amount = existing.amount + amount;
+            existing.buy_price = (total_old + total_new) / new_total_amount as f64;
+            existing.amount = new_total_amount;
+            info!("Updated existing holding for {}: {} tokens @ {:.9} SOL", 
+                  mint, existing.amount, existing.buy_price);
+        } else {
+            // Add new holding
+            let holding = HoldingWithMint {
+                mint: mint.to_string(),
+                amount,
+                buy_price,
+                buy_time: Utc::now().to_rfc3339(),
+                metadata,
+                onchain: None,
+                onchain_raw: None,
+            };
+            state.holdings.push(holding);
+            info!("Added new holding for {}: {} tokens @ {:.9} SOL", mint, amount, buy_price);
+        }
+        
+        // Persist to localStorage
+        if let Err(e) = self.save_holdings_to_storage(&state.holdings) {
+            warn!("Failed to persist holdings to localStorage: {:?}", e);
+        }
+        
+        // Log to UI
+        let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+            .unwrap_or_else(|| "unknown".to_string());
+        state.logs.push(LogEntry {
+            timestamp,
+            level: "info".to_string(),
+            message: format!("✅ Purchase recorded"),
+            details: Some(format!(
+                "Mint: {}\nAmount: {} tokens\nPrice: {:.9} SOL/token",
+                mint, amount as f64 / 1_000_000.0, buy_price
+            )),
+        });
+        
+        Ok(())
+    }
+    
+    /// Start monitoring holdings for TP/SL/timeout (Phase 4 feature)
+    /// This should be called periodically (e.g., every 5 seconds) from JavaScript
+    #[wasm_bindgen]
+    pub async fn monitor_holdings(&self) -> Result<String, JsValue> {
+        use chrono::Utc;
+        use sol_beast_core::wasm::WasmRpcClient;
+        use sol_beast_core::rpc_client::{fetch_bonding_curve_state, calculate_price_from_bonding_curve};
+        
+        let (holdings_to_check, rpc_url, settings) = {
+            let state = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    info!("Mutex was poisoned in monitor_holdings, recovering...");
+                    poisoned.into_inner()
+                }
+            };
+            
+            if state.holdings.is_empty() {
+                return Ok(serde_json::json!({ "action": "none", "holdings": 0 }).to_string());
+            }
+            
+            let rpc_url = state.settings.solana_rpc_urls.first().cloned()
+                .unwrap_or_else(|| DEFAULT_SOLANA_RPC_URL.to_string());
+            
+            (state.holdings.clone(), rpc_url, state.settings.clone())
+        };
+        
+        let rpc_client = WasmRpcClient::new(rpc_url);
+        let mut actions = Vec::new();
+        
+        for holding in holdings_to_check.iter() {
+            // Get bonding curve address for this mint
+            use solana_pubkey::Pubkey;
+            let mint_pk = match holding.mint.parse::<Pubkey>() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    warn!("Invalid mint address {}: {}", holding.mint, e);
+                    continue;
+                }
+            };
+            
+            let program_pk = match settings.pump_fun_program.parse::<Pubkey>() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    warn!("Invalid program address: {}", e);
+                    continue;
+                }
+            };
+            
+            // Derive bonding curve PDA
+            let (bonding_curve_pk, _) = Pubkey::find_program_address(
+                &[b"bonding-curve", mint_pk.as_ref()],
+                &program_pk,
+            );
+            
+            // Fetch current price
+            let current_price = match fetch_bonding_curve_state(
+                &holding.mint,
+                &bonding_curve_pk.to_string(),
+                &rpc_client,
+            ).await {
+                Ok(state) => calculate_price_from_bonding_curve(&state),
+                Err(e) => {
+                    warn!("Failed to fetch price for {}: {:?}", holding.mint, e);
+                    continue;
+                }
+            };
+            
+            // Calculate profit/loss
+            let profit_percent = if holding.buy_price != 0.0 {
+                ((current_price - holding.buy_price) / holding.buy_price) * 100.0
+            } else {
+                0.0
+            };
+            
+            // Parse buy time
+            let buy_time = match chrono::DateTime::parse_from_rfc3339(&holding.buy_time) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(e) => {
+                    warn!("Failed to parse buy time for {}: {}", holding.mint, e);
+                    continue;
+                }
+            };
+            
+            let elapsed_secs = Utc::now().signed_duration_since(buy_time).num_seconds();
+            
+            // Check TP/SL/Timeout conditions
+            let should_sell = if profit_percent >= settings.tp_percent {
+                Some(("TP", profit_percent, current_price))
+            } else if profit_percent <= settings.sl_percent {
+                Some(("SL", profit_percent, current_price))
+            } else if elapsed_secs >= settings.timeout_secs {
+                Some(("TIMEOUT", profit_percent, current_price))
+            } else {
+                None
+            };
+            
+            if let Some((reason, pct, price)) = should_sell {
+                info!("{} triggered for {}: {:.2}% @ {:.9} SOL", reason, holding.mint, pct, price);
+                
+                actions.push(serde_json::json!({
+                    "action": "sell",
+                    "mint": holding.mint,
+                    "reason": reason,
+                    "profitPercent": pct,
+                    "currentPrice": price,
+                    "amount": holding.amount,
+                }));
+                
+                // Log to UI
+                let mut state = match self.state.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner()
+                };
+                let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                    .unwrap_or_else(|| "unknown".to_string());
+                state.logs.push(LogEntry {
+                    timestamp,
+                    level: "warn".to_string(),
+                    message: format!("🔔 {} Triggered: {}", reason, 
+                                    holding.metadata.as_ref()
+                                        .and_then(|m| m.symbol.as_ref())
+                                        .unwrap_or(&holding.mint)),
+                    details: Some(format!(
+                        "Profit: {:.2}%\nCurrent Price: {:.9} SOL\nBuy Price: {:.9} SOL\nHold Time: {}s",
+                        pct, price, holding.buy_price, elapsed_secs
+                    )),
+                });
+            }
+        }
+        
+        if actions.is_empty() {
+            Ok(serde_json::json!({ 
+                "action": "none", 
+                "holdings": holdings_to_check.len() 
+            }).to_string())
+        } else {
+            Ok(serde_json::json!({ 
+                "action": "sell_required", 
+                "actions": actions 
+            }).to_string())
+        }
+    }
+    
+    /// Build sell transaction for a holding (Phase 4 feature)
+    #[wasm_bindgen]
+    pub fn build_sell_transaction(&self, mint: &str, user_pubkey: &str) -> Result<String, JsValue> {
+        use sol_beast_core::tx_builder::build_sell_instruction;
+        use solana_pubkey::Pubkey;
+        use base64::{Engine as _, engine::general_purpose};
+        
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in build_sell_transaction, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Find the holding
+        let holding = state.holdings.iter()
+            .find(|h| h.mint == mint)
+            .ok_or_else(|| JsValue::from_str("Token not found in holdings"))?;
+        
+        // Parse public keys
+        let user_pk = user_pubkey.parse::<Pubkey>()
+            .map_err(|e| JsValue::from_str(&format!("Invalid user public key: {}", e)))?;
+        let program_pk = state.settings.pump_fun_program.parse::<Pubkey>()
+            .map_err(|e| JsValue::from_str(&format!("Invalid program address: {}", e)))?;
+        
+        // Use user as fee recipient for sell (same as buy)
+        let fee_recipient = user_pk.clone();
+        
+        let core_settings = state.settings.to_core_settings();
+        let token_amount = holding.amount;
+        
+        // Calculate minimum SOL to receive (with slippage)
+        // For sell, we want at least (1 - slippage) of expected value
+        let slippage_multiplier = 1.0 - (state.settings.slippage_bps as f64 / 10000.0);
+        // Use current buy_price as estimate, frontend should fetch real price
+        let estimated_sol = (token_amount as f64 / 1_000_000.0) * holding.buy_price;
+        let min_sol_output = (estimated_sol * slippage_multiplier * 1e9) as u64; // Convert to lamports
+        
+        // Build sell instruction (creator is optional for sell)
+        let instruction = build_sell_instruction(
+            &program_pk,
+            mint,
+            token_amount,
+            min_sol_output,
+            &user_pk,
+            &fee_recipient,
+            None, // creator_pubkey not needed for sell
+            &core_settings,
+        ).map_err(|e| JsValue::from_str(&format!("Failed to build sell instruction: {}", e)))?;
+        
+        // Serialize instruction to JSON
+        let accounts_json: Vec<serde_json::Value> = instruction.accounts.iter()
+            .map(|acc| serde_json::json!({
+                "pubkey": acc.pubkey.to_string(),
+                "isSigner": acc.is_signer,
+                "isWritable": acc.is_writable,
+            }))
+            .collect();
+        
+        let data_base64 = general_purpose::STANDARD.encode(&instruction.data);
+        
+        let result = serde_json::json!({
+            "programId": instruction.program_id.to_string(),
+            "accounts": accounts_json,
+            "data": data_base64,
+            "tokenAmount": token_amount,
+            "minSolOutput": min_sol_output,
+            "estimatedSol": estimated_sol,
+        });
+        
+        serde_json::to_string(&result)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize instruction: {}", e)))
+    }
+    
+    /// Remove a holding after successful sell (Phase 4 feature)
+    #[wasm_bindgen]
+    pub fn remove_holding(&self, mint: &str, profit_percent: f64, reason: &str) -> Result<(), JsValue> {
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in remove_holding, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        // Find and remove holding
+        if let Some(pos) = state.holdings.iter().position(|h| h.mint == mint) {
+            let holding = state.holdings.remove(pos);
+            info!("Removed holding for {}: {} tokens @ {:.9} SOL", 
+                  mint, holding.amount, holding.buy_price);
+            
+            // Persist to localStorage
+            if let Err(e) = self.save_holdings_to_storage(&state.holdings) {
+                warn!("Failed to persist holdings to localStorage: {:?}", e);
+            }
+            
+            // Log to UI
+            let timestamp = js_sys::Date::new_0().to_iso_string().as_string()
+                .unwrap_or_else(|| "unknown".to_string());
+            let result_icon = if profit_percent > 0.0 { "✅" } else { "❌" };
+            state.logs.push(LogEntry {
+                timestamp,
+                level: "info".to_string(),
+                message: format!("{} Token sold: {}", result_icon, 
+                               holding.metadata.as_ref()
+                                   .and_then(|m| m.symbol.as_ref())
+                                   .map(|s| s.as_str())
+                                   .unwrap_or(mint)),
+                details: Some(format!(
+                    "Reason: {}\nProfit: {:.2}%\nTokens: {}\nBuy Price: {:.9} SOL",
+                    reason, profit_percent, holding.amount as f64 / 1_000_000.0, holding.buy_price
+                )),
+            });
+            
+            Ok(())
+        } else {
+            Err(JsValue::from_str("Holding not found"))
+        }
+    }
+    
     /// Build buy transaction for a detected token (Phase 3.3 feature)
     /// Returns a JSON object with transaction data that can be signed and submitted
     #[wasm_bindgen]
@@ -686,6 +1042,57 @@ impl SolBeastBot {
                 }
             };
             state.settings = settings;
+        }
+        
+        // Also load holdings from localStorage
+        if let Err(e) = self.load_holdings_from_storage() {
+            warn!("Failed to load holdings from localStorage: {:?}", e);
+        }
+        
+        Ok(())
+    }
+    
+    /// Helper: Save holdings to localStorage
+    fn save_holdings_to_storage(&self, holdings: &[HoldingWithMint]) -> Result<(), JsValue> {
+        let json = serde_json::to_string(holdings)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))?;
+        
+        let window = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No window object"))?;
+        let storage = window.local_storage()
+            .map_err(|e| JsValue::from_str(&format!("Failed to access localStorage: {:?}", e)))?
+            .ok_or_else(|| JsValue::from_str("localStorage not available"))?;
+        
+        storage.set_item("sol_beast_holdings", &json)
+            .map_err(|e| JsValue::from_str(&format!("Failed to save to localStorage: {:?}", e)))?;
+        
+        Ok(())
+    }
+    
+    /// Helper: Load holdings from localStorage
+    fn load_holdings_from_storage(&self) -> Result<(), JsValue> {
+        let window = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No window object"))?;
+        let storage = window.local_storage()
+            .map_err(|e| JsValue::from_str(&format!("Failed to access localStorage: {:?}", e)))?
+            .ok_or_else(|| JsValue::from_str("localStorage not available"))?;
+        
+        if let Some(json) = storage.get_item("sol_beast_holdings")
+            .map_err(|e| JsValue::from_str(&format!("Failed to read from localStorage: {:?}", e)))? {
+            
+            let holdings: Vec<HoldingWithMint> = serde_json::from_str(&json)
+                .map_err(|e| JsValue::from_str(&format!("Failed to parse holdings: {}", e)))?;
+            
+            let mut state = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    info!("Mutex was poisoned in load_holdings_from_storage, recovering...");
+                    poisoned.into_inner()
+                }
+            };
+            
+            state.holdings = holdings;
+            info!("Loaded {} holdings from localStorage", state.holdings.len());
         }
         
         Ok(())

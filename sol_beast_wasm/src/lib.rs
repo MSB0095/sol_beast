@@ -30,6 +30,7 @@ struct BotState {
     holdings: Vec<Holding>,
     logs: Vec<LogEntry>,
     monitor: Option<Monitor>,
+    detected_tokens: Vec<DetectedToken>, // Phase 2: Track detected tokens
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -60,6 +61,29 @@ pub struct LogEntry {
     pub level: String,
     pub message: String,
     pub details: Option<String>,
+}
+
+/// Detected token with metadata and evaluation result
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DetectedToken {
+    pub signature: String,
+    pub mint: String,
+    pub creator: String,
+    pub bonding_curve: String,
+    pub holder_address: String,
+    pub timestamp: String,
+    // Metadata (if available)
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+    pub image_uri: Option<String>,
+    pub description: Option<String>,
+    // Evaluation result
+    pub should_buy: bool,
+    pub evaluation_reason: String,
+    pub token_amount: Option<u64>,
+    pub buy_price_sol: Option<f64>,
+    // Additional info
+    pub liquidity_sol: Option<f64>,
 }
 
 #[wasm_bindgen]
@@ -93,6 +117,7 @@ impl SolBeastBot {
             holdings: Vec::new(),
             logs: Vec::new(),
             monitor: None,
+            detected_tokens: Vec::new(),
         };
         
         Self {
@@ -403,6 +428,26 @@ impl SolBeastBot {
             Err(e) => {
                 error!("Failed to serialize holdings: {}", e);
                 Err(JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))
+            }
+        }
+    }
+    
+    /// Get detected tokens as JSON (Phase 2 feature)
+    #[wasm_bindgen]
+    pub fn get_detected_tokens(&self) -> Result<String, JsValue> {
+        let state = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                info!("Mutex was poisoned in get_detected_tokens, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        
+        match serde_json::to_string(&state.detected_tokens) {
+            Ok(json) => Ok(json),
+            Err(e) => {
+                error!("Failed to serialize detected tokens: {}", e);
+                Err(JsValue::from_str(&format!("Failed to serialize detected tokens: {}", e)))
             }
         }
     }

@@ -18,6 +18,11 @@ interface WasmBot {
   get_holdings(): string
   get_detected_tokens(): string
   build_buy_transaction(mint: string, userPubkey: string): string
+  // Phase 4: Holdings Management
+  add_holding(mint: string, amount: bigint, buy_price: number, metadata_json: string | null): void
+  monitor_holdings(): Promise<string>
+  build_sell_transaction(mint: string, userPubkey: string): string
+  remove_holding(mint: string, profit_percent: number, reason: string): void
   test_rpc_connection(): Promise<string>
   test_ws_connection(): Promise<string>
   save_to_storage(): void
@@ -502,6 +507,70 @@ export const botService = {
         throw new Error('WASM bot is not initialized')
       }
       return wasmBot.load_from_storage()
+    }
+  },
+
+  // Phase 4: Holdings Management Methods
+
+  // Add a holding after successful purchase
+  addHolding(mint: string, amount: bigint, buyPrice: number, metadata?: any) {
+    if (this.isWasmMode()) {
+      if (!wasmBot) {
+        throw new Error('WASM bot is not initialized')
+      }
+      const metadataJson = metadata ? JSON.stringify(metadata) : null
+      return wasmBot.add_holding(mint, amount, buyPrice, metadataJson)
+    } else {
+      // REST API mode: POST to /holdings endpoint
+      throw new Error('Holdings management in REST API mode not yet implemented')
+    }
+  },
+
+  // Monitor holdings for TP/SL/timeout conditions
+  async monitorHoldings() {
+    if (this.isWasmMode()) {
+      if (!wasmBot) {
+        throw new Error('WASM bot is not initialized')
+      }
+      try {
+        const json = await wasmBot.monitor_holdings()
+        return JSON.parse(json)
+      } catch (error: unknown) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
+    } else {
+      // REST API mode: GET /monitor endpoint
+      throw new Error('Holdings monitoring in REST API mode not yet implemented')
+    }
+  },
+
+  // Build sell transaction for a holding
+  buildSellTransaction(mint: string, userPubkey: string) {
+    if (this.isWasmMode()) {
+      if (!wasmBot) {
+        throw new Error('WASM bot is not initialized')
+      }
+      try {
+        const json = wasmBot.build_sell_transaction(mint, userPubkey)
+        return JSON.parse(json)
+      } catch (error: unknown) {
+        throw new Error(error instanceof Error ? error.message : String(error))
+      }
+    } else {
+      throw new Error('Transaction building is only supported in WASM mode')
+    }
+  },
+
+  // Remove a holding after successful sell
+  removeHolding(mint: string, profitPercent: number, reason: string) {
+    if (this.isWasmMode()) {
+      if (!wasmBot) {
+        throw new Error('WASM bot is not initialized')
+      }
+      return wasmBot.remove_holding(mint, profitPercent, reason)
+    } else {
+      // REST API mode: DELETE /holdings/:mint endpoint
+      throw new Error('Holdings removal in REST API mode not yet implemented')
     }
   }
 }

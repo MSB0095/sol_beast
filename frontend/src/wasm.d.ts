@@ -17,6 +17,11 @@ declare module '*/wasm/sol_beast_wasm' {
     get_holdings(): string
     get_detected_tokens(): string
     build_buy_transaction(mint: string, userPubkey: string): string
+    // Phase 4: Holdings Management
+    add_holding(mint: string, amount: bigint, buy_price: number, metadata_json: string | null): void
+    monitor_holdings(): Promise<string>
+    build_sell_transaction(mint: string, userPubkey: string): string
+    remove_holding(mint: string, profit_percent: number, reason: string): void
     test_rpc_connection(): Promise<string>
     test_ws_connection(): Promise<string>
     save_to_storage(): void

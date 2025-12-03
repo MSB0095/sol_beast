@@ -41,7 +41,7 @@ pub trait RpcClient {
 
 /// Fetch bonding curve state from account data
 pub async fn fetch_bonding_curve_state<C: RpcClient + ?Sized>(
-    mint: &str,
+    _mint: &str,
     bonding_curve_address: &str,
     client: &C,
 ) -> RpcResult<BondingCurveState> {

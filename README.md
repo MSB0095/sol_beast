@@ -13,8 +13,12 @@ Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heu
 - ✅ No server costs
 - ✅ Wallet Adapter integration
 - ✅ Works on any static host
+- ✅ Browser-based WebSocket connections
+- ✅ localStorage for settings persistence
 
 **Try it now**: Visit the deployed GitHub Pages version!
+
+⚠️ **Important**: Requires RPC endpoint with CORS support (e.g., Helius, QuickNode)
 
 ### 🖥️ Backend Mode (Self-Hosted)
 **Full-featured with Rust backend server.**
@@ -22,9 +26,58 @@ Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heu
 - ✅ Optimal performance
 - ✅ Server-side WebSocket subscriptions
 - ✅ Secure key storage
+- ✅ File-based configuration
+- ✅ REST API for frontend
 - ✅ Recommended for production
 
 📖 **See [DUAL_MODE_GUIDE.md](DUAL_MODE_GUIDE.md) for complete deployment instructions**
+
+## 📊 Feature Comparison
+
+| Feature | WASM Mode | CLI Mode | Status |
+|---------|-----------|----------|--------|
+| **Core Monitoring** |
+| WebSocket monitoring | ✅ Browser fetch | ✅ tokio-tungstenite | 100% |
+| Transaction parsing | ✅ Core lib | ✅ Core lib | 100% |
+| Pump.fun detection | ✅ Core lib | ✅ Core lib | 100% |
+| **Token Analysis** |
+| Metadata fetching | ✅ fetch API | ✅ reqwest | 100% |
+| Buy heuristics | ✅ Core lib | ✅ Core lib | 100% |
+| Risk evaluation | ✅ Core lib | ✅ Core lib | 100% |
+| **Trading** |
+| Transaction building | ✅ Core lib | ✅ Core lib | 100% |
+| Wallet signing | 🚧 Browser wallet | ✅ Keypair | Phase 2 |
+| Buy execution | 🚧 In progress | ✅ Implemented | Phase 3 |
+| Sell execution | 🚧 In progress | ✅ Implemented | Phase 3 |
+| **Position Management** |
+| Holdings tracking | 🚧 In progress | ✅ Implemented | Phase 4 |
+| TP/SL detection | 🚧 In progress | ✅ Implemented | Phase 4 |
+| Timeout handling | 🚧 In progress | ✅ Implemented | Phase 4 |
+| **Storage** |
+| Settings persistence | ✅ localStorage | ✅ File-based | 100% |
+| State recovery | ✅ localStorage | ✅ File-based | 100% |
+| **Network** |
+| RPC client | ✅ fetch API | ✅ solana_client | 100% |
+| HTTP client | ✅ fetch API | ✅ reqwest | 100% |
+
+**Legend**: ✅ Implemented | 🚧 In Progress | ❌ Not Available
+
+### Architecture
+
+**Centralized Core (`sol_beast_core`)**
+- All business logic, heuristics, and transaction building
+- Platform-agnostic traits for RPC, HTTP, storage
+- Zero code duplication between modes
+
+**Platform Adapters**
+- `sol_beast_cli`: Native implementations (tokio, reqwest, files)
+- `sol_beast_wasm`: WASM implementations (fetch API, localStorage)
+
+This architecture ensures:
+- ✅ Feature parity between modes
+- ✅ Single source of truth for business logic
+- ✅ Easy maintenance (bug fixes benefit both modes)
+- ✅ Testable core without platform dependencies
 
 ---
 

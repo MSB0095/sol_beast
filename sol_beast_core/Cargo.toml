@@ -25,6 +25,7 @@ async-trait = "0.1"
 solana-program = { workspace = true }
 solana-sdk = { workspace = true }
 solana-account-decoder = { workspace = true }
+solana-transaction-status = { workspace = true }
 spl-token = { workspace = true }
 spl-associated-token-account = { workspace = true }
 mpl-token-metadata = { workspace = true }

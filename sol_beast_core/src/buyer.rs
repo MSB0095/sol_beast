@@ -3,8 +3,6 @@
 
 use crate::settings::Settings;
 use crate::models::BondingCurveState;
-use crate::error::CoreError;
-use log::{info, warn};
 
 /// Result of buy heuristic evaluation
 #[derive(Debug, Clone)]

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Clock, TrendingUp, TrendingDown, DollarSign, AlertTriangle } from 'lucide-react'
+import { Clock, AlertTriangle } from 'lucide-react'
 import { botService } from '../services/botService'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Transaction, TransactionInstruction, PublicKey, Connection } from '@solana/web3.js'

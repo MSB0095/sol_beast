@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useBotStore } from '../store/botStore'
 import { useSettingsStore } from '../store/settingsStore'
-import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft, User } from 'lucide-react'
+import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft, User, BookOpen } from 'lucide-react'
 import { ThemeSwitcher } from './ThemeSwitcher'
 import BeastLogo from './BeastLogo'
 import WalletButton from './WalletButton'
@@ -104,6 +104,18 @@ export default function Header() {
                 {(import.meta.env.VITE_USE_WASM === 'true' || window.location.hostname.includes('github.io')) ? '[WASM]' : '[API]'}
               </span>
             </div>
+            
+            {/* Docs Button */}
+            <a
+              href={`${import.meta.env.BASE_URL || '/'}sol_beast_docs/`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 px-4 py-2 bg-black electric-border font-mono-tech text-xs uppercase tracking-wider hover:bg-[var(--theme-accent)] hover:text-black transition-all duration-300 group"
+              style={{ boxShadow: '0 0 15px var(--glow-color)' }}
+            >
+              <BookOpen className="w-4 h-4 group-hover:animate-pulse" />
+              <span className="hidden sm:inline font-semibold">Docs</span>
+            </a>
             
             <WalletButton />
             <ThemeSwitcher />

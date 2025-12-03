@@ -5,3 +5,6 @@ secrets
 
 # WASM build artifacts
 frontend/src/wasm/
+
+# mdbook build directory (book is built during deployment)
+sol_beast_docs/book/

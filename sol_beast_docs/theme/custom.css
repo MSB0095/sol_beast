@@ -1,0 +1,329 @@
+/* Sol Beast Documentation - Cyber/Electric Theme */
+/* Matches the frontend styling exactly */
+
+:root {
+    /* Electric Cyber Theme Colors */
+    --sol-beast-bg-primary: #000000;
+    --sol-beast-bg-secondary: #0a0a0a;
+    --sol-beast-bg-card: #0f0f0f;
+    --sol-beast-accent: #00ff41;
+    --sol-beast-accent-hover: #00cc33;
+    --sol-beast-accent-glow: #00ff41;
+    --sol-beast-text-primary: #ffffff;
+    --sol-beast-text-secondary: #b8ffcf;
+    --sol-beast-text-muted: #5a7a66;
+    --glow-color: rgba(0, 255, 65, 0.6);
+    --glow-color-strong: rgba(0, 255, 65, 0.9);
+    --border-glow: rgba(0, 255, 65, 0.3);
+    
+    /* Override mdbook theme colors */
+    --bg: var(--sol-beast-bg-primary);
+    --fg: var(--sol-beast-text-primary);
+    --sidebar-bg: var(--sol-beast-bg-secondary);
+    --sidebar-fg: var(--sol-beast-text-secondary);
+    --sidebar-non-existant: var(--sol-beast-text-muted);
+    --sidebar-active: var(--sol-beast-accent);
+    --sidebar-spacer: var(--border-glow);
+    --scrollbar: var(--sol-beast-accent);
+    --icons: var(--sol-beast-accent);
+    --icons-hover: var(--sol-beast-accent-hover);
+    --links: var(--sol-beast-accent);
+    --inline-code-color: var(--sol-beast-accent);
+    --theme-popup-bg: var(--sol-beast-bg-card);
+    --theme-popup-border: var(--border-glow);
+    --theme-hover: rgba(0, 255, 65, 0.2);
+    --quote-bg: var(--sol-beast-bg-card);
+    --quote-border: var(--sol-beast-accent);
+    --table-border-color: var(--border-glow);
+    --table-header-bg: var(--sol-beast-bg-card);
+    --table-alternate-bg: var(--sol-beast-bg-secondary);
+    --searchbar-border-color: var(--sol-beast-accent);
+    --searchbar-bg: var(--sol-beast-bg-card);
+    --searchbar-fg: var(--sol-beast-text-primary);
+    --searchbar-shadow-color: var(--glow-color);
+    --searchresults-header-fg: var(--sol-beast-accent);
+    --searchresults-border-color: var(--border-glow);
+    --searchresults-li-bg: var(--sol-beast-bg-secondary);
+    --search-mark-bg: var(--sol-beast-accent);
+}
+
+/* Base Styles */
+html {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: var(--sol-beast-bg-primary);
+    color: var(--sol-beast-text-primary);
+}
+
+body {
+    background: var(--sol-beast-bg-primary);
+    background-image: 
+        radial-gradient(at 0% 0%, rgba(0, 255, 65, 0.05) 0px, transparent 50%),
+        radial-gradient(at 100% 100%, rgba(0, 255, 65, 0.05) 0px, transparent 50%);
+}
+
+/* Scrollbar - Electric Style */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #000000;
+    border: 1px solid var(--border-glow);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--sol-beast-accent);
+    box-shadow: 0 0 15px var(--glow-color-strong);
+    border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--sol-beast-accent-glow);
+    box-shadow: 0 0 25px var(--glow-color-strong), 0 0 40px var(--glow-color);
+}
+
+/* Header - Cyber Style */
+.menu-title {
+    font-family: 'Rajdhani', 'Arial Black', sans-serif;
+    font-weight: 900;
+    font-size: 1.8rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--sol-beast-accent);
+    text-shadow: 0 0 10px var(--glow-color),
+                 0 0 20px var(--glow-color),
+                 0 0 30px var(--glow-color);
+    padding: 1rem;
+    border-bottom: 2px solid var(--sol-beast-accent);
+    box-shadow: 0 2px 20px var(--glow-color);
+}
+
+/* Navigation - Electric Border */
+.sidebar-scrollbox {
+    background: var(--sol-beast-bg-secondary);
+    border-right: 2px solid var(--border-glow);
+    box-shadow: 2px 0 20px var(--glow-color);
+}
+
+.chapter {
+    padding: 0.5rem 1rem;
+    margin: 0.25rem 0;
+    border-left: 2px solid transparent;
+    transition: all 0.3s ease;
+}
+
+.chapter:hover {
+    background: rgba(0, 255, 65, 0.1);
+    border-left: 2px solid var(--sol-beast-accent);
+    box-shadow: inset 0 0 10px var(--glow-color);
+}
+
+.chapter.active,
+.chapter li.active > a {
+    color: var(--sol-beast-accent) !important;
+    background: rgba(0, 255, 65, 0.15);
+    border-left: 2px solid var(--sol-beast-accent);
+    font-weight: 600;
+    box-shadow: inset 0 0 15px var(--glow-color);
+}
+
+/* Content - Cyber Cards */
+.content {
+    background: var(--sol-beast-bg-primary);
+    padding: 2rem;
+}
+
+#content main {
+    margin-left: auto;
+    margin-right: auto;
+    max-width: 900px;
+}
+
+/* Headings - Glowing Effect */
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    color: var(--sol-beast-accent);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+    position: relative;
+}
+
+h1 {
+    font-size: 2.5rem;
+    text-shadow: 0 0 10px var(--glow-color),
+                 0 0 20px var(--glow-color);
+    border-bottom: 2px solid var(--sol-beast-accent);
+    padding-bottom: 0.5rem;
+    box-shadow: 0 2px 15px var(--glow-color);
+}
+
+h2 {
+    font-size: 2rem;
+    color: var(--sol-beast-text-secondary);
+    border-bottom: 1px solid var(--border-glow);
+    padding-bottom: 0.3rem;
+}
+
+h3 {
+    font-size: 1.5rem;
+    color: var(--sol-beast-text-secondary);
+}
+
+/* Links - Electric Glow */
+a {
+    color: var(--sol-beast-accent);
+    text-decoration: none;
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+a:hover {
+    color: var(--sol-beast-accent-hover);
+    text-shadow: 0 0 10px var(--glow-color);
+}
+
+/* Code Blocks - Cyber Terminal Style */
+pre {
+    background: var(--sol-beast-bg-card) !important;
+    border: 2px solid var(--border-glow) !important;
+    border-radius: 8px;
+    padding: 1.5rem !important;
+    box-shadow: 0 0 20px var(--glow-color),
+                inset 0 0 20px rgba(0, 0, 0, 0.5);
+    position: relative;
+    overflow: hidden;
+}
+
+code {
+    font-family: 'Fira Code', 'Courier New', monospace;
+    background: var(--sol-beast-bg-card);
+    color: var(--sol-beast-accent);
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--border-glow);
+    font-size: 0.9em;
+}
+
+pre > code {
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: var(--sol-beast-text-primary);
+}
+
+/* Tables - Electric Grid */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.5rem 0;
+    background: var(--sol-beast-bg-card);
+    border: 2px solid var(--border-glow);
+    box-shadow: 0 0 15px var(--glow-color);
+}
+
+thead {
+    background: var(--sol-beast-bg-secondary);
+    border-bottom: 2px solid var(--sol-beast-accent);
+}
+
+th {
+    color: var(--sol-beast-accent);
+    font-family: 'Rajdhani', sans-serif;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 1rem;
+    text-align: left;
+}
+
+td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border-glow);
+}
+
+tr:hover {
+    background: rgba(0, 255, 65, 0.05);
+}
+
+/* Blockquotes - Info Panels */
+blockquote {
+    background: var(--sol-beast-bg-card);
+    border-left: 4px solid var(--sol-beast-accent);
+    padding: 1rem 1.5rem;
+    margin: 1.5rem 0;
+    box-shadow: 0 0 15px var(--glow-color),
+                inset 0 0 15px rgba(0, 0, 0, 0.5);
+}
+
+/* Lists - Enhanced */
+ul, ol {
+    line-height: 1.8;
+    margin: 1rem 0;
+}
+
+li {
+    margin: 0.5rem 0;
+}
+
+li::marker {
+    color: var(--sol-beast-accent);
+}
+
+/* Search Bar - Cyber Style */
+#searchbar {
+    background: var(--sol-beast-bg-card) !important;
+    border: 2px solid var(--sol-beast-accent) !important;
+    color: var(--sol-beast-text-primary) !important;
+    box-shadow: 0 0 15px var(--glow-color) !important;
+    padding: 0.75rem !important;
+    border-radius: 8px;
+}
+
+#searchbar:focus {
+    box-shadow: 0 0 25px var(--glow-color-strong),
+                inset 0 0 10px var(--glow-color) !important;
+    outline: none;
+}
+
+/* Buttons - Electric Style */
+button, .button {
+    background: var(--sol-beast-bg-card) !important;
+    color: var(--sol-beast-accent) !important;
+    border: 2px solid var(--sol-beast-accent) !important;
+    box-shadow: 0 0 15px var(--glow-color) !important;
+    font-family: 'Rajdhani', sans-serif !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 1px !important;
+    padding: 0.5rem 1rem !important;
+    transition: all 0.3s ease !important;
+    cursor: pointer;
+}
+
+button:hover, .button:hover {
+    background: var(--sol-beast-accent) !important;
+    color: #000000 !important;
+    box-shadow: 0 0 30px var(--glow-color-strong),
+                0 0 50px var(--glow-color) !important;
+    transform: translateY(-2px) !important;
+}
+
+/* Page Transitions */
+.content main {
+    animation: fadeInUp 0.5s ease-out;
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

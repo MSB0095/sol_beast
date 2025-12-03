@@ -8,128 +8,9 @@ use crate::models::{
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 use sol_beast_core::settings::Settings;
 
-/// Pump.fun `create` instruction discriminator: [24, 30, 200, 40, 5, 28, 7, 119]
-/// This is the 8-byte Anchor discriminator for the `create` instruction that creates new tokens.
-pub const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
-
-/// Extracted data from a pump.fun create instruction
-struct PumpCreateData {
-    mint: String,
-    creator: String,
-    curve: Option<String>,
-}
-
-/// Attempts to extract pump.fun create instruction data from an instruction object.
-/// 
-/// Returns Some(PumpCreateData) if the instruction is a valid pump.fun create instruction,
-/// None otherwise.
-fn try_extract_pump_create_data(
-    instr: &serde_json::Value,
-    account_keys: &[String],
-    pump_fun_program_id: &str,
-) -> Option<PumpCreateData> {
-    // Get program ID
-    let program_id = instr
-        .get("programId")
-        .and_then(|p| p.as_str())
-        .or_else(|| {
-            instr
-                .get("programIdIndex")
-                .and_then(|idx| idx.as_u64())
-                .and_then(|i| account_keys.get(i as usize).map(|s| s.as_str()))
-        })?;
-    
-    if program_id != pump_fun_program_id {
-        return None;
-    }
-    
-    // Check instruction data for create discriminator
-    let data_str = instr.get("data").and_then(|d| d.as_str())?;
-    let data_bytes = bs58::decode(data_str).into_vec().ok()?;
-    
-    if data_bytes.len() < 8 || data_bytes[..8] != PUMP_CREATE_DISCRIMINATOR {
-        return None;
-    }
-    
-    // Extract accounts - per pump.fun IDL:
-    // [0] mint, [1] mint_authority, [2] bonding_curve, [3] associated_bonding_curve,
-    // [4] global, [5] mpl_token_metadata, [6] metadata, [7] user (creator/signer)
-    let accounts = instr.get("accounts").and_then(|a| a.as_array())?;
-    
-    if accounts.len() < 8 {
-        return None;
-    }
-    
-    // Helper to extract account at index
-    let get_account = |idx: usize| -> Option<String> {
-        let account_val = accounts.get(idx)?;
-        if let Some(i) = account_val.as_u64() {
-            account_keys.get(i as usize).cloned()
-        } else {
-            account_val.as_str().map(|s| s.to_string())
-        }
-    };
-    
-    let mint = get_account(0)?;
-    let creator = get_account(7)?;
-    let curve = get_account(2);
-    
-    Some(PumpCreateData { mint, creator, curve })
-}
-
-/// Computes the holder address (associated token account) for a bonding curve and mint.
-/// 
-/// # Parameters
-/// - `owner`: The owner of the token account (bonding curve PDA)
-/// - `mint`: The mint address
-fn compute_holder_address(owner: &str, mint: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let owner_pk = Pubkey::from_str(owner)?;
-    let mint_pk = Pubkey::from_str(mint)?;
-    
-    // Use the imported get_associated_token_address function to compute the ATA
-    let holder_addr = get_associated_token_address(&owner_pk, &mint_pk);
-    Ok(holder_addr.to_string())
-}
-
-/// Processes extracted pump.fun create data and computes derived addresses.
-/// Returns (creator, mint, curve, holder_addr) on success.
-fn process_pump_create_data(
-    data: PumpCreateData,
-    pump_fun_program: &str,
-    location: &str,
-) -> Result<(String, String, String, String), Box<dyn std::error::Error + Send + Sync>> {
-    // Log info if mint doesn't end with "pump" (unusual but possible)
-    if !data.mint.ends_with("pump") {
-        info!("{} mint {} does not end with 'pump' (unusual for pump.fun, but accepting)", location, data.mint);
-    }
-    
-    // Compute bonding curve PDA if not already extracted
-    let curve = match data.curve {
-        Some(c) => c,
-        None => {
-            let pump_program = Pubkey::from_str(pump_fun_program)
-                .map_err(|e| format!("Failed to parse pump.fun program ID: {}", e))?;
-            let mint_pk = Pubkey::from_str(&data.mint)
-                .map_err(|e| format!("Failed to parse mint address {}: {}", data.mint, e))?;
-            let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-            curve_pda.to_string()
-        }
-    };
-    
-    // Compute the holder address (ATA for the bonding curve)
-    let holder_addr = compute_holder_address(&curve, &data.mint)?;
-    
-    debug!("Pump.fun CREATE in {}: mint={} creator={} curve={} holder_addr={}", 
-           location, data.mint, data.creator, curve, holder_addr);
-    
-    Ok((data.creator, data.mint, curve, holder_addr))
-}
-
-// `select_ok` was previously used for parallel RPC fetch; after switching to
-// a rotating sequential probe we no longer need it.
+// Transaction parsing and metadata fetching are now centralized in sol_beast_core
 use log::{info, warn, error, debug};
 use mpl_token_metadata::accounts::Metadata;
-use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
@@ -165,240 +46,69 @@ use crate::idl::SimpleIdl;
 /// Uses the pump.fun `create` instruction discriminator [24, 30, 200, 40, 5, 28, 7, 119]
 /// to reliably identify token creation transactions. Checks both main instructions and
 /// inner instructions (for CPI cases).
+/// 
+/// This is now a thin wrapper around the centralized sol_beast_core::transaction_service
 pub async fn fetch_transaction_details(
     signature: &str,
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
 ) -> Result<(String, String, String, String, bool), Box<dyn std::error::Error + Send + Sync>> {
-    // Request base64 encoding to get raw instruction data for discriminator checking
-    let mut attempts = 0u8;
-    let data_value: serde_json::Value = loop {
-        attempts += 1;
-        let resp: Result<RpcResponse<Value>, Box<dyn std::error::Error + Send + Sync>> = fetch_with_fallback::<Value>(
-            json!({
-                "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
-                "params": [ signature, { "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ]
-            }),
-            "getTransaction",
-            rpc_client,
-            settings,
-        )
-        .await;
-
-        match resp {
-            Ok(rpc_resp) => {
-                if let Some(result_val) = rpc_resp.result {
-                    break result_val;
-                } else {
-                    error!("getTransaction returned no result for signature {}", signature);
-                    return Err("No transaction data".into());
-                }
-            }
-            Err(e) => {
-                let s = e.to_string();
-                // Handle common transient errors (rate limit). Retry a few times with backoff.
-                if (s.contains("Too many requests") || s.contains("429")) && attempts < 4 {
-                    let backoff = std::time::Duration::from_millis(250 * attempts as u64);
-                    debug!("Rate limited fetching tx {} (attempt {}), backing off {:?}: {}", signature, attempts, backoff, s);
-                    tokio::time::sleep(backoff).await;
-                    continue;
-                }
-                return Err(e);
-            }
+    use sol_beast_core::native::NativeRpcClient;
+    use sol_beast_core::transaction_service::fetch_and_parse_transaction;
+    
+    // Create wrapper around the Arc<RpcClient>
+    let rpc_wrapper = NativeRpcClient::from_arc(rpc_client.clone());
+    
+    // Use centralized function with retry logic
+    match fetch_and_parse_transaction(signature, &rpc_wrapper, &settings.pump_fun_program, 4).await {
+        Ok(parsed) => {
+            // Convert ParsedTransaction to the tuple format expected by callers
+            Ok((
+                parsed.creator,
+                parsed.mint,
+                parsed.bonding_curve,
+                parsed.holder_address,
+                parsed.is_creation,
+            ))
         }
-    };
-
-    info!("Transaction data retrieved for {}", signature);
-    debug!("Transaction raw JSON: {}", data_value);
-
-    // Normalize account keys from the transaction message
-    let account_keys_arr = data_value
-        .get("transaction")
-        .and_then(|t| t.get("message"))
-        .and_then(|m| m.get("accountKeys"))
-        .and_then(|v| v.as_array())
-        .ok_or("Missing accountKeys in transaction")?;
-
-    let mut account_keys: Vec<String> = Vec::with_capacity(account_keys_arr.len());
-    for key in account_keys_arr {
-        if let Some(s) = key.as_str() {
-            account_keys.push(s.to_string());
-        } else if let Some(obj) = key.as_object() {
-            if let Some(pubkey) = obj.get("pubkey").and_then(|p| p.as_str()) {
-                account_keys.push(pubkey.to_string());
-            } else {
-                account_keys.push(serde_json::to_string(obj)?);
-            }
-        } else {
-            account_keys.push(key.to_string());
+        Err(e) => {
+            // Convert CoreError to Box<dyn Error>
+            Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
         }
     }
-
-    let pump_fun_program_id = &settings.pump_fun_program;
-
-    // STEP 1: Check for pump.fun `create` instruction in main instructions
-    if let Some(instructions) = data_value
-        .get("transaction")
-        .and_then(|t| t.get("message"))
-        .and_then(|m| m.get("instructions"))
-        .and_then(|i| i.as_array())
-    {
-        for instr in instructions {
-            if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
-                let (creator, mint, curve, holder_addr) = 
-                    process_pump_create_data(data, pump_fun_program_id, "main instructions")?;
-                return Ok((creator, mint, curve, holder_addr, true));
-            }
-        }
-    }
-
-    // STEP 2: Fallback - check inner instructions for pump.fun create
-    // This handles cases where the create is wrapped in a CPI call
-    if let Some(meta) = data_value.get("meta") {
-        if let Some(inner_instructions) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
-            for inner_instruction in inner_instructions {
-                if let Some(instructions) = inner_instruction.get("instructions").and_then(|v| v.as_array()) {
-                    for instr in instructions {
-                        if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
-                            let (creator, mint, curve, holder_addr) = 
-                                process_pump_create_data(data, pump_fun_program_id, "inner instructions")?;
-                            return Ok((creator, mint, curve, holder_addr, true));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // No pump.fun create instruction found
-    debug!("No pump.fun CREATE instruction found in tx {}", signature);
-    debug!("Account keys (len={}): {:?}", account_keys.len(), account_keys);
-    Err("Could not find pump.fun create instruction".into())
 }
 
 
 
+/// Fetch token metadata (both on-chain and off-chain)
+/// 
+/// This is now a thin wrapper around the centralized sol_beast_core::transaction_service
 pub async fn fetch_token_metadata(
     mint: &str,
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
 ) -> Result<(Option<Metadata>, Option<OffchainTokenMetadata>, Option<Vec<u8>>), Box<dyn std::error::Error + Send + Sync>> {
-    let metadata_program_pk = Pubkey::from_str(&settings.metadata_program)?;
-    let mint_pk = Pubkey::from_str(mint)?;
-    let metadata_pda = Pubkey::find_program_address(
-        &[b"metadata", metadata_program_pk.as_ref(), mint_pk.as_ref()],
-        &metadata_program_pk,
-    )
-    .0;
-    debug!("Fetching token metadata for mint {} -> metadata PDA {}", mint, metadata_pda);
-    let data: RpcResponse<Value> = fetch_with_fallback::<Value>(
-        json!({
-            "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
-            "params": [ metadata_pda.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
-        }),
-        "getAccountInfo",
-        rpc_client,
-        settings,
-    )
-    .await?;
-    if let Some(r) = data.result {
-        // Normalize: some RPC implementations put the account under result.value
-        let account_obj = if let Some(v) = r.get("value") { v.clone() } else { r.clone() };
-        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
-            match Base64Engine.decode(base64_str) {
-                Ok(decoded) => match Metadata::safe_deserialize(&decoded) {
-                    Ok(meta) => {
-                        // Try to fetch off-chain metadata JSON from the URI in on-chain metadata
-                        let uri = meta.uri.trim_end_matches('\u{0}').to_string();
-                        if !uri.is_empty() && (uri.starts_with("http://") || uri.starts_with("https://")) {
-                            let client = Client::new();
-                            match client.get(&uri).send().await {
-                                Ok(resp) => match resp.text().await {
-                                    Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
-                                            Ok(body_val) => {
-                                                // Try to pull common top-level fields from the JSON using flexible heuristics
-                                                fn extract_first_string(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
-                                                    for key in keys {
-                                                        if let Some(field) = v.get(*key) {
-                                                            match field {
-                                                                serde_json::Value::String(s) => return Some(s.clone()),
-                                                                serde_json::Value::Object(map) => {
-                                                                    // Try `en` locale or first string value
-                                                                    if let Some(serde_json::Value::String(s2)) = map.get("en") {
-                                                                        return Some(s2.clone());
-                                                                    }
-                                                                    for (_k, val) in map.iter() {
-                                                                        if let serde_json::Value::String(s3) = val {
-                                                                            return Some(s3.clone());
-                                                                        }
-                                                                    }
-                                                                }
-                                                                serde_json::Value::Array(arr) => {
-                                                                    if let Some(serde_json::Value::String(s4)) = arr.get(0) {
-                                                                        return Some(s4.clone());
-                                                                    }
-                                                                }
-                                                                other => {
-                                                                    // Fallback: use string representation for numbers or bools
-                                                                    return Some(other.to_string());
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    None
-                                                }
-
-                                                let mut off = OffchainTokenMetadata {
-                                                    name: extract_first_string(&body_val, &["name", "title", "token_name"]),
-                                                    symbol: extract_first_string(&body_val, &["symbol", "ticker"]),
-                                                    description: body_val.get("description").and_then(|d| d.as_str().map(|s| s.to_string())),
-                                                    image: extract_first_string(&body_val, &["image", "image_url", "imageUri"]),
-                                                    extras: Some(body_val.clone()),
-                                                };
-                                                // Normalize and extract fields from extras
-                                                off.normalize();
-                                                debug!("Fetched off-chain metadata for {}: {:?}", mint, off);
-                                                Ok((Some(meta), Some(off), Some(decoded)))
-                                            }
-                                        Err(e) => {
-                                            warn!("Failed to parse off-chain metadata JSON for {}: {}", uri, e);
-                                            Ok((Some(meta), None, Some(decoded)))
-                                        }
-                                    },
-                                    Err(e) => {
-                                        warn!("Failed to read off-chain metadata body for {}: {}", uri, e);
-                                        Ok((Some(meta), None, Some(decoded)))
-                                    }
-                                },
-                                Err(e) => {
-                                    warn!("HTTP error fetching off-chain metadata {}: {}", uri, e);
-                                    Ok((Some(meta), None, Some(decoded)))
-                                }
-                            }
-                            } else {
-                            Ok((Some(meta), None, Some(decoded)))
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to deserialize metadata for mint {}: {}", mint, e);
-                        Ok((None, None, Some(decoded)))
-                    }
-                },
-                Err(e) => {
-                    error!("Base64 decode error for metadata PDA {} mint {}: {}", metadata_pda, mint, e);
-                    Ok((None, None, None))
-                }
-            }
-        } else {
-            // Metadata PDA may legitimately exist but be empty for some mints at
-            // creation time; log at debug level to avoid excessive warning spam.
-            debug!("No data field returned in account info for metadata PDA {} mint {}", metadata_pda, mint);
-            Ok((None, None, None))
+    use sol_beast_core::native::{NativeRpcClient, NativeHttpClient};
+    use sol_beast_core::transaction_service::fetch_complete_token_metadata;
+    
+    // Create wrappers
+    let rpc_wrapper = NativeRpcClient::from_arc(rpc_client.clone());
+    let http_client = NativeHttpClient::new();
+    
+    // Use centralized function
+    match fetch_complete_token_metadata(mint, &settings.metadata_program, &rpc_wrapper, &http_client).await {
+        Ok(token_metadata) => {
+            // Convert TokenMetadata to the tuple format expected by callers
+            Ok((
+                token_metadata.onchain,
+                token_metadata.offchain,
+                token_metadata.raw_account_data,
+            ))
         }
-    } else {
-        // Not fatal: the account may not exist or be unindexed for some RPCs; debug-level log
-        debug!("getAccountInfo returned no result for metadata PDA {} mint {}", metadata_pda, mint);
-        Ok((None, None, None))
+        Err(e) => {
+            // Convert CoreError to Box<dyn Error>
+            Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        }
     }
 }
 

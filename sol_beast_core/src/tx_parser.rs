@@ -55,9 +55,20 @@ fn try_extract_pump_create_data(
     
     // Check instruction data for create discriminator
     let data_str = instr.get("data").and_then(|d| d.as_str())?;
-    let data_bytes = bs58::decode(data_str).into_vec().ok()?;
+    let data_bytes = match bs58::decode(data_str).into_vec() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // Log error for debugging but return None (not a valid instruction)
+            debug!("Failed to decode instruction data as bs58: {} - data: {}", e, data_str);
+            return None;
+        }
+    };
     
-    if data_bytes.len() < 8 || data_bytes[..8] != PUMP_CREATE_DISCRIMINATOR {
+    if data_bytes.len() < 8 {
+        return None;
+    }
+    
+    if data_bytes[..8] != PUMP_CREATE_DISCRIMINATOR {
         return None;
     }
     

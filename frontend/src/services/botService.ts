@@ -459,7 +459,7 @@ export const botService = {
         throw new Error(error instanceof Error ? error.message : String(error))
       }
     } else {
-      throw new Error('Transaction building is only supported in WASM mode')
+      throw new Error('Transaction building is only supported in WASM mode. Please enable WASM mode to build and submit transactions.')
     }
   },
 

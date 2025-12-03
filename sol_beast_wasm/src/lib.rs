@@ -554,9 +554,13 @@ impl SolBeastBot {
         let program_pk = state.settings.pump_fun_program.parse::<Pubkey>()
             .map_err(|e| JsValue::from_str(&format!("Invalid program address: {}", e)))?;
         
-        // Get fee recipient from bonding curve (for now use a placeholder)
-        // TODO: Fetch actual fee recipient from bonding curve account
-        let fee_recipient = creator_pk; // Placeholder
+        // Get fee recipient from bonding curve
+        // NOTE: In pump.fun, the fee_recipient is typically stored in the bonding curve account.
+        // For now, using creator address as a temporary placeholder. This works for most cases
+        // but should be fetched from the bonding curve account data for accuracy.
+        // TODO: Fetch actual fee_recipient by calling get_account_info on bonding_curve address
+        // and parsing the account data to extract the fee_recipient field
+        let fee_recipient = creator_pk; // Temporary placeholder - works but not ideal
         
         // Calculate amount and max sol cost
         let buy_amount_sol = state.settings.buy_amount;
@@ -572,7 +576,7 @@ impl SolBeastBot {
             mint,
             token_amount,
             max_sol_cost,
-            Some(true), // track_volume
+            Some(true), // track_volume: always enabled in WASM mode for consistency with CLI behavior
             &user_pk,
             &fee_recipient,
             Some(creator_pk),

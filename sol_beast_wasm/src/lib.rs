@@ -10,6 +10,14 @@ use log::{info, error};
 mod monitor;
 use monitor::Monitor;
 
+// Constants for configuration defaults and limits
+const DEFAULT_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+const DEFAULT_CACHE_CAPACITY: usize = 1000;
+const DEFAULT_PRICE_CACHE_TTL_SECS: u64 = 60;
+const MAX_FETCH_RETRIES: u8 = 3;
+const MAX_DETECTED_TOKENS: usize = 50;
+const PLACEHOLDER_ESTIMATED_PRICE: f64 = 0.00001; // Phase 3 will fetch real prices
+
 // Initialize panic hook and logger for WASM
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -72,8 +80,8 @@ impl BotSettings {
             tp_percent: self.tp_percent,
             sl_percent: self.sl_percent,
             timeout_secs: self.timeout_secs,
-            cache_capacity: 1000,
-            price_cache_ttl_secs: 60,
+            cache_capacity: DEFAULT_CACHE_CAPACITY,
+            price_cache_ttl_secs: DEFAULT_PRICE_CACHE_TTL_SECS,
             buy_amount: self.buy_amount,
             price_source: "wss".to_string(),
             rotate_rpc: false,
@@ -615,7 +623,7 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
         match state.lock() {
             Ok(s) => {
                 let rpc_url = s.settings.solana_rpc_urls.first().cloned()
-                    .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+                    .unwrap_or_else(|| DEFAULT_SOLANA_RPC_URL.to_string());
                 let metadata_program = s.settings.metadata_program.clone();
                 let pump_fun_program = s.settings.pump_fun_program.clone();
                 let core_settings = s.settings.to_core_settings();
@@ -637,7 +645,7 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
         &signature,
         &rpc_client,
         &pump_fun_program,
-        3, // max retries
+        MAX_FETCH_RETRIES,
     ).await {
         Ok(tx) => {
             info!("Successfully parsed transaction: mint={}, creator={}", tx.mint, tx.creator);
@@ -691,7 +699,7 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
     // For now, we'll use placeholder values for price and bonding curve state
     // In Phase 3, we'll fetch actual price from bonding curve
     let buy_amount = core_settings.buy_amount;
-    let estimated_price = 0.00001; // Placeholder - Phase 3 will fetch real price
+    let estimated_price = PLACEHOLDER_ESTIMATED_PRICE;
     
     let evaluation = evaluate_buy_heuristics(
         &parsed_tx.mint,
@@ -736,9 +744,9 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
     if let Ok(mut s) = state.lock() {
         s.detected_tokens.push(detected_token.clone());
         
-        // Keep only last 50 detected tokens
-        if s.detected_tokens.len() > 50 {
-            let excess = s.detected_tokens.len() - 50;
+        // Keep only last MAX_DETECTED_TOKENS
+        if s.detected_tokens.len() > MAX_DETECTED_TOKENS {
+            let excess = s.detected_tokens.len() - MAX_DETECTED_TOKENS;
             s.detected_tokens.drain(0..excess);
         }
         

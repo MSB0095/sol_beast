@@ -573,10 +573,14 @@ impl SolBeastBot {
         
         // Check if already holding this token
         if let Some(existing) = state.holdings.iter_mut().find(|h| h.mint == mint) {
-            // Update existing holding (average price)
+            // Update existing holding (average price with overflow protection)
             let total_old = existing.amount as f64 * existing.buy_price;
             let total_new = amount as f64 * buy_price;
-            let new_total_amount = existing.amount + amount;
+            let new_total_amount = existing.amount.saturating_add(amount);
+            if new_total_amount == 0 {
+                warn!("Amount overflow detected for {}, skipping update", mint);
+                return Err(JsValue::from_str("Amount overflow"));
+            }
             existing.buy_price = (total_old + total_new) / new_total_amount as f64;
             existing.amount = new_total_amount;
             info!("Updated existing holding for {}: {} tokens @ {:.9} SOL", 

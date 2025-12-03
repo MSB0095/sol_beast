@@ -135,34 +135,42 @@ export default function HoldingsPanel() {
       console.log('Sell transaction sent:', signature)
       window.alert(`Sell transaction submitted!\n\nSignature: ${signature}\n\nView on Solscan: https://solscan.io/tx/${signature}`)
       
-      // Step 9: Wait for confirmation
-      const confirmation = await connection.confirmTransaction({
-        signature,
-        blockhash,
-        lastValidBlockHeight
-      }, 'confirmed')
+      // Step 9: Wait for confirmation with timeout handling
+      const confirmation = await Promise.race([
+        connection.confirmTransaction({
+          signature,
+          blockhash,
+          lastValidBlockHeight
+        }, 'confirmed'),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Confirmation timeout after 60s')), 60000)
+        )
+      ])
       
       if (confirmation.value.err) {
         throw new Error('Transaction failed: ' + JSON.stringify(confirmation.value.err))
       }
       
-      console.log('Sell transaction confirmed!')
-      
-      // Step 10: Remove the holding
-      try {
-        const reason = alert?.reason || 'MANUAL'
-        const profitPercent = alert?.profitPercent || 0
-        botService.removeHolding(holding.mint, profitPercent, reason)
-        console.log('Holding removed successfully')
+      // Only proceed if confirmation succeeded
+      if (!confirmation.value.err) {
+        console.log('Sell transaction confirmed!')
         
-        // Refresh holdings immediately
-        const data = await botService.getHoldings()
-        setHoldings(data)
-      } catch (holdingErr) {
-        console.error('Failed to remove holding:', holdingErr)
+        // Step 10: Remove the holding after successful confirmation
+        try {
+          const reason = alert?.reason || 'MANUAL'
+          const profitPercent = alert?.profitPercent || 0
+          botService.removeHolding(holding.mint, profitPercent, reason)
+          console.log('Holding removed successfully')
+          
+          // Refresh holdings immediately
+          const data = await botService.getHoldings()
+          setHoldings(data)
+        } catch (holdingErr) {
+          console.error('Failed to remove holding:', holdingErr)
+        }
+        
+        window.alert(`Sell confirmed!\n\nToken sold successfully.\n\nView on Solscan: https://solscan.io/tx/${signature}`)
       }
-      
-      window.alert(`Sell confirmed!\n\nToken sold successfully.\n\nView on Solscan: https://solscan.io/tx/${signature}`)
       
     } catch (err) {
       console.error('Sell failed:', err)

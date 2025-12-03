@@ -140,10 +140,14 @@ export default function NewCoinsPanel() {
           description: token.description,
         }
         
+        // Calculate price per token (txData.tokenAmount is in base units, typically 6 decimals for SPL tokens)
+        const tokenDecimals = 6 // pump.fun tokens use 6 decimals
+        const pricePerToken = txData.buyAmountSol / (txData.tokenAmount / Math.pow(10, tokenDecimals))
+        
         botService.addHolding(
           token.mint,
           BigInt(txData.tokenAmount),
-          txData.buyAmountSol / (txData.tokenAmount / 1_000_000),  // Calculate actual price per token
+          pricePerToken,
           metadata
         )
         

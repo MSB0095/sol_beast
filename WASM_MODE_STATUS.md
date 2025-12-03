@@ -92,30 +92,33 @@
 - ✅ WASM monitor calls evaluation for every detected token
 - ✅ Evaluation results stored in DetectedToken state
 - ✅ BotSettings converts to core Settings for evaluation
+- ✅ Real-time price fetching from bonding curve
+- ✅ Liquidity calculation from bonding curve
+- ✅ UI displays evaluation results with price and liquidity
 
-**What's missing:**
-- 🚧 UI display of evaluation results (frontend work)
-- ⚠️ Using placeholder price values (Phase 3 will add real price fetching)
-
-**Impact**: Backend complete with placeholder prices, ready for UI integration.
+**Impact**: Backend complete with real prices, frontend displays all data.
 
 ## ❌ Not Yet Implemented (Requires Development)
 
-### 4. Wallet Integration & Transaction Building 🚧 IN PROGRESS
+### 4. Wallet Integration & Transaction Building 🚧 PARTIALLY IMPLEMENTED
 **What's implemented:**
 - ✅ `sol_beast_core/src/tx_builder.rs` - Transaction building logic centralized
 - ✅ Buy/sell instruction construction
 - ✅ Compute budget handling
 - ✅ ATA creation helpers
 - ✅ Dev tip integration
+- ✅ Browser wallet adapter integration (Phantom, Solflare, Torus, Ledger)
+- ✅ Wallet connection UI in Header
+- ✅ Buy button in NewCoinsPanel for tokens that passed evaluation
+- ✅ Wallet connection check before buying
 
 **What's missing:**
-- ❌ Browser wallet adapter integration (Phantom, Solflare, etc.)
-- ❌ Request user signature flow
-- ❌ Transaction submission via WASM RPC client
+- ❌ Actual transaction building in WASM (need to port tx_builder logic)
+- ❌ Transaction signing and submission flow
 - ❌ Transaction status tracking in UI
+- ❌ Error handling for failed transactions
 
-**Impact**: Cannot execute buy orders even if token passes heuristics.
+**Impact**: UI ready for wallet interaction, but transaction execution not yet implemented.
 
 ### 5. Holdings Management ❌ NOT IMPLEMENTED
 **What's missing:**
@@ -256,6 +259,18 @@
 8. ✅ Added BotSettings to Settings conversion
 9. ✅ Added enable_safer_sniping setting support
 10. ✅ WASM module builds successfully with Phase 2 integration
+
+**Phase 3 Achievements (Price Fetching & Wallet UI):**
+1. ✅ Implemented bonding curve parsing with correct offsets
+2. ✅ Added creator extraction from bonding curve account
+3. ✅ Real-time price fetching from virtual reserves
+4. ✅ Liquidity calculation from real SOL reserves
+5. ✅ Integrated price fetching into WASM processing pipeline
+6. ✅ Replaced placeholder prices with real bonding curve data
+7. ✅ Browser wallet adapter integrated (Phantom, Solflare, Torus, Ledger)
+8. ✅ Wallet connection UI in Header
+9. ✅ Buy button added to NewCoinsPanel for qualifying tokens
+10. ✅ Wallet connection check before initiating buys
 
 **Code Reduction:**
 - Eliminated ~250+ lines of duplicate RPC/parsing code from CLI
@@ -453,12 +468,13 @@ Each centralized module in `sol_beast_core` must:
 - ✅ GitHub Pages deployment configured
 
 ### What's Missing for Basic Functionality
-The gap between "detects and evaluates tokens" and "can buy tokens" is:
+Progress toward "can buy tokens":
 1. ✅ ~~Integration~~ - transaction_service wired up in WASM monitor ✅ **COMPLETE**
-2. 🔜 **UI Display** - Show detected tokens with metadata in frontend (Phase 2.5)
-3. ❌ **Wallet Adapter** - Connect to user's browser wallet (Phase 3)
-4. ❌ **Transaction Signing** - Request signature and submit (Phase 3)
-5. ❌ **Price Fetching** - Get real prices from bonding curve (Phase 3)
+2. ✅ ~~UI Display~~ - Show detected tokens with metadata in frontend ✅ **COMPLETE**
+3. ✅ ~~Price Fetching~~ - Get real prices from bonding curve ✅ **COMPLETE**
+4. ✅ ~~Wallet Adapter~~ - Connect to user's browser wallet ✅ **COMPLETE**
+5. 🚧 **Transaction Building** - Port tx_builder to WASM (Phase 3.3) - **IN PROGRESS**
+6. 🚧 **Transaction Signing** - Request signature and submit (Phase 3.3) - **IN PROGRESS**
 
 ### Immediate Next Steps (Priority Order)
 
@@ -470,29 +486,57 @@ The gap between "detects and evaluates tokens" and "can buy tokens" is:
   - ✅ Updated "New Coins" tab to fetch from botService
   - ✅ Show token metadata (name, symbol, image, description)
   - ✅ Show evaluation result (✅ pass / ❌ fail + reason)
-  - ✅ Show placeholder price/liquidity info
+  - ✅ Show real price/liquidity info from bonding curve
   - ✅ Visual indicators (green/red borders, check/X icons)
-  - ⚠️ "Manual approve" button (deferred to Phase 3)
+  - ✅ "Buy" button for tokens that passed evaluation
 - ✅ Add refresh/polling for detected tokens from bot state
 - ✅ Frontend builds successfully
 - ⚠️ Browser testing pending (requires RPC endpoint)
 
 **Completed**: December 3, 2025
-**PR Status**: 
-- ✅ PR #(Current) - Phase 2.5 frontend UI display complete
 
-#### 2. Phase 3 Implementation (NEXT PR)
-**Goal**: Enable actual trading via browser wallet
+#### 2. Phase 3.1: Price Fetching ✅ COMPLETED
+**Goal**: Fetch real-time prices from bonding curve
 
 **Tasks**:
-- [ ] Add Solana Wallet Adapter to frontend
-- [ ] Implement transaction signing flow
-- [ ] Add buy/sell buttons with wallet integration
-- [ ] Handle transaction submission and confirmation
+- ✅ Parse bonding curve account with correct offsets
+- ✅ Extract creator from bonding curve
+- ✅ Calculate price using virtual reserves formula
+- ✅ Calculate liquidity from real SOL reserves
+- ✅ Integrate into WASM processing pipeline
+- ✅ Display real prices in UI
+- ✅ WASM and frontend build successfully
 
-**Estimated Time**: 20-30 hours
+**Completed**: December 3, 2025
 
-#### 3. Phase 4 Implementation (Future PR)
+#### 3. Phase 3.2: Wallet UI Integration ✅ COMPLETED
+**Goal**: Add wallet connection UI for manual trading
+
+**Tasks**:
+- ✅ Wallet adapter integration (Phantom, Solflare, Torus, Ledger)
+- ✅ Wallet button in Header
+- ✅ Buy button in NewCoinsPanel
+- ✅ Wallet connection check
+- ✅ Loading states for buy actions
+- ✅ Frontend builds successfully
+
+**Completed**: December 3, 2025
+
+#### 4. Phase 3.3: Transaction Execution (NEXT - HIGH PRIORITY)
+**Goal**: Complete the buy transaction flow
+
+**Tasks**:
+- [ ] Port tx_builder logic to WASM-compatible format
+- [ ] Build buy transaction with proper accounts
+- [ ] Sign transaction with wallet adapter
+- [ ] Submit via WASM RPC client
+- [ ] Track transaction status
+- [ ] Handle transaction confirmation
+- [ ] Display success/error feedback
+
+**Estimated Time**: 15-20 hours
+
+#### 5. Phase 4 Implementation (Future PR)
 **Goal**: Add position management
 
 **Tasks**:
@@ -506,12 +550,14 @@ The gap between "detects and evaluates tokens" and "can buy tokens" is:
 - ✅ Phase 1: Bot compiles and runs - **ACHIEVED**
 - ✅ Phase 2 (Backend): Tokens detected, parsed, and evaluated - **ACHIEVED**
 - ✅ Phase 2.5 (Frontend): Token evaluation results displayed in UI - **ACHIEVED**
-- ❌ Phase 3: Can execute buys via browser wallet - **NEXT**
-- ❌ Phase 4: Can manage positions with TP/SL
-- ❌ Phase 5: Production-ready with full testing
+- ✅ Phase 3.1 (Price): Real-time bonding curve price fetching - **ACHIEVED**
+- ✅ Phase 3.2 (Wallet UI): Browser wallet connection UI - **ACHIEVED**
+- 🚧 Phase 3.3 (Execution): Transaction building and submission - **IN PROGRESS**
+- ❌ Phase 4: Can manage positions with TP/SL - **PENDING**
+- ❌ Phase 5: Production-ready with full testing - **PENDING**
 
 ---
 
 *Updated: 2025-12-03*
 *Author: GitHub Copilot*
-*Status: Phase 1 ✅ Complete | Phase 2 Backend ✅ Complete | Phase 2.5 Frontend ✅ Complete*
+*Status: Phase 1 ✅ | Phase 2 ✅ | Phase 2.5 ✅ | Phase 3.1 ✅ | Phase 3.2 ✅ | Phase 3.3 🚧*

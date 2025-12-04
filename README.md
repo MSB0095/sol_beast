@@ -19,7 +19,8 @@ Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heu
 
 **Try it now**: Visit the deployed GitHub Pages version!
 
-✨ **No CORS restrictions!** Bot automatically uses WebSocket for RPC calls when needed - works with public Solana RPC endpoints!
+✨ **No CORS restrictions!** Bot automatically uses WebSocket for RPC calls when needed - works with public Solana RPC endpoints!  
+📖 See [WEBSOCKET_RPC_IMPLEMENTATION.md](WEBSOCKET_RPC_IMPLEMENTATION.md) for technical details.
 
 ### 🖥️ Backend Mode (Self-Hosted)
 **Full-featured with Rust backend server.**

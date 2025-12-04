@@ -1,7 +1,5 @@
 {
-  "_comment": "✅ WASM mode now supports ANY Solana RPC endpoint! CORS issues are automatically handled by switching to WebSocket RPC.",
-  "_note_rpc": "HTTP RPC calls automatically switch to WebSocket if CORS errors detected - works with ANY endpoint!",
-  "_note_ws": "WebSocket connections work without CORS restrictions. Bot automatically converts HTTP->WS endpoints.",
+  "_comment": "⚠️ IMPORTANT: Public Solana RPC endpoints DO NOT support WebSocket connections from browsers due to CORS restrictions. For WASM mode to work, you MUST use a premium RPC provider that supports browser WebSockets (Helius, QuickNode, Alchemy, etc.) or run your own RPC proxy. See GITHUB_PAGES_SETUP.md for details.",
   "_example_helius": "wss://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY",
   "_example_quicknode": "wss://your-endpoint.quiknode.pro/YOUR_API_KEY/",
   "solana_ws_urls": ["wss://api.mainnet-beta.solana.com"],

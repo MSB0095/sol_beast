@@ -33,11 +33,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: wasm32-unknown-unknown
-          override: true
+          targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -64,31 +62,30 @@ jobs:
           HELIUS_WSS: ${{ secrets.HELIUS_WSS }}
           HELIUS_HTTPS: ${{ secrets.HELIUS_HTTPS }}
         run: |
-          # Create bot-settings.json with secret RPC URLs using environment variables
-          cat > bot-settings.json << EOF
-          {
-            "_comment": "Test configuration using Helius RPC endpoints from GitHub secrets",
-            "solana_ws_urls": ["${HELIUS_WSS}"],
-            "solana_rpc_urls": ["${HELIUS_HTTPS}"],
-            "pump_fun_program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
-            "metadata_program": "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
-            "tp_percent": 100.0,
-            "sl_percent": -50.0,
-            "timeout_secs": 50,
-            "buy_amount": 0.001,
-            "max_holded_coins": 4,
-            "slippage_bps": 500,
-            "min_tokens_threshold": 30000,
-            "max_sol_per_token": 0.002,
-            "min_liquidity_sol": 0.0,
-            "max_liquidity_sol": 15.0,
-            "dev_tip_percent": 2.0,
-            "dev_tip_fixed_sol": 0.0
-          }
-          EOF
-          echo "✓ bot-settings.json configured with secret RPC URLs"
-          echo "Content (secrets masked):"
-          cat bot-settings.json | sed 's/wss:\/\/[^"]*/<WSS_URL_MASKED>/g' | sed 's/https:\/\/[^"]*/<HTTPS_URL_MASKED>/g'
+          # Create bot-settings.json with secret RPC URLs using jq for safe JSON construction
+          jq -n \
+            --arg wss "$HELIUS_WSS" \
+            --arg https "$HELIUS_HTTPS" \
+            '{
+              "_comment": "Test configuration using Helius RPC endpoints from GitHub secrets",
+              "solana_ws_urls": [$wss],
+              "solana_rpc_urls": [$https],
+              "pump_fun_program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+              "metadata_program": "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+              "tp_percent": 100.0,
+              "sl_percent": -50.0,
+              "timeout_secs": 50,
+              "buy_amount": 0.001,
+              "max_holded_coins": 4,
+              "slippage_bps": 500,
+              "min_tokens_threshold": 30000,
+              "max_sol_per_token": 0.002,
+              "min_liquidity_sol": 0.0,
+              "max_liquidity_sol": 15.0,
+              "dev_tip_percent": 2.0,
+              "dev_tip_fixed_sol": 0.0
+            }' > bot-settings.json
+          echo "✓ bot-settings.json configured with secret RPC URLs (not logged for security)"
 
       - name: Build frontend with webpack
         working-directory: ./frontend

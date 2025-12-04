@@ -3,6 +3,7 @@ import { Clock, AlertTriangle } from 'lucide-react'
 import { botService } from '../services/botService'
 import { useWallet } from '@solana/wallet-adapter-react'
 import { Transaction, TransactionInstruction, PublicKey, Connection } from '@solana/web3.js'
+import { walletConnectRequiredToast, loadingToast, updateLoadingToast, transactionToastWithLink, errorToast } from '../utils/toast'
 
 interface Holding {
   mint: string
@@ -84,17 +85,22 @@ export default function HoldingsPanel() {
 
   const handleSellToken = async (holding: Holding, alert?: MonitorAction) => {
     if (!connected || !publicKey) {
-      window.alert('Please connect your wallet first')
+      walletConnectRequiredToast()
       return
     }
     
     setSellingToken(holding.mint)
+    const toastId = loadingToast('Building sell transaction...')
+    let confirmToastId: string | undefined
+    
     try {
       console.log('Building sell transaction for token:', holding.mint)
       
       // Step 1: Build transaction using WASM bot
       const txData = botService.buildSellTransaction(holding.mint, publicKey.toBase58())
       console.log('Sell transaction data:', txData)
+      
+      updateLoadingToast(toastId, true, 'Transaction built', 'Awaiting wallet signature...')
       
       // Step 2: Decode instruction data from base64
       const instructionData = Buffer.from(txData.data, 'base64')
@@ -133,7 +139,10 @@ export default function HoldingsPanel() {
       const signature = await sendTransaction(transaction, connection)
       
       console.log('Sell transaction sent:', signature)
-      window.alert(`Sell transaction submitted!\n\nSignature: ${signature}\n\nView on Solscan: https://solscan.io/tx/${signature}`)
+      transactionToastWithLink(signature, 'sell', 'submitted')
+      
+      // Show loading toast for confirmation
+      confirmToastId = loadingToast('Confirming transaction...')
       
       // Step 9: Wait for confirmation with timeout handling
       const confirmation = await Promise.race([
@@ -154,6 +163,8 @@ export default function HoldingsPanel() {
       // Only proceed if confirmation succeeded
       if (!confirmation.value.err) {
         console.log('Sell transaction confirmed!')
+        updateLoadingToast(confirmToastId, true, 'Transaction confirmed!', 'Sale successful')
+        transactionToastWithLink(signature, 'sell', 'confirmed')
         
         // Step 10: Remove the holding after successful confirmation
         try {
@@ -167,14 +178,22 @@ export default function HoldingsPanel() {
           setHoldings(data)
         } catch (holdingErr) {
           console.error('Failed to remove holding:', holdingErr)
+          errorToast('Failed to remove holding', holdingErr instanceof Error ? holdingErr.message : String(holdingErr))
         }
-        
-        window.alert(`Sell confirmed!\n\nToken sold successfully.\n\nView on Solscan: https://solscan.io/tx/${signature}`)
       }
       
     } catch (err) {
       console.error('Sell failed:', err)
-      window.alert(`Failed to sell token: ${err instanceof Error ? err.message : String(err)}`)
+      
+      // Determine which toast to update based on where the error occurred
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      if (confirmToastId) {
+        // Error occurred during confirmation
+        updateLoadingToast(confirmToastId, false, 'Transaction failed', errorMessage)
+      } else {
+        // Error occurred before transaction was sent
+        updateLoadingToast(toastId, false, 'Transaction failed', errorMessage)
+      }
     } finally {
       setSellingToken(null)
     }

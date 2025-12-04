@@ -1,12 +1,15 @@
 import { useSettingsStore } from '../store/settingsStore'
 import { useBotStore } from '../store/botStore'
 import { useState } from 'react'
-import { Save, AlertCircle, CheckCircle } from 'lucide-react'
+import { Save, AlertCircle, CheckCircle, Settings } from 'lucide-react'
+import RPCConfigModal from './RPCConfigModal'
+import { botService } from '../services/botService'
 
 export default function ConfigurationPanel() {
   const { settings, saving, error, saveSettings, updateSetting } = useSettingsStore()
   const { runningState } = useBotStore()
   const [successMessage, setSuccessMessage] = useState('')
+  const [showRPCModal, setShowRPCModal] = useState(false)
 
   if (!settings) return <div>Loading settings...</div>
 
@@ -25,6 +28,28 @@ export default function ConfigurationPanel() {
   const handleChange = <K extends keyof typeof settings>(key: K, value: any) => {
     updateSetting(key, value)
   }
+
+  const handleRPCConfigured = async () => {
+    setShowRPCModal(false)
+    // Reload settings after RPC configuration
+    try {
+      const updatedSettings = await botService.getSettings()
+      // Update each setting
+      Object.entries(updatedSettings).forEach(([key, value]) => {
+        updateSetting(key as any, value)
+      })
+      setSuccessMessage('RPC configuration updated successfully!')
+      setTimeout(() => setSuccessMessage(''), 5000)
+    } catch (err) {
+      console.error('Failed to reload settings:', err)
+    }
+  }
+
+  const isWasmMode = botService.isWasmMode() || 
+                     (typeof window !== 'undefined' && (
+                       window.location.hostname.endsWith('.github.io') ||
+                       (import.meta as any).env?.VITE_USE_WASM === 'true'
+                     ))
 
   const sections = [
     {
@@ -104,20 +129,23 @@ export default function ConfigurationPanel() {
   ]
 
   return (
-    <div className="space-y-8">
-      {isBotRunning && (
-        <div className="alert-warning rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
-          <AlertCircle size={24} className="flex-shrink-0 mt-0.5 animate-pulse" />
-          <div>
-            <p className="font-bold uppercase tracking-widest text-sm mb-1">BOT IS RUNNING</p>
-            <p className="text-sm opacity-90">
-              You can update settings while running. Trading parameters (TP, SL, buy amount, etc.) apply to future trades.
-              <br />
-              <span className="font-semibold">⚠️ WebSocket URL and Program ID changes require bot restart.</span>
-            </p>
+    <>
+      {showRPCModal && <RPCConfigModal onConfigured={handleRPCConfigured} />}
+      
+      <div className="space-y-8">
+        {isBotRunning && (
+          <div className="alert-warning rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
+            <AlertCircle size={24} className="flex-shrink-0 mt-0.5 animate-pulse" />
+            <div>
+              <p className="font-bold uppercase tracking-widest text-sm mb-1">BOT IS RUNNING</p>
+              <p className="text-sm opacity-90">
+                You can update settings while running. Trading parameters (TP, SL, buy amount, etc.) apply to future trades.
+                <br />
+                <span className="font-semibold">⚠️ WebSocket URL and Program ID changes require bot restart.</span>
+              </p>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
       {error && (
         <div className="alert-error rounded-xl p-5 flex gap-3 relative overflow-hidden animate-fade-in-up">
@@ -140,10 +168,21 @@ export default function ConfigurationPanel() {
         <div key={idx} className="glass-card rounded-2xl p-6 animate-fade-in-up" style={{ 
           animationDelay: `${idx * 0.1}s`
         }}>
-          <h3 className="text-xl font-black mb-6 glow-text uppercase tracking-wider flex items-center gap-3">
-            <span className="w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse" style={{ boxShadow: '0 0 10px var(--theme-accent)' }}></span>
-            {section.title}
-          </h3>
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-xl font-black glow-text uppercase tracking-wider flex items-center gap-3">
+              <span className="w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse" style={{ boxShadow: '0 0 10px var(--theme-accent)' }}></span>
+              {section.title}
+            </h3>
+            {section.title === 'RPC & WebSocket Configuration' && isWasmMode && (
+              <button
+                onClick={() => setShowRPCModal(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg btn-secondary text-xs font-mono-tech uppercase tracking-wider"
+              >
+                <Settings size={16} />
+                Guided Setup
+              </button>
+            )}
+          </div>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {section.settings.map((setting) => (
@@ -227,5 +266,6 @@ export default function ConfigurationPanel() {
         </button>
       </div>
     </div>
+  </>
   )
 }

@@ -30,8 +30,6 @@ Tiny Rust async service to monitor pump.fun events on Solana, auto-buy under heu
 - ✅ REST API for frontend
 - ✅ Recommended for production
 
-📖 **See [DUAL_MODE_GUIDE.md](DUAL_MODE_GUIDE.md) for complete deployment instructions**
-
 ## 📊 Feature Comparison
 
 | Feature | WASM Mode | CLI Mode | Status |

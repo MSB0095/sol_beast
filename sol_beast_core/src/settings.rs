@@ -352,6 +352,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "native")]
+    #[ignore] // Requires config.example.toml in working directory
     fn load_example_config() {
         // This test validates that `Settings::from_file` can load the example
         // config without panicking and that a couple of fields match expected

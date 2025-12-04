@@ -38,7 +38,7 @@ impl StorageBackend for FileStorage {
         
         // Serialize to JSON
         let json = serde_json::to_string_pretty(data)
-            .map_err(|e| CoreError::Json(e))?;
+            .map_err(CoreError::Json)?;
         
         // Write to file
         tokio::fs::write(&path, json).await
@@ -64,7 +64,7 @@ impl StorageBackend for FileStorage {
         
         // Deserialize
         let data = serde_json::from_str(&json)
-            .map_err(|e| CoreError::Json(e))?;
+            .map_err(CoreError::Json)?;
         
         debug!("Data loaded successfully from {:?}", path);
         Ok(Some(data))

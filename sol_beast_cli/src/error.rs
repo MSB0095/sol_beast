@@ -6,8 +6,10 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(#[from] config::ConfigError),
     #[error("Validation error: {0}")]
+    #[allow(dead_code)]
     Validation(String),
     #[error("Invalid keypair: {0}")]
+    #[allow(dead_code)]
     InvalidKeypair(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -18,6 +20,7 @@ pub enum AppError {
     #[error("Integer conversion error: {0}")]
     IntConversion(#[from] TryFromIntError),
     #[error("Initialization error: {0}")]
+    #[allow(dead_code)]
     Init(String),
     #[error("Conversion error: {0}")]
     Conversion(String),

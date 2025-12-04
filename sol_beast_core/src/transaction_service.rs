@@ -140,7 +140,5 @@ pub async fn fetch_token_price<R: RpcClient + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    
     // Tests would go here - need mock RPC client
 }

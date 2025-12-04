@@ -60,7 +60,7 @@ fn extract_first_string(v: &serde_json::Value, keys: &[&str]) -> Option<String> 
                     }
                 }
                 serde_json::Value::Array(arr) => {
-                    if let Some(serde_json::Value::String(s4)) = arr.get(0) {
+                    if let Some(serde_json::Value::String(s4)) = arr.first() {
                         return Some(s4.clone());
                     }
                 }

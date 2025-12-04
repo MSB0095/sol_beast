@@ -16,3 +16,5 @@ frontend/dist_gh/
 # Test artifacts
 deployment-test-*.png
 deployment-test-*.json
+bot-test-*.png
+bot-functionality-report.json

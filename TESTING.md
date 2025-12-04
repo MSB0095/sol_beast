@@ -59,7 +59,7 @@ npx serve dist_gh -l 8080
 # 8. Open browser to http://localhost:8080/sol_beast/
 ```
 
-### Option 3: Playwright Browser Testing
+### Option 3: Playwright Browser Testing (Initial Load)
 
 Run comprehensive browser testing with error detection:
 
@@ -75,6 +75,29 @@ npx playwright install chromium
 cd ..
 node test-with-playwright.mjs http://localhost:8080/sol_beast/
 ```
+
+### Option 4: Bot Functionality Testing (Extended Monitoring)
+
+Test the bot's actual functionality with RPC connection and transaction monitoring:
+
+```bash
+# Set RPC endpoints (use working CORS-enabled endpoints)
+export SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
+export SOLANA_WS_URL="wss://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
+
+# Run extended test (default 3 minutes monitoring)
+node test-bot-functionality.mjs http://localhost:8080/sol_beast/ 180
+
+# Or with custom duration (e.g., 5 minutes)
+node test-bot-functionality.mjs http://localhost:8080/sol_beast/ 300
+```
+
+This test will:
+1. Configure RPC endpoints automatically
+2. Start the bot in DRY RUN mode
+3. Monitor console for new coin detection and transactions
+4. Take periodic screenshots
+5. Generate a detailed activity report
 
 This generates:
 - `deployment-test-full.png` - Full page screenshot

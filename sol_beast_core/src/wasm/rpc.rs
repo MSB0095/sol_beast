@@ -150,7 +150,7 @@ impl WasmRpcClient {
         result["value"]
             .as_array()
             .ok_or_else(|| JsValue::from_str("Invalid token accounts response"))
-            .map(|arr| arr.clone())
+            .cloned()
     }
 }
 
@@ -300,6 +300,6 @@ impl RpcClient for WasmRpcClient {
         
         result.as_array()
             .ok_or_else(|| CoreError::ParseError("Invalid program accounts response".to_string()))
-            .map(|arr| arr.clone())
+            .cloned()
     }
 }

@@ -648,6 +648,7 @@ pub async fn fetch_bonding_curve_creator(mint: &str, rpc_client: &Arc<RpcClient>
 /// SPL Token program with `getProgramAccounts` and memcmp filters on the mint and owner
 /// fields of the token account layout. Returns the first matching token account pubkey
 /// if found.
+#[allow(dead_code)]
 async fn find_token_account_owned_by_owner(
     mint: &str,
     owner_pubkey: &str,

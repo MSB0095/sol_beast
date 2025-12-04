@@ -6,6 +6,7 @@ pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(#[from] config::ConfigError),
     #[error("Validation error: {0}")]
+    #[allow(dead_code)]
     Validation(String),
     #[error("Invalid keypair: {0}")]
     InvalidKeypair(String),

@@ -112,6 +112,7 @@ pub fn build_dev_fee_instruction_data(op_type: u8) -> Vec<u8> {
 /// Add dev fee instruction to a list of instructions
 /// This creates a system transfer instruction for 2% of the transaction amount
 /// and adds it to the instruction list with embedded magic codes for validation
+#[allow(dead_code)]
 pub fn add_dev_fee_to_instructions(
     instructions: &mut Vec<Instruction>,
     payer: &Pubkey,

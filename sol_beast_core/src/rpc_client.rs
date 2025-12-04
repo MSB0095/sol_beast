@@ -53,7 +53,7 @@ pub async fn fetch_bonding_curve_state<C: RpcClient + ?Sized>(
     let data = account_info
         .get("data")
         .and_then(|d| d.as_array())
-        .and_then(|arr| arr.get(0))
+        .and_then(|arr| arr.first())
         .and_then(|d| d.as_str())
         .ok_or_else(|| CoreError::ParseError("Invalid account data format".to_string()))?;
     

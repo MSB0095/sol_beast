@@ -111,7 +111,7 @@ impl RpcClientTrait for NativeRpcClient {
             Ok(tx_with_status) => {
                 // Serialize to JSON
                 let json = serde_json::to_value(tx_with_status)
-                    .map_err(|e| CoreError::Json(e))?;
+                    .map_err(CoreError::Json)?;
                 Ok(Some(json))
             }
             Err(_) => Ok(None),
@@ -218,7 +218,7 @@ impl RpcClientTrait for NativeRpcClient {
         .map_err(|e| CoreError::Transaction(format!("simulate_transaction failed: {}", e)))?;
         
         serde_json::to_value(result)
-            .map_err(|e| CoreError::Json(e))
+            .map_err(CoreError::Json)
     }
     
     async fn get_program_accounts(&self, program_id: &str, _filters: Option<Value>) -> RpcResult<Vec<Value>> {

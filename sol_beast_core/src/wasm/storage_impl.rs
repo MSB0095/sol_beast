@@ -48,7 +48,7 @@ impl StorageBackend for LocalStorageBackend {
         
         // Serialize to JSON
         let json = serde_json::to_string(data)
-            .map_err(|e| CoreError::Json(e))?;
+            .map_err(CoreError::Json)?;
         
         // Save to localStorage
         storage.set_item(&full_key, &json)
@@ -79,7 +79,7 @@ impl StorageBackend for LocalStorageBackend {
         
         // Deserialize
         let data = serde_json::from_str(&json)
-            .map_err(|e| CoreError::Json(e))?;
+            .map_err(CoreError::Json)?;
         
         debug!("Data loaded successfully from localStorage: {}", full_key);
         Ok(Some(data))

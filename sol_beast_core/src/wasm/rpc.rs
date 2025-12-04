@@ -1,14 +1,16 @@
-// WASM RPC Client using browser fetch API
+// WASM RPC Client using browser fetch API with WebSocket fallback for CORS
 use crate::rpc_client::{RpcClient, RpcResult};
 use crate::error::CoreError;
 use async_trait::async_trait;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{Request, RequestInit, RequestMode, Response};
+use web_sys::{Request, RequestInit, RequestMode, Response, WebSocket, MessageEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use log::debug;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize)]
 struct RpcRequest {
@@ -32,15 +34,31 @@ struct RpcError {
     message: String,
 }
 
+/// Pending RPC request awaiting response
+struct PendingRequest {
+    sender: Arc<Mutex<Option<Result<Value, String>>>>,
+}
+
 pub struct WasmRpcClient {
-    endpoint: String,
+    http_endpoint: String,
+    ws_endpoint: Option<String>,
+    use_websocket: std::cell::RefCell<bool>,
+    websocket: Arc<Mutex<Option<WebSocket>>>,
+    pending_requests: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     request_id: std::cell::RefCell<u64>,
 }
 
 impl WasmRpcClient {
     pub fn new(endpoint: String) -> Self {
+        // Convert HTTP endpoint to WebSocket endpoint
+        let ws_endpoint = Self::http_to_ws_endpoint(&endpoint);
+        
         Self {
-            endpoint,
+            http_endpoint: endpoint,
+            ws_endpoint,
+            use_websocket: std::cell::RefCell::new(false),
+            websocket: Arc::new(Mutex::new(None)),
+            pending_requests: Arc::new(Mutex::new(HashMap::new())),
             request_id: std::cell::RefCell::new(1),
         }
     }
@@ -51,7 +69,140 @@ impl WasmRpcClient {
         *id
     }
 
+    /// Convert HTTP(S) RPC endpoint to WebSocket (WS/WSS) endpoint
+    /// This allows using the same endpoint for both HTTP and WebSocket
+    fn http_to_ws_endpoint(http_url: &str) -> Option<String> {
+        if http_url.starts_with("https://") {
+            Some(http_url.replace("https://", "wss://"))
+        } else if http_url.starts_with("http://") {
+            Some(http_url.replace("http://", "ws://"))
+        } else {
+            None
+        }
+    }
+
+    /// Check if an error is a CORS-related error
+    fn is_cors_error(error: &JsValue) -> bool {
+        if let Some(error_str) = error.as_string() {
+            let lower = error_str.to_lowercase();
+            return lower.contains("cors") 
+                || lower.contains("network error")
+                || lower.contains("failed to fetch")
+                || lower.contains("networkerror");
+        }
+        false
+    }
+
+    /// Initialize WebSocket connection for RPC calls
+    /// This is called automatically when CORS errors are detected
+    async fn init_websocket(&self) -> Result<(), JsValue> {
+        let ws_url = self.ws_endpoint.as_ref()
+            .ok_or_else(|| JsValue::from_str("No WebSocket endpoint available"))?;
+
+        debug!("Initializing WebSocket connection to: {}", ws_url);
+        web_sys::console::log_1(&JsValue::from_str(&format!("🔌 Connecting to RPC via WebSocket: {}", ws_url)));
+
+        let ws = WebSocket::new(ws_url)?;
+        ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
+
+        let pending_requests = Arc::clone(&self.pending_requests);
+
+        // Message handler - process RPC responses
+        let on_message = Closure::wrap(Box::new(move |e: MessageEvent| {
+            if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
+                let message: String = txt.into();
+                
+                // Parse the response
+                if let Ok(parsed) = serde_json::from_str::<Value>(&message) {
+                    if let Some(id) = parsed.get("id").and_then(|v| v.as_u64()) {
+                        // This is an RPC response, match it with pending request
+                        if let Ok(mut pending) = pending_requests.lock() {
+                            if let Some(req) = pending.remove(&id) {
+                                if let Ok(mut sender) = req.sender.lock() {
+                                    *sender = Some(Ok(parsed));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        let pending_requests_err = Arc::clone(&self.pending_requests);
+        let on_error = Closure::wrap(Box::new(move |e: web_sys::ErrorEvent| {
+            web_sys::console::error_1(&JsValue::from_str(&format!("WebSocket error: {:?}", e)));
+            // Fail all pending requests
+            if let Ok(mut pending) = pending_requests_err.lock() {
+                for (_, req) in pending.drain() {
+                    if let Ok(mut sender) = req.sender.lock() {
+                        *sender = Some(Err("WebSocket connection error".to_string()));
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
+
+        ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+        // Store the closures to keep them alive
+        on_message.forget();
+        on_error.forget();
+
+        // Wait for connection to open
+        let ws_clone = ws.clone();
+        let open_promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            let onopen = Closure::once(move || {
+                resolve.call0(&JsValue::NULL).unwrap();
+            });
+            ws_clone.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+            onopen.forget();
+        });
+
+        JsFuture::from(open_promise).await?;
+
+        // Store the WebSocket
+        if let Ok(mut ws_lock) = self.websocket.lock() {
+            *ws_lock = Some(ws);
+        }
+
+        web_sys::console::log_1(&JsValue::from_str("✅ WebSocket RPC connection established"));
+        Ok(())
+    }
+
     pub async fn call<T>(&self, method: &str, params: serde_json::Value) -> Result<T, JsValue>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        // Try HTTP first if we haven't switched to WebSocket
+        if !*self.use_websocket.borrow() {
+            let result = self.try_http_call(method, params.clone()).await;
+            
+            // If CORS error detected, switch to WebSocket for all future requests
+            if let Err(ref err) = result {
+                if Self::is_cors_error(err) {
+                    debug!("CORS error detected, switching to WebSocket RPC...");
+                    web_sys::console::log_1(&JsValue::from_str("⚠️ CORS error detected. Switching to WebSocket RPC (no CORS restrictions)..."));
+                    
+                    // Enable WebSocket mode
+                    *self.use_websocket.borrow_mut() = true;
+                    
+                    // Initialize WebSocket connection
+                    self.init_websocket().await?;
+                    
+                    // Retry via WebSocket
+                    return self.try_websocket_call(method, params).await;
+                }
+            }
+            
+            return result;
+        }
+        
+        // Use WebSocket for the call
+        self.try_websocket_call(method, params).await
+    }
+
+    /// Try making an RPC call via HTTP
+    async fn try_http_call<T>(&self, method: &str, params: Value) -> Result<T, JsValue>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -70,7 +221,7 @@ impl WasmRpcClient {
         opts.set_mode(RequestMode::Cors);
         opts.set_body(&JsValue::from_str(&body));
 
-        let req = Request::new_with_str_and_init(&self.endpoint, &opts)?;
+        let req = Request::new_with_str_and_init(&self.http_endpoint, &opts)?;
         req.headers().set("Content-Type", "application/json")?;
 
         let window = web_sys::window().ok_or_else(|| JsValue::from_str("No window"))?;
@@ -91,6 +242,105 @@ impl WasmRpcClient {
         response
             .result
             .ok_or_else(|| JsValue::from_str("No result in response"))
+    }
+
+    /// Try making an RPC call via WebSocket
+    async fn try_websocket_call<T>(&self, method: &str, params: Value) -> Result<T, JsValue>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        // Ensure WebSocket is connected
+        let ws = {
+            let ws_lock = self.websocket.lock()
+                .map_err(|e| JsValue::from_str(&format!("Failed to lock websocket: {:?}", e)))?;
+            ws_lock.as_ref()
+                .ok_or_else(|| JsValue::from_str("WebSocket not initialized"))?
+                .clone()
+        };
+
+        let id = self.next_id();
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: method.to_string(),
+            params,
+        };
+
+        // Create pending request
+        let pending = PendingRequest {
+            sender: Arc::new(Mutex::new(None)),
+        };
+        let sender_clone = Arc::clone(&pending.sender);
+
+        // Register pending request
+        {
+            let mut pending_reqs = self.pending_requests.lock()
+                .map_err(|e| JsValue::from_str(&format!("Failed to lock pending requests: {:?}", e)))?;
+            pending_reqs.insert(id, pending);
+        }
+
+        // Send the request
+        let body = serde_json::to_string(&request)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
+        ws.send_with_str(&body)?;
+
+        // Wait for response (with timeout)
+        let timeout_ms = 30000; // 30 seconds
+        let start = js_sys::Date::now();
+
+        loop {
+            // Check if response arrived
+            {
+                let sender_lock = sender_clone.lock()
+                    .map_err(|e| JsValue::from_str(&format!("Failed to lock sender: {:?}", e)))?;
+                
+                if let Some(result) = sender_lock.as_ref() {
+                    match result {
+                        Ok(response_value) => {
+                            // Parse the response
+                            let response: RpcResponse<T> = serde_json::from_value(response_value.clone())
+                                .map_err(|e| JsValue::from_str(&format!("Failed to parse response: {}", e)))?;
+
+                            if let Some(error) = response.error {
+                                return Err(JsValue::from_str(&format!(
+                                    "RPC error {}: {}",
+                                    error.code, error.message
+                                )));
+                            }
+
+                            return response.result
+                                .ok_or_else(|| JsValue::from_str("No result in response"));
+                        }
+                        Err(e) => {
+                            return Err(JsValue::from_str(e));
+                        }
+                    }
+                }
+            }
+
+            // Check timeout
+            if js_sys::Date::now() - start > timeout_ms as f64 {
+                // Remove pending request
+                let mut pending_reqs = self.pending_requests.lock()
+                    .map_err(|e| JsValue::from_str(&format!("Failed to lock pending requests: {:?}", e)))?;
+                pending_reqs.remove(&id);
+                return Err(JsValue::from_str("RPC request timeout"));
+            }
+
+            // Small delay before next check
+            let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                let window = web_sys::window().unwrap();
+                let closure = Closure::once(move || {
+                    resolve.call0(&JsValue::NULL).unwrap();
+                });
+                window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                    closure.as_ref().unchecked_ref(),
+                    10 // 10ms delay
+                ).unwrap();
+                closure.forget();
+            });
+            JsFuture::from(promise).await?;
+        }
     }
 
     // Common Solana RPC methods

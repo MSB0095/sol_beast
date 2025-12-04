@@ -159,7 +159,7 @@ export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
       let connectionClosed = false
       
       await new Promise<void>((resolve, reject) => {
-        timeoutId = setTimeout(() => {
+        timeoutId = window.setTimeout(() => {
           if (!connectionClosed) {
             connectionClosed = true
             ws.close()

@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Save, AlertCircle, CheckCircle, Settings } from 'lucide-react'
 import RPCConfigModal from './RPCConfigModal'
 import { botService } from '../services/botService'
+import { isWasmMode } from '../utils/wasmDetection'
 
 export default function ConfigurationPanel() {
   const { settings, saving, error, saveSettings, updateSetting } = useSettingsStore()
@@ -45,11 +46,7 @@ export default function ConfigurationPanel() {
     }
   }
 
-  const isWasmMode = botService.isWasmMode() || 
-                     (typeof window !== 'undefined' && (
-                       window.location.hostname.endsWith('.github.io') ||
-                       (import.meta as any).env?.VITE_USE_WASM === 'true'
-                     ))
+  const wasmMode = isWasmMode(botService)
 
   const sections = [
     {
@@ -173,7 +170,7 @@ export default function ConfigurationPanel() {
               <span className="w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse" style={{ boxShadow: '0 0 10px var(--theme-accent)' }}></span>
               {section.title}
             </h3>
-            {section.title === 'RPC & WebSocket Configuration' && isWasmMode && (
+            {section.title === 'RPC & WebSocket Configuration' && wasmMode && (
               <button
                 onClick={() => setShowRPCModal(true)}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg btn-secondary text-xs font-mono-tech uppercase tracking-wider"

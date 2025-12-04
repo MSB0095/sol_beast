@@ -127,42 +127,68 @@ export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
 
     try {
       // Test HTTPS connection
-      const httpsTest = await fetch(httpsUrls[0], {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'getHealth',
-        }),
-      })
+      try {
+        const httpsTest = await fetch(httpsUrls[0], {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'getHealth',
+          }),
+        })
 
-      if (httpsTest.ok) {
-        setTestResults(prev => ({ ...prev, https: 'Connected ✓' }))
-      } else {
-        setTestResults(prev => ({ ...prev, https: `Failed: ${httpsTest.statusText}` }))
+        if (httpsTest.ok) {
+          setTestResults(prev => ({ ...prev, https: 'Connected ✓' }))
+        } else {
+          setTestResults(prev => ({ ...prev, https: `Failed: ${httpsTest.statusText}` }))
+        }
+      } catch (httpsErr) {
+        const errorMsg = httpsErr instanceof Error ? httpsErr.message : 'Unknown error'
+        // Check for CORS errors
+        if (errorMsg.includes('CORS') || errorMsg.includes('cors') || errorMsg.includes('Failed to fetch')) {
+          setTestResults(prev => ({ ...prev, https: 'CORS Error - Endpoint may not support browser requests' }))
+        } else {
+          setTestResults(prev => ({ ...prev, https: `Failed: ${errorMsg}` }))
+        }
       }
 
       // Test WSS connection
       const ws = new WebSocket(wssUrls[0])
+      let timeoutId: number | null = null
+      let connectionClosed = false
       
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          ws.close()
-          reject(new Error('Connection timeout'))
+        timeoutId = setTimeout(() => {
+          if (!connectionClosed) {
+            connectionClosed = true
+            ws.close()
+            reject(new Error('Connection timeout'))
+          }
         }, 5000)
 
         ws.onopen = () => {
-          clearTimeout(timeout)
-          setTestResults(prev => ({ ...prev, wss: 'Connected ✓' }))
-          ws.close()
-          resolve()
+          if (timeoutId) clearTimeout(timeoutId)
+          if (!connectionClosed) {
+            connectionClosed = true
+            setTestResults(prev => ({ ...prev, wss: 'Connected ✓' }))
+            ws.close()
+            resolve()
+          }
         }
 
         ws.onerror = () => {
-          clearTimeout(timeout)
-          ws.close()
-          reject(new Error('Connection failed'))
+          if (timeoutId) clearTimeout(timeoutId)
+          if (!connectionClosed) {
+            connectionClosed = true
+            ws.close()
+            reject(new Error('WebSocket connection failed'))
+          }
+        }
+
+        ws.onclose = () => {
+          if (timeoutId) clearTimeout(timeoutId)
+          connectionClosed = true
         }
       })
     } catch (err) {

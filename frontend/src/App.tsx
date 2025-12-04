@@ -14,6 +14,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toaster } from './utils/toast'
 import RPCConfigModal, { hasValidRPCConfig, getStoredRPCConfig } from './components/RPCConfigModal'
 import { botService } from './services/botService'
+import { isWasmMode } from './utils/wasmDetection'
 import './App.css'
 
 function App() {
@@ -25,11 +26,9 @@ function App() {
   // Check RPC configuration on mount (only for WASM mode)
   useEffect(() => {
     const checkRPCConfig = async () => {
-      const isWasmMode = botService.isWasmMode() || 
-                         import.meta.env.VITE_USE_WASM === 'true' || 
-                         window.location.hostname.endsWith('.github.io')
+      const wasmMode = isWasmMode(botService)
       
-      if (isWasmMode) {
+      if (wasmMode) {
         const hasConfig = hasValidRPCConfig()
         setShowRPCModal(!hasConfig)
         
@@ -40,9 +39,13 @@ function App() {
             try {
               await botService.init() // Initialize WASM first
               const settings = await botService.getSettings()
-              settings.solana_rpc_urls = config.httpsUrls
-              settings.solana_ws_urls = config.wssUrls
-              await botService.updateSettings(settings)
+              // Create a new settings object to avoid mutation
+              const updatedSettings = {
+                ...settings,
+                solana_rpc_urls: config.httpsUrls,
+                solana_ws_urls: config.wssUrls,
+              }
+              await botService.updateSettings(updatedSettings)
             } catch (err) {
               console.warn('Could not apply stored RPC config:', err)
             }

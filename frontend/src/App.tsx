@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useBotStore } from './store/botStore'
 import { useSettingsStore } from './store/settingsStore'
 import Header from './components/Header'
@@ -12,21 +12,88 @@ import TradingHistory from './components/TradingHistory'
 import ProfilePanel from './components/ProfilePanel'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { Toaster } from './utils/toast'
+import RPCConfigModal, { hasValidRPCConfig, getStoredRPCConfig } from './components/RPCConfigModal'
+import { botService } from './services/botService'
+import { isWasmMode } from './utils/wasmDetection'
 import './App.css'
 
 function App() {
   const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
+  const [showRPCModal, setShowRPCModal] = useState(false)
+  const [rpcConfigChecked, setRpcConfigChecked] = useState(false)
+
+  // Check RPC configuration on mount (only for WASM mode)
+  useEffect(() => {
+    const checkRPCConfig = async () => {
+      const wasmMode = isWasmMode(botService)
+      
+      if (wasmMode) {
+        const hasConfig = hasValidRPCConfig()
+        setShowRPCModal(!hasConfig)
+        
+        // If config exists, apply it to bot settings
+        if (hasConfig) {
+          const config = getStoredRPCConfig()
+          if (config) {
+            try {
+              await botService.init() // Initialize WASM first
+              const settings = await botService.getSettings()
+              // Create a new settings object to avoid mutation
+              const updatedSettings = {
+                ...settings,
+                solana_rpc_urls: config.httpsUrls,
+                solana_ws_urls: config.wssUrls,
+              }
+              await botService.updateSettings(updatedSettings)
+            } catch (err) {
+              console.warn('Could not apply stored RPC config:', err)
+            }
+          }
+        }
+      }
+      setRpcConfigChecked(true)
+    }
+    
+    checkRPCConfig()
+  }, [])
 
   useEffect(() => {
-    initializeConnection()
-    fetchSettings()
+    // Only initialize after RPC config is checked and valid (or not needed)
+    if (rpcConfigChecked && !showRPCModal) {
+      initializeConnection()
+      fetchSettings()
+    }
 
     // Cleanup on unmount
     return () => {
       cleanup()
     }
-  }, [initializeConnection, cleanup, fetchSettings])
+  }, [initializeConnection, cleanup, fetchSettings, rpcConfigChecked, showRPCModal])
+
+  const handleRPCConfigured = () => {
+    setShowRPCModal(false)
+    // Re-check after configuration
+    setRpcConfigChecked(true)
+  }
+
+  // Show RPC modal if needed
+  if (showRPCModal) {
+    return <RPCConfigModal onConfigured={handleRPCConfigured} />
+  }
+
+  // Show loading state while checking config
+  if (!rpcConfigChecked) {
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center">
+        <div className="text-center">
+          <div className="font-mono-tech text-[var(--theme-accent)] text-xl mb-4">
+            Initializing...
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-black transition-colors duration-500 relative overflow-hidden">

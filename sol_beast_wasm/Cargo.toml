@@ -13,6 +13,7 @@ sol_beast_core = { path = "../sol_beast_core", default-features = false, feature
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+chrono = { workspace = true }
 solana-pubkey = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
@@ -36,10 +37,10 @@ web-sys = { workspace = true, features = [
 getrandom = { workspace = true }
 console_error_panic_hook = { workspace = true }
 wasm-logger = { workspace = true }
+base64 = { workspace = true }
 
 # Additional WASM-specific dependencies
 serde-wasm-bindgen = "0.6"
-base64 = "0.22"
 
 # Explicitly add getrandom 0.3 with wasm_js feature for ahash and other deps
 [dependencies.getrandom_v03]

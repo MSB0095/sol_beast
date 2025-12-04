@@ -1,7 +1,6 @@
 [book]
 authors = ["Sol Beast Team"]
 language = "en"
-multilingual = false
 src = "src"
 title = "Sol Beast Documentation"
 description = "Comprehensive documentation for Sol Beast - Solana Memecoin Sniper Bot"
@@ -14,9 +13,6 @@ create-missing = false
 default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/MSB0095/sol_beast"
-git-repository-icon = "fa-github"
-additional-css = ["theme/custom.css"]
-additional-js = ["theme/custom.js"]
 
 [output.html.fold]
 enable = true

@@ -8,3 +8,13 @@ frontend/src/wasm/
 
 # mdbook build directory (book is built during deployment)
 sol_beast_docs/book/
+
+# Frontend build artifacts
+frontend/dist/
+frontend/dist_gh/
+
+# Test artifacts
+deployment-test-*.png
+deployment-test-*.json
+bot-test-*.png
+bot-functionality-report.json

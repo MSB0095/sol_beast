@@ -27,9 +27,20 @@ pub fn load_settings<T: for<'de> Deserialize<'de>>() -> Result<Option<T>, JsValu
     
     match storage.get_item(SETTINGS_KEY)? {
         Some(json) => {
-            let settings = serde_json::from_str(&json)
-                .map_err(|e| JsValue::from_str(&format!("Deserialization error: {}", e)))?;
-            Ok(Some(settings))
+            // Try to deserialize, but if it fails (corrupted/outdated data), clear and return None
+            match serde_json::from_str(&json) {
+                Ok(settings) => Ok(Some(settings)),
+                Err(e) => {
+                    // Log the error via console
+                    web_sys::console::warn_1(&format!("Failed to deserialize settings from localStorage (possibly corrupted or outdated): {}. Clearing corrupted data.", e).into());
+                    
+                    // Clear the corrupted data
+                    let _ = storage.remove_item(SETTINGS_KEY);
+                    
+                    // Return None so defaults will be used
+                    Ok(None)
+                }
+            }
         }
         None => Ok(None),
     }

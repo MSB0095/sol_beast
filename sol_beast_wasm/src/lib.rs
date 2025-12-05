@@ -54,6 +54,7 @@ pub struct HoldingWithMint {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct BotSettings {
     pub solana_ws_urls: Vec<String>,
     pub solana_rpc_urls: Vec<String>,

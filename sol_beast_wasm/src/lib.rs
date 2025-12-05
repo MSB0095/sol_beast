@@ -78,6 +78,37 @@ pub struct BotSettings {
 }
 
 impl BotSettings {
+    /// Validate that settings contain valid data (no corrupted strings or vectors)
+    /// Returns true if settings are valid, false if corrupted
+    fn is_valid(&self) -> bool {
+        // Check that URL vectors are not empty and contain valid data
+        if self.solana_ws_urls.is_empty() || self.solana_rpc_urls.is_empty() {
+            return false;
+        }
+        
+        // Check that strings are not empty and don't contain null bytes
+        if self.pump_fun_program.is_empty() || self.pump_fun_program.contains('\0') {
+            return false;
+        }
+        if self.metadata_program.is_empty() || self.metadata_program.contains('\0') {
+            return false;
+        }
+        
+        // Validate that URL strings don't contain null bytes (sign of corruption)
+        for url in &self.solana_ws_urls {
+            if url.is_empty() || url.contains('\0') {
+                return false;
+            }
+        }
+        for url in &self.solana_rpc_urls {
+            if url.is_empty() || url.contains('\0') {
+                return false;
+            }
+        }
+        
+        true
+    }
+    
     /// Convert BotSettings to core Settings
     pub fn to_core_settings(&self) -> sol_beast_core::settings::Settings {
         sol_beast_core::settings::Settings {
@@ -165,13 +196,24 @@ impl SolBeastBot {
     pub fn new() -> Self {
         // Settings loading hierarchy for WASM deployment:
         // 1. Try localStorage (user's saved settings from previous session)
-        // 2. Fall back to built-in defaults if localStorage is empty or corrupted
+        // 2. Validate loaded settings to ensure they're not corrupted
+        // 3. Fall back to built-in defaults if localStorage is empty or corrupted
         // Note: The frontend will also try loading from static bot-settings.json
         // if it detects settings are invalid after bot initialization.
         let settings = match sol_beast_core::wasm::load_settings::<BotSettings>() {
             Ok(Some(saved_settings)) => {
-                info!("Loaded settings from localStorage");
-                saved_settings
+                // Validate the loaded settings to prevent memory access errors
+                if saved_settings.is_valid() {
+                    info!("Loaded valid settings from localStorage");
+                    saved_settings
+                } else {
+                    error!("Loaded settings from localStorage are corrupted, clearing and using defaults");
+                    // Clear corrupted data from localStorage
+                    if let Err(e) = sol_beast_core::wasm::storage::clear_all() {
+                        error!("Failed to clear corrupted localStorage: {:?}", e);
+                    }
+                    BotSettings::default()
+                }
             },
             Ok(None) => {
                 info!("No saved settings found, using defaults");
@@ -179,6 +221,10 @@ impl SolBeastBot {
             },
             Err(e) => {
                 error!("Failed to load settings from localStorage: {:?}, using defaults", e);
+                // Try to clear potentially corrupted data
+                if let Err(clear_err) = sol_beast_core::wasm::storage::clear_all() {
+                    error!("Failed to clear localStorage after error: {:?}", clear_err);
+                }
                 BotSettings::default()
             }
         };
@@ -387,6 +433,11 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
+        // Validate parsed settings before updating
+        if !settings.is_valid() {
+            return Err(JsValue::from_str("Invalid settings: missing or corrupted required fields"));
+        }
+        
         // Acquire lock once and hold it to prevent race conditions
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
@@ -468,6 +519,12 @@ impl SolBeastBot {
                 poisoned.into_inner()
             }
         };
+        
+        // Validate settings before serialization to prevent memory access errors
+        if !state.settings.is_valid() {
+            error!("Settings validation failed - data appears corrupted");
+            return Err(JsValue::from_str("Settings are corrupted. Please clear browser storage and reload."));
+        }
         
         match serde_json::to_string(&state.settings) {
             Ok(json) => Ok(json),

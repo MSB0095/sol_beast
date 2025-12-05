@@ -40,7 +40,8 @@ function isCriticalWasmError(err: unknown, errorMsg: string): boolean {
   // Check for WASM panic indicators in error message
   return (
     errorMsg.includes('unreachable') || 
-    errorMsg.includes('undefined')
+    errorMsg.includes('undefined') ||
+    errorMsg.includes('memory access out of bounds')
   )
 }
 
@@ -284,7 +285,7 @@ export const botService = {
   },
 
   // Set mode
-  async setMode(mode: 'dry-run' | 'real') {
+  async setMode(mode: 'dry-run' | 'real'): Promise<{ success: boolean; mode: string }> {
     if (this.isWasmMode()) {
       if (!wasmBot) {
         throw new Error('WASM bot is not initialized')
@@ -293,8 +294,24 @@ export const botService = {
         wasmBot.set_mode(mode)
         return { success: true, mode }
       } catch (error) {
-        console.error('Set mode error:', error)
-        throw new Error(error instanceof Error ? error.message : String(error))
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        console.error('Set mode error:', errorMsg)
+        
+        // Attempt recovery for critical errors
+        if (isCriticalWasmError(error, errorMsg)) {
+          console.log('Critical WASM error detected in setMode, attempting to reinitialize...')
+          wasmBot = null
+          wasmInitialized = false
+          const reinitSuccess = await initWasm()
+          if (!reinitSuccess) {
+            throw new Error(`Failed to reinitialize WASM bot after error: ${errorMsg}`)
+          }
+          // Retry the operation after successful reinitialization
+          console.log('✓ Successfully reinitialized, retrying setMode...')
+          return this.setMode(mode)
+        }
+        
+        throw new Error(errorMsg)
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/mode`, {
@@ -338,7 +355,7 @@ export const botService = {
   },
 
   // Get settings
-  async getSettings() {
+  async getSettings(): Promise<any> {
     if (this.isWasmMode()) {
       if (!wasmBot) {
         throw new Error('WASM bot is not initialized')
@@ -347,7 +364,24 @@ export const botService = {
         const json = wasmBot.get_settings()
         return JSON.parse(json)
       } catch (error) {
-        throw new Error(error instanceof Error ? error.message : String(error))
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        console.error('Get settings error:', errorMsg)
+        
+        // Attempt recovery for critical errors
+        if (isCriticalWasmError(error, errorMsg)) {
+          console.log('Critical WASM error detected in getSettings, attempting to reinitialize...')
+          wasmBot = null
+          wasmInitialized = false
+          const reinitSuccess = await initWasm()
+          if (!reinitSuccess) {
+            throw new Error(`Failed to reinitialize WASM bot after error: ${errorMsg}`)
+          }
+          // Retry the operation after successful reinitialization
+          console.log('✓ Successfully reinitialized, retrying getSettings...')
+          return this.getSettings()
+        }
+        
+        throw new Error(errorMsg)
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/settings`)

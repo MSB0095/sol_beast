@@ -7,6 +7,26 @@ use log::{info, error};
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 
+/// Helper function to increment a counter safely, handling poisoned mutex
+fn increment_counter(counter: &Arc<Mutex<u64>>) -> u64 {
+    match counter.lock() {
+        Ok(mut count) => {
+            *count += 1;
+            *count
+        },
+        Err(poisoned) => {
+            // Recover from poisoned mutex
+            let mut count = poisoned.into_inner();
+            *count += 1;
+            *count
+        }
+    }
+}
+
+// Logging frequency constants
+const STATUS_LOG_FREQUENCY: u64 = 50;  // Log status every N messages
+const FILTERED_LOG_FREQUENCY: u64 = 100; // Log filtered transactions every N occurrences
+
 /// Monitor state that tracks subscriptions and detected coins
 pub struct Monitor {
     ws: Option<WebSocket>,
@@ -17,8 +37,10 @@ pub struct Monitor {
     on_open: Option<wasm_bindgen::closure::Closure<dyn FnMut(JsValue)>>,
     message_count: Arc<Mutex<u64>>,
     pump_fun_message_count: Arc<Mutex<u64>>,
-    filtered_count: Arc<Mutex<u64>>, // Track filtered non-CREATE transactions
-    create_count: Arc<Mutex<u64>>,   // Track actual CREATE transactions
+    /// Tracks Buy/Sell transactions filtered out to avoid unnecessary RPC calls and parsing
+    filtered_count: Arc<Mutex<u64>>,
+    /// Tracks actual CREATE instruction transactions that are processed for new token detection  
+    create_count: Arc<Mutex<u64>>,
 }
 
 impl Monitor {
@@ -173,8 +195,8 @@ impl Monitor {
                 }
             };
             
-            // Log every 50 messages to show activity and filtering efficiency
-            if current_count % 50 == 0 {
+            // Log every STATUS_LOG_FREQUENCY messages to show activity and filtering efficiency
+            if current_count % STATUS_LOG_FREQUENCY == 0 {
                 info!("Received {} total WebSocket messages", current_count);
                 if let (Ok(pump_count_guard), Ok(filtered_guard), Ok(create_guard)) = (
                     pump_msg_count_for_handler.lock(),
@@ -302,18 +324,10 @@ impl Monitor {
                                         // Skip non-CREATE transactions entirely
                                         if !is_create {
                                             // Increment filtered count
-                                            let filtered_total = {
-                                                match filtered_count_for_handler.lock() {
-                                                    Ok(mut count) => {
-                                                        *count += 1;
-                                                        *count
-                                                    },
-                                                    Err(_) => 0
-                                                }
-                                            };
+                                            let filtered_total = increment_counter(&filtered_count_for_handler);
                                             
                                             // Only log occasionally to avoid spam
-                                            if pump_count <= 5 || pump_count % 100 == 0 {
+                                            if pump_count <= 5 || pump_count % FILTERED_LOG_FREQUENCY == 0 {
                                                 info!("Transaction {} is not a CREATE instruction, filtered (total: {})", sig, filtered_total);
                                             }
                                             return;
@@ -321,15 +335,7 @@ impl Monitor {
 
                                         // This is a CREATE transaction - proceed with processing
                                         // Increment create count
-                                        let create_total = {
-                                            match create_count_for_handler.lock() {
-                                                Ok(mut count) => {
-                                                    *count += 1;
-                                                    *count
-                                                },
-                                                Err(_) => 0
-                                            }
-                                        };
+                                        let create_total = increment_counter(&create_count_for_handler);
                                         
                                         info!("✅ CREATE instruction detected #{}: {}", create_total, sig);
                                         

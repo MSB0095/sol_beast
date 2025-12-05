@@ -12,6 +12,8 @@ sol_beast_docs/book/
 # Frontend build artifacts
 frontend/dist/
 frontend/dist_gh/
+frontend/tsconfig.tsbuildinfo
+frontend/node_modules/
 
 # Test artifacts
 deployment-test-*.png

@@ -1371,3 +1371,98 @@ impl Default for BotSettings {
 fn default_dev_tip_percent() -> f64 { 2.0 }
 fn default_dev_tip_fixed_sol() -> f64 { 0.0 }
 fn default_enable_safer_sniping() -> bool { false }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_settings() {
+        let settings = BotSettings::default();
+        assert!(settings.is_valid(), "Default settings should be valid");
+    }
+
+    #[test]
+    fn test_empty_ws_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec![];
+        assert!(!settings.is_valid(), "Settings with empty WS URLs should be invalid");
+    }
+
+    #[test]
+    fn test_empty_rpc_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_rpc_urls = vec![];
+        assert!(!settings.is_valid(), "Settings with empty RPC URLs should be invalid");
+    }
+
+    #[test]
+    fn test_empty_pump_fun_program() {
+        let mut settings = BotSettings::default();
+        settings.pump_fun_program = String::new();
+        assert!(!settings.is_valid(), "Settings with empty pump_fun_program should be invalid");
+    }
+
+    #[test]
+    fn test_empty_metadata_program() {
+        let mut settings = BotSettings::default();
+        settings.metadata_program = String::new();
+        assert!(!settings.is_valid(), "Settings with empty metadata_program should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_pump_fun_program() {
+        let mut settings = BotSettings::default();
+        settings.pump_fun_program = "test\0corrupted".to_string();
+        assert!(!settings.is_valid(), "Settings with null byte in pump_fun_program should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_metadata_program() {
+        let mut settings = BotSettings::default();
+        settings.metadata_program = "test\0corrupted".to_string();
+        assert!(!settings.is_valid(), "Settings with null byte in metadata_program should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_ws_url() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec!["wss://test\0corrupted".to_string()];
+        assert!(!settings.is_valid(), "Settings with null byte in WS URL should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_rpc_url() {
+        let mut settings = BotSettings::default();
+        settings.solana_rpc_urls = vec!["https://test\0corrupted".to_string()];
+        assert!(!settings.is_valid(), "Settings with null byte in RPC URL should be invalid");
+    }
+
+    #[test]
+    fn test_empty_string_in_ws_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec!["".to_string()];
+        assert!(!settings.is_valid(), "Settings with empty string in WS URLs should be invalid");
+    }
+
+    #[test]
+    fn test_empty_string_in_rpc_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_rpc_urls = vec!["".to_string()];
+        assert!(!settings.is_valid(), "Settings with empty string in RPC URLs should be invalid");
+    }
+
+    #[test]
+    fn test_valid_settings_with_multiple_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec![
+            "wss://api.mainnet-beta.solana.com/".to_string(),
+            "wss://api.secondary.solana.com/".to_string(),
+        ];
+        settings.solana_rpc_urls = vec![
+            "https://api.mainnet-beta.solana.com/".to_string(),
+            "https://api.secondary.solana.com/".to_string(),
+        ];
+        assert!(settings.is_valid(), "Settings with multiple valid URLs should be valid");
+    }
+}

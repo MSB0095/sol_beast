@@ -40,7 +40,8 @@ function isCriticalWasmError(err: unknown, errorMsg: string): boolean {
   // Check for WASM panic indicators in error message
   return (
     errorMsg.includes('unreachable') || 
-    errorMsg.includes('undefined')
+    errorMsg.includes('undefined') ||
+    errorMsg.includes('memory access out of bounds')
   )
 }
 

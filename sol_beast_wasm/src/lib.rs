@@ -41,6 +41,21 @@ struct BotState {
     detected_tokens: Vec<DetectedToken>, // Phase 2: Track detected tokens
 }
 
+impl BotState {
+    /// Validate that mode is a valid string
+    fn is_mode_valid(&self) -> bool {
+        self.mode == "dry-run" || self.mode == "real"
+    }
+    
+    /// Repair mode if it's corrupted
+    fn repair_mode_if_needed(&mut self) {
+        if !self.is_mode_valid() {
+            error!("Invalid mode '{}' detected, resetting to 'dry-run'", self.mode);
+            self.mode = "dry-run".to_string();
+        }
+    }
+}
+
 /// Holdings with mint address (for WASM serialization to frontend)
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HoldingWithMint {
@@ -257,7 +272,7 @@ impl SolBeastBot {
     /// Start the bot
     #[wasm_bindgen]
     pub fn start(&self) -> Result<(), JsValue> {
-        let state = match self.state.lock() {
+        let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 info!("Mutex was poisoned in start, recovering...");
@@ -267,6 +282,9 @@ impl SolBeastBot {
         if state.running {
             return Err(JsValue::from_str("Bot is already running"));
         }
+        
+        // Repair mode if needed before starting
+        state.repair_mode_if_needed();
         
         let mode = state.mode.clone();
         let ws_url = state.settings.solana_ws_urls.first()
@@ -388,6 +406,16 @@ impl SolBeastBot {
     /// Set bot mode (dry-run or real)
     #[wasm_bindgen]
     pub fn set_mode(&self, mode: &str) -> Result<(), JsValue> {
+        // Validate input before acquiring lock to prevent corruption
+        if mode != "dry-run" && mode != "real" {
+            return Err(JsValue::from_str("Mode must be 'dry-run' or 'real'"));
+        }
+        
+        // Ensure mode string is valid UTF-8 and doesn't contain null bytes
+        if mode.contains('\0') || mode.is_empty() {
+            return Err(JsValue::from_str("Invalid mode string"));
+        }
+        
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -395,12 +423,12 @@ impl SolBeastBot {
                 poisoned.into_inner()
             }
         };
+        
         if state.running {
             return Err(JsValue::from_str("Cannot change mode while bot is running"));
         }
-        if mode != "dry-run" && mode != "real" {
-            return Err(JsValue::from_str("Mode must be 'dry-run' or 'real'"));
-        }
+        
+        // Create new string to ensure clean memory
         state.mode = mode.to_string();
         Ok(())
     }
@@ -408,13 +436,19 @@ impl SolBeastBot {
     /// Get current mode
     #[wasm_bindgen]
     pub fn get_mode(&self) -> String {
-        match self.state.lock() {
-            Ok(guard) => guard.mode.clone(),
+        let mut state = match self.state.lock() {
+            Ok(guard) => guard,
             Err(poisoned) => {
                 info!("Mutex was poisoned in get_mode, recovering...");
-                poisoned.into_inner().mode.clone()
+                poisoned.into_inner()
             }
-        }
+        };
+        
+        // Repair mode if it's corrupted
+        state.repair_mode_if_needed();
+        
+        // Return the validated mode
+        state.mode.clone()
     }
     
     /// Update settings
@@ -505,13 +539,16 @@ impl SolBeastBot {
     /// Get current settings as JSON
     #[wasm_bindgen]
     pub fn get_settings(&self) -> Result<String, JsValue> {
-        let state = match self.state.lock() {
+        let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 info!("Mutex was poisoned in get_settings, recovering...");
                 poisoned.into_inner()
             }
         };
+        
+        // Repair mode if needed before any operations
+        state.repair_mode_if_needed();
         
         // Validate settings before serialization to prevent memory access errors
         if !state.settings.is_valid() {
@@ -1429,6 +1466,82 @@ mod tests {
         let mut settings = BotSettings::default();
         settings.solana_rpc_urls = vec!["https://test\0corrupted".to_string()];
         assert!(!settings.is_valid(), "Settings with null byte in RPC URL should be invalid");
+    }
+    
+    #[test]
+    fn test_valid_mode_dry_run() {
+        let state = BotState {
+            running: false,
+            mode: "dry-run".to_string(),
+            settings: BotSettings::default(),
+            holdings: Vec::new(),
+            logs: Vec::new(),
+            monitor: None,
+            detected_tokens: Vec::new(),
+        };
+        assert!(state.is_mode_valid(), "Mode 'dry-run' should be valid");
+    }
+    
+    #[test]
+    fn test_valid_mode_real() {
+        let state = BotState {
+            running: false,
+            mode: "real".to_string(),
+            settings: BotSettings::default(),
+            holdings: Vec::new(),
+            logs: Vec::new(),
+            monitor: None,
+            detected_tokens: Vec::new(),
+        };
+        assert!(state.is_mode_valid(), "Mode 'real' should be valid");
+    }
+    
+    #[test]
+    fn test_invalid_mode() {
+        let state = BotState {
+            running: false,
+            mode: "invalid-mode".to_string(),
+            settings: BotSettings::default(),
+            holdings: Vec::new(),
+            logs: Vec::new(),
+            monitor: None,
+            detected_tokens: Vec::new(),
+        };
+        assert!(!state.is_mode_valid(), "Invalid mode should be detected");
+    }
+    
+    #[test]
+    fn test_corrupted_mode_repair() {
+        let mut state = BotState {
+            running: false,
+            mode: "corrupted\0mode".to_string(),
+            settings: BotSettings::default(),
+            holdings: Vec::new(),
+            logs: Vec::new(),
+            monitor: None,
+            detected_tokens: Vec::new(),
+        };
+        assert!(!state.is_mode_valid(), "Corrupted mode should be invalid");
+        state.repair_mode_if_needed();
+        assert_eq!(state.mode, "dry-run", "Corrupted mode should be repaired to 'dry-run'");
+        assert!(state.is_mode_valid(), "Repaired mode should be valid");
+    }
+    
+    #[test]
+    fn test_empty_mode_repair() {
+        let mut state = BotState {
+            running: false,
+            mode: String::new(),
+            settings: BotSettings::default(),
+            holdings: Vec::new(),
+            logs: Vec::new(),
+            monitor: None,
+            detected_tokens: Vec::new(),
+        };
+        assert!(!state.is_mode_valid(), "Empty mode should be invalid");
+        state.repair_mode_if_needed();
+        assert_eq!(state.mode, "dry-run", "Empty mode should be repaired to 'dry-run'");
+        assert!(state.is_mode_valid(), "Repaired mode should be valid");
     }
 
     #[test]

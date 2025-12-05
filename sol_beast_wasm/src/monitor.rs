@@ -17,6 +17,8 @@ pub struct Monitor {
     on_open: Option<wasm_bindgen::closure::Closure<dyn FnMut(JsValue)>>,
     message_count: Arc<Mutex<u64>>,
     pump_fun_message_count: Arc<Mutex<u64>>,
+    filtered_count: Arc<Mutex<u64>>, // Track filtered non-CREATE transactions
+    create_count: Arc<Mutex<u64>>,   // Track actual CREATE transactions
 }
 
 impl Monitor {
@@ -30,6 +32,8 @@ impl Monitor {
             on_open: None,
             message_count: Arc::new(Mutex::new(0)),
             pump_fun_message_count: Arc::new(Mutex::new(0)),
+            filtered_count: Arc::new(Mutex::new(0)),
+            create_count: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -81,6 +85,8 @@ impl Monitor {
         let seen_sigs = self.seen_signatures.clone();
         let msg_count = self.message_count.clone();
         let pump_msg_count = self.pump_fun_message_count.clone();
+        let filtered_count = self.filtered_count.clone();
+        let create_count = self.create_count.clone();
 
         // Setup open handler to subscribe once connected
         let ws_for_open = ws.clone();
@@ -97,6 +103,15 @@ impl Monitor {
             );
             
             // Subscribe to pump.fun program logs
+            // NOTE: Solana's native logsSubscribe API does NOT support filtering by instruction type.
+            // We MUST receive all pump.fun transactions (Create, Buy, Sell) at the WebSocket level.
+            // OPTIMIZATION: We filter for CREATE instructions immediately upon receiving each message
+            // (before any expensive RPC calls or parsing), which is the best we can do with native Solana API.
+            //
+            // For true WebSocket-level filtering, users would need:
+            // - Enhanced RPC providers (Helius Enhanced WebSocket, QuickNode Functions)
+            // - Custom Geyser plugin with instruction filtering
+            // - Dedicated indexer service
             let subscribe_msg = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -140,6 +155,8 @@ impl Monitor {
         let log_cb_for_msg = log_callback.clone();
         let msg_count_for_handler = msg_count.clone();
         let pump_msg_count_for_handler = pump_msg_count.clone();
+        let filtered_count_for_handler = filtered_count.clone();
+        let create_count_for_handler = create_count.clone();
         let sig_callback = signature_callback.clone();
         let on_message = wasm_bindgen::closure::Closure::wrap(Box::new(move |e: MessageEvent| {
             // Increment total message count
@@ -156,15 +173,29 @@ impl Monitor {
                 }
             };
             
-            // Log every 50 messages to show activity
+            // Log every 50 messages to show activity and filtering efficiency
             if current_count % 50 == 0 {
                 info!("Received {} total WebSocket messages", current_count);
-                if let Ok(pump_count_guard) = pump_msg_count_for_handler.lock() {
+                if let (Ok(pump_count_guard), Ok(filtered_guard), Ok(create_guard)) = (
+                    pump_msg_count_for_handler.lock(),
+                    filtered_count_for_handler.lock(),
+                    create_count_for_handler.lock()
+                ) {
                     let pump_count = *pump_count_guard;
+                    let filtered = *filtered_guard;
+                    let creates = *create_guard;
+                    let filter_rate = if pump_count > 0 {
+                        filtered as f64 / pump_count as f64 * 100.0
+                    } else {
+                        0.0
+                    };
                     log_cb_for_msg(
                         "info".to_string(),
-                        "Monitor is active".to_string(),
-                        format!("Total messages: {} | Pump.fun messages: {}", current_count, pump_count)
+                        "Monitor is active - Filtering working!".to_string(),
+                        format!(
+                            "Total messages: {}\nPump.fun transactions: {}\nFiltered (Buy/Sell): {} ({:.1}%)\nCREATE detected: {}\n\n✅ Only processing CREATE instructions - avoiding hundreds of unnecessary RPC calls!",
+                            current_count, pump_count, filtered, filter_rate, creates
+                        )
                     );
                 }
             }
@@ -258,7 +289,51 @@ impl Monitor {
                                             return;
                                         }
 
-                                        // Check if any log mentions the pump.fun program
+                                        // OPTIMIZATION: Check for CREATE instruction FIRST before any other processing
+                                        // This filters out Buy/Sell transactions immediately without expensive operations
+                                        let mut is_create = false;
+                                        for log in logs.iter().filter_map(|l| l.as_str()) {
+                                            if log.contains("Program log: Instruction: Create") {
+                                                is_create = true;
+                                                break; // Found CREATE, no need to check more logs
+                                            }
+                                        }
+
+                                        // Skip non-CREATE transactions entirely
+                                        if !is_create {
+                                            // Increment filtered count
+                                            let filtered_total = {
+                                                match filtered_count_for_handler.lock() {
+                                                    Ok(mut count) => {
+                                                        *count += 1;
+                                                        *count
+                                                    },
+                                                    Err(_) => 0
+                                                }
+                                            };
+                                            
+                                            // Only log occasionally to avoid spam
+                                            if pump_count <= 5 || pump_count % 100 == 0 {
+                                                info!("Transaction {} is not a CREATE instruction, filtered (total: {})", sig, filtered_total);
+                                            }
+                                            return;
+                                        }
+
+                                        // This is a CREATE transaction - proceed with processing
+                                        // Increment create count
+                                        let create_total = {
+                                            match create_count_for_handler.lock() {
+                                                Ok(mut count) => {
+                                                    *count += 1;
+                                                    *count
+                                                },
+                                                Err(_) => 0
+                                            }
+                                        };
+                                        
+                                        info!("✅ CREATE instruction detected #{}: {}", create_total, sig);
+                                        
+                                        // Check if any log mentions the pump.fun program (double verification)
                                         let pump_fun_logs: Vec<String> = logs.iter()
                                             .filter_map(|log| log.as_str())
                                             .filter(|s| s.contains(&pump_fun_program))
@@ -266,36 +341,17 @@ impl Monitor {
                                             .collect();
 
                                         if !pump_fun_logs.is_empty() {
-                                            info!("✓ New pump.fun transaction detected: {}", sig);
-                                            info!("  Matching logs: {:?}", pump_fun_logs);
-                                            
-                                            // Check for specific instruction types
-                                            let mut instruction_types = Vec::new();
-                                            for log in logs.iter().filter_map(|l| l.as_str()) {
-                                                if log.contains("Program log: Instruction: Create") {
-                                                    instruction_types.push("Create");
-                                                } else if log.contains("Program log: Instruction: Buy") {
-                                                    instruction_types.push("Buy");
-                                                } else if log.contains("Program log: Instruction: Sell") {
-                                                    instruction_types.push("Sell");
-                                                }
-                                            }
-                                            
-                                            let instr_info = if !instruction_types.is_empty() {
-                                                format!("Instructions: {}", instruction_types.join(", "))
-                                            } else {
-                                                "No specific instructions detected".to_string()
-                                            };
+                                            info!("  Verified pump.fun program in logs");
                                             
                                             // Log the detection with details
                                             log_cb_for_msg(
                                                 "info".to_string(),
-                                                "🎯 New pump.fun transaction detected!".to_string(),
-                                                format!("Signature: {}\nLogs with pump.fun: {}\n{}\n\nProcessing transaction...", 
-                                                       sig, pump_fun_logs.len(), instr_info)
+                                                "🎯 New token creation detected!".to_string(),
+                                                format!("Signature: {}\nInstruction: Create\nLogs: {} entries\n\nProcessing new token...", 
+                                                       sig, pump_fun_logs.len())
                                             );
 
-                                            // Phase 2: Notify callback to process the signature
+                                            // Notify callback to process the signature
                                             if let Some(ref callback) = sig_callback {
                                                 callback(sig.to_string());
                                             }

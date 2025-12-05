@@ -78,6 +78,30 @@ pub struct BotSettings {
 }
 
 impl BotSettings {
+    /// Validate that settings contain valid data (no corrupted strings or vectors)
+    /// Returns true if settings are valid, false if corrupted
+    fn is_valid(&self) -> bool {
+        // Helper function to validate URLs
+        let is_valid_url_list = |urls: &[String]| {
+            !urls.is_empty() && !urls.iter().any(|url| url.is_empty() || url.contains('\0'))
+        };
+        
+        // Check that URL vectors are not empty and contain valid data
+        if !is_valid_url_list(&self.solana_ws_urls) || !is_valid_url_list(&self.solana_rpc_urls) {
+            return false;
+        }
+        
+        // Check that strings are not empty and don't contain null bytes
+        if self.pump_fun_program.is_empty() || self.pump_fun_program.contains('\0') {
+            return false;
+        }
+        if self.metadata_program.is_empty() || self.metadata_program.contains('\0') {
+            return false;
+        }
+        
+        true
+    }
+    
     /// Convert BotSettings to core Settings
     pub fn to_core_settings(&self) -> sol_beast_core::settings::Settings {
         sol_beast_core::settings::Settings {
@@ -165,13 +189,24 @@ impl SolBeastBot {
     pub fn new() -> Self {
         // Settings loading hierarchy for WASM deployment:
         // 1. Try localStorage (user's saved settings from previous session)
-        // 2. Fall back to built-in defaults if localStorage is empty or corrupted
+        // 2. Validate loaded settings to ensure they're not corrupted
+        // 3. Fall back to built-in defaults if localStorage is empty or corrupted
         // Note: The frontend will also try loading from static bot-settings.json
         // if it detects settings are invalid after bot initialization.
         let settings = match sol_beast_core::wasm::load_settings::<BotSettings>() {
             Ok(Some(saved_settings)) => {
-                info!("Loaded settings from localStorage");
-                saved_settings
+                // Validate the loaded settings to prevent memory access errors
+                if saved_settings.is_valid() {
+                    info!("Loaded valid settings from localStorage");
+                    saved_settings
+                } else {
+                    error!("Loaded settings from localStorage are corrupted, clearing and using defaults");
+                    // Clear corrupted data from localStorage
+                    if let Err(e) = sol_beast_core::wasm::storage::clear_all() {
+                        error!("Failed to clear corrupted localStorage: {:?}", e);
+                    }
+                    BotSettings::default()
+                }
             },
             Ok(None) => {
                 info!("No saved settings found, using defaults");
@@ -179,6 +214,10 @@ impl SolBeastBot {
             },
             Err(e) => {
                 error!("Failed to load settings from localStorage: {:?}, using defaults", e);
+                // Try to clear potentially corrupted data
+                if let Err(clear_err) = sol_beast_core::wasm::storage::clear_all() {
+                    error!("Failed to clear localStorage after error: {:?}", clear_err);
+                }
                 BotSettings::default()
             }
         };
@@ -387,6 +426,11 @@ impl SolBeastBot {
         let settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
+        // Validate parsed settings before updating
+        if !settings.is_valid() {
+            return Err(JsValue::from_str("Invalid settings: missing or corrupted required fields"));
+        }
+        
         // Acquire lock once and hold it to prevent race conditions
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
@@ -468,6 +512,12 @@ impl SolBeastBot {
                 poisoned.into_inner()
             }
         };
+        
+        // Validate settings before serialization to prevent memory access errors
+        if !state.settings.is_valid() {
+            error!("Settings validation failed - data appears corrupted");
+            return Err(JsValue::from_str("Settings are corrupted. Please clear browser storage and reload."));
+        }
         
         match serde_json::to_string(&state.settings) {
             Ok(json) => Ok(json),
@@ -1314,3 +1364,98 @@ impl Default for BotSettings {
 fn default_dev_tip_percent() -> f64 { 2.0 }
 fn default_dev_tip_fixed_sol() -> f64 { 0.0 }
 fn default_enable_safer_sniping() -> bool { false }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_valid_settings() {
+        let settings = BotSettings::default();
+        assert!(settings.is_valid(), "Default settings should be valid");
+    }
+
+    #[test]
+    fn test_empty_ws_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec![];
+        assert!(!settings.is_valid(), "Settings with empty WS URLs should be invalid");
+    }
+
+    #[test]
+    fn test_empty_rpc_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_rpc_urls = vec![];
+        assert!(!settings.is_valid(), "Settings with empty RPC URLs should be invalid");
+    }
+
+    #[test]
+    fn test_empty_pump_fun_program() {
+        let mut settings = BotSettings::default();
+        settings.pump_fun_program = String::new();
+        assert!(!settings.is_valid(), "Settings with empty pump_fun_program should be invalid");
+    }
+
+    #[test]
+    fn test_empty_metadata_program() {
+        let mut settings = BotSettings::default();
+        settings.metadata_program = String::new();
+        assert!(!settings.is_valid(), "Settings with empty metadata_program should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_pump_fun_program() {
+        let mut settings = BotSettings::default();
+        settings.pump_fun_program = "test\0corrupted".to_string();
+        assert!(!settings.is_valid(), "Settings with null byte in pump_fun_program should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_metadata_program() {
+        let mut settings = BotSettings::default();
+        settings.metadata_program = "test\0corrupted".to_string();
+        assert!(!settings.is_valid(), "Settings with null byte in metadata_program should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_ws_url() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec!["wss://test\0corrupted".to_string()];
+        assert!(!settings.is_valid(), "Settings with null byte in WS URL should be invalid");
+    }
+
+    #[test]
+    fn test_null_byte_in_rpc_url() {
+        let mut settings = BotSettings::default();
+        settings.solana_rpc_urls = vec!["https://test\0corrupted".to_string()];
+        assert!(!settings.is_valid(), "Settings with null byte in RPC URL should be invalid");
+    }
+
+    #[test]
+    fn test_empty_string_in_ws_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec!["".to_string()];
+        assert!(!settings.is_valid(), "Settings with empty string in WS URLs should be invalid");
+    }
+
+    #[test]
+    fn test_empty_string_in_rpc_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_rpc_urls = vec!["".to_string()];
+        assert!(!settings.is_valid(), "Settings with empty string in RPC URLs should be invalid");
+    }
+
+    #[test]
+    fn test_valid_settings_with_multiple_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec![
+            "wss://api.mainnet-beta.solana.com/".to_string(),
+            "wss://api.secondary.solana.com/".to_string(),
+        ];
+        settings.solana_rpc_urls = vec![
+            "https://api.mainnet-beta.solana.com/".to_string(),
+            "https://api.secondary.solana.com/".to_string(),
+        ];
+        assert!(settings.is_valid(), "Settings with multiple valid URLs should be valid");
+    }
+}

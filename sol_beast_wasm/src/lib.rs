@@ -272,6 +272,7 @@ impl SolBeastBot {
     /// Start the bot
     #[wasm_bindgen]
     pub fn start(&self) -> Result<(), JsValue> {
+        // Acquire mutable lock to allow mode repair if needed
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -407,13 +408,9 @@ impl SolBeastBot {
     #[wasm_bindgen]
     pub fn set_mode(&self, mode: &str) -> Result<(), JsValue> {
         // Validate input before acquiring lock to prevent corruption
-        if mode != "dry-run" && mode != "real" {
+        // Check for valid modes and ensure no null bytes (defense in depth)
+        if (mode != "dry-run" && mode != "real") || mode.contains('\0') {
             return Err(JsValue::from_str("Mode must be 'dry-run' or 'real'"));
-        }
-        
-        // Ensure mode string is valid UTF-8 and doesn't contain null bytes
-        if mode.contains('\0') || mode.is_empty() {
-            return Err(JsValue::from_str("Invalid mode string"));
         }
         
         let mut state = match self.state.lock() {

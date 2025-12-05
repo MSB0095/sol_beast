@@ -10,6 +10,11 @@ use log::{info, error, warn};
 mod monitor;
 use monitor::Monitor;
 
+// Use wee_alloc as the global allocator for smaller WASM size and better memory management
+#[cfg(feature = "wee_alloc")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
 // Constants for configuration defaults and limits
 const DEFAULT_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
 const DEFAULT_CACHE_CAPACITY: usize = 1000;
@@ -470,10 +475,24 @@ impl SolBeastBot {
         };
         
         match serde_json::to_string(&state.settings) {
-            Ok(json) => Ok(json),
+            Ok(json) => {
+                // Ensure we have valid UTF-8 JSON
+                if json.is_empty() {
+                    error!("Settings serialized to empty string, using defaults");
+                    return match serde_json::to_string(&BotSettings::default()) {
+                        Ok(default_json) => Ok(default_json),
+                        Err(e) => Err(JsValue::from_str(&format!("Failed to serialize default settings: {}", e)))
+                    };
+                }
+                Ok(json)
+            },
             Err(e) => {
-                error!("Failed to serialize settings: {}", e);
-                Err(JsValue::from_str(&format!("Failed to serialize settings: {}", e)))
+                error!("Failed to serialize settings: {}, returning defaults", e);
+                // Return default settings as fallback
+                match serde_json::to_string(&BotSettings::default()) {
+                    Ok(default_json) => Ok(default_json),
+                    Err(e2) => Err(JsValue::from_str(&format!("Failed to serialize settings: {}. Failed to serialize defaults: {}", e, e2)))
+                }
             }
         }
     }

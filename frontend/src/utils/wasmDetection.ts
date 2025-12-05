@@ -12,9 +12,14 @@ export function isWasmMode(botService?: { isWasmMode: () => boolean }): boolean 
   }
 
   // Check environment variable
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  if (typeof window !== 'undefined' && (import.meta as any).env?.VITE_USE_WASM === 'true') {
-    return true
+  try {
+    // Direct access to allow Webpack DefinePlugin to replace the whole expression
+    // @ts-ignore
+    if (import.meta.env.VITE_USE_WASM === 'true') {
+      return true
+    }
+  } catch {
+    // Ignore access errors
   }
 
   // Check if running on GitHub Pages

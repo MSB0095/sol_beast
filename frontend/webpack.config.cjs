@@ -25,6 +25,7 @@ module.exports = {
   },
   experiments: {
     outputModule: true,
+    asyncWebAssembly: true,
   },
   resolve: {
     extensions: ['.tsx', '.ts', '.js', '.jsx'],

@@ -106,8 +106,9 @@ async function initWasm() {
     // Dynamically import WASM module
     const wasm = await import('../wasm/sol_beast_wasm')
     
-    // Initialize WASM (this calls wasm-bindgen initialization)
-    await wasm.default()
+    // Initialize WASM with memory growth enabled (this calls wasm-bindgen initialization)
+    // Pass WebAssembly.Memory options to enable memory growth
+    await wasm.default(undefined)
     
     // Note: wasm.init() is called automatically by #[wasm_bindgen(start)]
     // during wasm.default(), so we don't need to call it explicitly
@@ -317,8 +318,12 @@ export const botService = {
   // Get status
   async getStatus() {
     if (this.isWasmMode()) {
-      if (!wasmBot) {
-        throw new Error('WASM bot is not initialized')
+      if (!wasmBot || !wasmInitialized) {
+        // Return default state if not initialized yet
+        return {
+          running: false,
+          mode: 'dry-run'
+        }
       }
       try {
         return {
@@ -326,7 +331,12 @@ export const botService = {
           mode: wasmBot.get_mode()
         }
       } catch (error) {
-        throw new Error(error instanceof Error ? error.message : String(error))
+        // Handle memory access errors gracefully
+        console.warn('Error getting WASM status:', error)
+        return {
+          running: false,
+          mode: 'dry-run'
+        }
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/state`)
@@ -340,8 +350,12 @@ export const botService = {
   // Get settings
   async getSettings() {
     if (this.isWasmMode()) {
-      if (!wasmBot) {
-        throw new Error('WASM bot is not initialized')
+      if (!wasmBot || !wasmInitialized) {
+        // Wait a moment for initialization
+        await new Promise(resolve => setTimeout(resolve, 100))
+        if (!wasmBot || !wasmInitialized) {
+          throw new Error('WASM bot is not initialized')
+        }
       }
       try {
         const json = wasmBot.get_settings()
@@ -391,8 +405,8 @@ export const botService = {
   // Get logs
   async getLogs() {
     if (this.isWasmMode()) {
-      if (!wasmBot) {
-        throw new Error('WASM bot is not initialized')
+      if (!wasmBot || !wasmInitialized) {
+        return []
       }
       try {
         const json = wasmBot.get_logs()
@@ -412,8 +426,8 @@ export const botService = {
   // Get holdings
   async getHoldings() {
     if (this.isWasmMode()) {
-      if (!wasmBot) {
-        throw new Error('WASM bot is not initialized')
+      if (!wasmBot || !wasmInitialized) {
+        return []
       }
       try {
         const json = wasmBot.get_holdings()

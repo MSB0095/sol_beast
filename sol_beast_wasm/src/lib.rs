@@ -81,8 +81,13 @@ impl BotSettings {
     /// Validate that settings contain valid data (no corrupted strings or vectors)
     /// Returns true if settings are valid, false if corrupted
     fn is_valid(&self) -> bool {
+        // Helper function to validate URLs
+        let is_valid_url_list = |urls: &[String]| {
+            !urls.is_empty() && !urls.iter().any(|url| url.is_empty() || url.contains('\0'))
+        };
+        
         // Check that URL vectors are not empty and contain valid data
-        if self.solana_ws_urls.is_empty() || self.solana_rpc_urls.is_empty() {
+        if !is_valid_url_list(&self.solana_ws_urls) || !is_valid_url_list(&self.solana_rpc_urls) {
             return false;
         }
         
@@ -92,18 +97,6 @@ impl BotSettings {
         }
         if self.metadata_program.is_empty() || self.metadata_program.contains('\0') {
             return false;
-        }
-        
-        // Validate that URL strings don't contain null bytes (sign of corruption)
-        for url in &self.solana_ws_urls {
-            if url.is_empty() || url.contains('\0') {
-                return false;
-            }
-        }
-        for url in &self.solana_rpc_urls {
-            if url.is_empty() || url.contains('\0') {
-                return false;
-            }
         }
         
         true

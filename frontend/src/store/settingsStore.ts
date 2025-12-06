@@ -68,6 +68,7 @@ export interface Settings {
   
   // Shyft
   shyft_api_key?: string
+  shyft_graphql_url: string
 }
 
 type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
@@ -123,6 +124,7 @@ const defaultSettings: Settings = {
   dev_tip_percent: 2.0,
   dev_tip_fixed_sol: 0.0,
   shyft_api_key: undefined,
+  shyft_graphql_url: 'https://programs.shyft.to/v0/graphql',
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({

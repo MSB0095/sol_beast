@@ -75,6 +75,12 @@ export default function ConfigurationPanel() {
           type: 'password',
           help: 'Required for GraphQL monitoring'
         },
+        {
+          key: 'shyft_graphql_url' as const,
+          label: 'Shyft GraphQL URL',
+          type: 'text',
+          help: 'Shyft GraphQL endpoint URL'
+        },
       ]
     },
     {
@@ -108,6 +114,7 @@ export default function ConfigurationPanel() {
       title: 'Helius Sender Configuration',
       settings: [
         { key: 'helius_sender_enabled' as const, label: 'Enable Helius Sender', type: 'checkbox' },
+        { key: 'helius_api_key' as const, label: 'Helius API Key', type: 'password', help: 'Optional: for Helius-specific RPC features' },
         { key: 'helius_min_tip_sol' as const, label: 'Min Tip (SOL)', type: 'number' },
         { key: 'helius_priority_fee_multiplier' as const, label: 'Priority Fee Multiplier', type: 'number' },
         { key: 'helius_use_swqos_only' as const, label: 'Use SWQOS Only', type: 'checkbox' },
@@ -225,6 +232,25 @@ export default function ConfigurationPanel() {
                     onChange={(e) => handleChange(setting.key, parseFloat(e.target.value))}
                     className="w-full px-3 py-2 rounded-xl transition-all"
                     step="any"
+                  />
+                )}
+
+                {setting.type === 'password' && (
+                  <input
+                    type="password"
+                    value={(settings[setting.key] as string) || ''}
+                    onChange={(e) => handleChange(setting.key, e.target.value || undefined)}
+                    className="w-full px-3 py-2 rounded-xl transition-all"
+                    placeholder="Enter API key..."
+                  />
+                )}
+
+                {setting.type === 'text' && (
+                  <input
+                    type="text"
+                    value={(settings[setting.key] as string) || ''}
+                    onChange={(e) => handleChange(setting.key, e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl transition-all"
                   />
                 )}
 

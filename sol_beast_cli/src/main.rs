@@ -146,9 +146,7 @@ async fn main() -> Result<(), AppError> {
     let price_cache = Arc::new(Mutex::new(LruCache::new(
         settings.cache_capacity.try_into()?,
     )));
-    // Shared map of active subscriptions for mints we care about. Value is (wss_sender_index, sub_id)
-    // Note: sub_map removed as WebSocket code has been replaced by Shyft
-    // Note: old tx/rx channel removed as detection now uses Shyft
+
     let is_real = std::env::args().any(|arg| arg == "--real");
     // Load real keypair either from path or from JSON in config (optional)
     // Prefer base64 env var for keypairs to avoid storing keys on disk.
@@ -669,9 +667,11 @@ async fn handle_new_token(
         }
         if let Some(m) = onchain_meta.as_ref() {
             if !m.uri.trim_end_matches('\u{0}').is_empty() && m.seller_fee_basis_points < 500 {
-            // Price updates are now provided by Shyft WebSocket monitor through price_cache
-            // The old direct WebSocket subscription code has been removed in favor of Shyft integration
-            // (350 lines of WebSocket subscription code omitted - now using Shyft for all price updates)
+            // Note: The old WebSocket subscription code (~350 lines) has been removed.
+            // Price updates are now provided by the Shyft GraphQL WebSocket monitor which
+            // subscribes to bonding curve accounts and updates the shared price_cache.
+            // This centralized approach eliminates complex per-token subscription management
+            // and provides more reliable price updates through Shyft's infrastructure.
         } else {
             // No on-chain metadata to validate or price-seller checks; skip buy logic
             debug!("No on-chain metadata to validate buy for mint {} (sig={}) — detected only", mint, signature);

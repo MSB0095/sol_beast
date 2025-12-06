@@ -125,8 +125,8 @@ pub async fn start_shyft_monitor(
                                                                     if bytes.len() >= 24 {
                                                                         let slice = &bytes[8..];
                                                                         if slice.len() >= 16 {
-                                                                            let virtual_token_reserves = u64::from_le_bytes(slice[0..8].try_into().unwrap_or([0u8; 8]));
-                                                                            let virtual_sol_reserves = u64::from_le_bytes(slice[8..16].try_into().unwrap_or([0u8; 8]));
+                                                                            let virtual_token_reserves = u64::from_le_bytes(slice[0..8].try_into().expect("slice length verified"));
+                                                                            let virtual_sol_reserves = u64::from_le_bytes(slice[8..16].try_into().expect("slice length verified"));
                                                                             if virtual_token_reserves > 0 {
                                                                                 let price = virtual_sol_reserves as f64 / virtual_token_reserves as f64;
                                                                                 let mut cache = price_cache.lock().await;

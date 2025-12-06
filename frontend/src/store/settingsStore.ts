@@ -68,6 +68,7 @@ export interface Settings {
   
   // Shyft
   shyft_api_key?: string
+  shyft_graphql_url: string
 }
 
 type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
@@ -114,6 +115,7 @@ const defaultSettings: Settings = {
   bonding_curve_strict: false,
   bonding_curve_log_debounce_secs: 300,
   helius_sender_enabled: true,
+  helius_api_key: undefined,
   helius_sender_endpoint: 'https://sender.helius-rpc.com/fast',
   helius_min_tip_sol: 0.00001,
   helius_priority_fee_multiplier: 1.2,
@@ -123,6 +125,7 @@ const defaultSettings: Settings = {
   dev_tip_percent: 2.0,
   dev_tip_fixed_sol: 0.0,
   shyft_api_key: undefined,
+  shyft_graphql_url: 'https://programs.shyft.to/v0/graphql',
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({

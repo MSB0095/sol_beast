@@ -222,6 +222,12 @@ impl Settings {
         if other.dev_tip_fixed_sol != self.dev_tip_fixed_sol {
             self.dev_tip_fixed_sol = other.dev_tip_fixed_sol;
         }
+        if other.shyft_api_key != self.shyft_api_key {
+            self.shyft_api_key = other.shyft_api_key.clone();
+        }
+        if other.shyft_graphql_url != self.shyft_graphql_url {
+            self.shyft_graphql_url = other.shyft_graphql_url.clone();
+        }
     }
 
     /// Validate settings ranges and constraints

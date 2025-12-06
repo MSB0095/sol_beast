@@ -115,9 +115,8 @@ Run the **"Validate CI Setup"** workflow to check configuration:
 ## 📚 More Information
 
 **Detailed guides**:
-- [GitHub Secrets Setup Guide](./GITHUB_SECRETS_SETUP.md) - Complete secret configuration
+- [GitHub Secrets Setup Guide](./GITHUB_SECRETS_SETUP.md) - Complete secret configuration and RPC provider setup
 - [Workflows README](./.github/workflows/README.md) - Understanding workflows
-- [RPC Configuration Guide](./RPC_CONFIGURATION_GUIDE.md) - RPC provider setup
 
 **Getting API keys**:
 - [Helius](https://helius.dev/) - Best for Solana, free 100k req/month

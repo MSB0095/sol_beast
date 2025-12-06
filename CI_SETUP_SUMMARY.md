@@ -158,9 +158,8 @@ Every time you push code to `master`, `main`, or `develop`, the CI workflow auto
 ## 📖 Documentation Quick Links
 
 - 📱 [Quick Start (5 min)](./QUICK_START_CI.md) - Get started from mobile
-- 🔑 [Secrets Setup (detailed)](./GITHUB_SECRETS_SETUP.md) - Complete configuration guide
+- 🔑 [Secrets Setup (detailed)](./GITHUB_SECRETS_SETUP.md) - Complete configuration guide including RPC setup
 - ⚙️ [Workflows Guide](./.github/workflows/README.md) - Understanding workflows
-- 🌐 [RPC Configuration](./RPC_CONFIGURATION_GUIDE.md) - RPC provider setup
 
 ## 💡 Next Steps
 

@@ -330,7 +330,6 @@ Your repository now has enterprise-grade CI/CD that works from your phone.
 - ⚙️ [Workflows Guide](./.github/workflows/README.md)
 - 🔧 [Troubleshooting](./TROUBLESHOOTING_CI.md)
 - 📋 [Complete Summary](./CI_SETUP_SUMMARY.md)
-- 🌐 [RPC Guide](./RPC_CONFIGURATION_GUIDE.md)
 
 ---
 

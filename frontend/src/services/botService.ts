@@ -286,6 +286,7 @@ export const botService = {
   },
 
   // Set mode
+  // MEMORY SAFETY: Implements recovery for memory access errors during mode changes
   async setMode(mode: 'dry-run' | 'real') {
     if (this.isWasmMode()) {
       if (!wasmBot) {
@@ -296,7 +297,36 @@ export const botService = {
         return { success: true, mode }
       } catch (error) {
         console.error('Set mode error:', error)
-        throw new Error(error instanceof Error ? error.message : String(error))
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        
+        // Check if this is a critical WASM error (memory access out of bounds)
+        if (isCriticalWasmError(error, errorMsg)) {
+          console.log('Critical WASM error detected during mode change, attempting recovery...')
+          
+          // Try to recover by clearing corrupted state
+          try {
+            // Clear corrupted data from localStorage
+            localStorage.removeItem('sol_beast_settings')
+            localStorage.removeItem('sol_beast_state')
+            localStorage.removeItem('sol_beast_holdings')
+            
+            // Load default settings
+            const defaultSettings = await loadDefaultSettings()
+            if (defaultSettings) {
+              wasmBot.update_settings(JSON.stringify(defaultSettings))
+              console.log('✓ Recovered with default settings after mode change error')
+              
+              // Retry mode change after recovery
+              wasmBot.set_mode(mode)
+              return { success: true, mode }
+            }
+          } catch (recoveryError) {
+            console.error('Recovery failed:', recoveryError)
+            throw new Error(`Failed to recover from memory error. Please refresh the page. Original error: ${errorMsg}`)
+          }
+        }
+        
+        throw new Error(errorMsg)
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/bot/mode`, {
@@ -317,6 +347,7 @@ export const botService = {
   },
 
   // Get status
+  // MEMORY SAFETY: Handles memory errors gracefully and returns safe defaults
   async getStatus() {
     if (this.isWasmMode()) {
       if (!wasmBot || !wasmInitialized) {
@@ -334,6 +365,20 @@ export const botService = {
       } catch (error) {
         // Handle memory access errors gracefully
         console.warn('Error getting WASM status:', error)
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        
+        // If it's a critical error, try to clear corrupted data
+        if (isCriticalWasmError(error, errorMsg)) {
+          console.log('Critical error in getStatus, clearing potentially corrupted localStorage...')
+          try {
+            localStorage.removeItem('sol_beast_settings')
+            localStorage.removeItem('sol_beast_state')
+          } catch (e) {
+            console.error('Failed to clear localStorage:', e)
+          }
+        }
+        
+        // Always return a safe default state
         return {
           running: false,
           mode: 'dry-run'
@@ -349,6 +394,7 @@ export const botService = {
   },
 
   // Get settings
+  // MEMORY SAFETY: Implements comprehensive error recovery for settings retrieval
   async getSettings() {
     if (this.isWasmMode()) {
       if (!wasmBot || !wasmInitialized) {
@@ -360,9 +406,40 @@ export const botService = {
       }
       try {
         const json = wasmBot.get_settings()
-        return JSON.parse(json)
+        const settings = JSON.parse(json)
+        
+        // Validate settings structure
+        if (!validateSettings(settings)) {
+          console.warn('Retrieved settings failed validation, attempting recovery...')
+          throw new Error('Settings validation failed')
+        }
+        
+        return settings
       } catch (error) {
-        throw new Error(error instanceof Error ? error.message : String(error))
+        console.error('Get settings error:', error)
+        const errorMsg = error instanceof Error ? error.message : String(error)
+        
+        // Check if this is a critical WASM error
+        if (isCriticalWasmError(error, errorMsg)) {
+          console.log('Critical WASM error in get_settings, attempting recovery...')
+          
+          // Try to recover by loading defaults
+          try {
+            const defaultSettings = await loadDefaultSettings()
+            if (defaultSettings && wasmBot) {
+              // Update WASM with default settings
+              wasmBot.update_settings(JSON.stringify(defaultSettings))
+              console.log('✓ Recovered settings from default configuration')
+              return defaultSettings
+            }
+          } catch (recoveryError) {
+            console.error('Failed to load default settings during recovery:', recoveryError)
+          }
+          
+          throw new Error(`Failed to recover bot settings: ${errorMsg}`)
+        }
+        
+        throw new Error(errorMsg)
       }
     } else {
       const response = await fetch(`${API_BASE_URL}/settings`)

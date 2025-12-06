@@ -1,10 +1,8 @@
 use crate::models::{Holding, PriceCache};
 use crate::settings::Settings;
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
-use borsh::BorshDeserialize;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
-use sol_beast_core::models::BondingCurveState;
 use sol_beast_core::shyft::{
     AccountSubscriptionResponse, GraphQLResponse, NewTokenSubscriptionResponse, ShyftService,
     ShyftTransaction,
@@ -15,7 +13,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use url::Url;
 
 pub enum ShyftMonitorMessage {
     NewToken(ShyftTransaction),
@@ -55,12 +52,11 @@ pub async fn start_shyft_monitor(
     // Ensure we use the wss:// protocol
     let base_url = settings.shyft_graphql_url.replace("https://", "wss://").replace("http://", "ws://");
     let url_str = format!("{}?api_key={}", base_url, shyft_service.api_key);
-    let url = Url::parse(&url_str).expect("Invalid Shyft URL");
 
     info!("Connecting to Shyft GraphQL WebSocket at {}", base_url);
 
     loop {
-        match connect_async(url.clone()).await {
+        match connect_async(&url_str).await {
             Ok((ws_stream, _)) => {
                 info!("Connected to Shyft GraphQL WSS");
                 let (mut write, mut read) = ws_stream.split();
@@ -124,13 +120,19 @@ pub async fn start_shyft_monitor(
                                                             let mint = id.strip_prefix("price_").unwrap_or("");
                                                             if !mint.is_empty() {
                                                                 if let Ok(bytes) = Base64Engine.decode(&acc.data) {
-                                                                    // Skip 8 bytes discriminator
-                                                                    if bytes.len() >= 8 {
-                                                                        if let Ok(state) = BondingCurveState::try_from_slice(&bytes[8..]) {
-                                                                            let price = state.virtual_sol_reserves as f64 / state.virtual_token_reserves as f64;
-                                                                            let mut cache = price_cache.lock().await;
-                                                                            cache.put(mint.to_string(), (std::time::Instant::now(), price));
-                                                                            debug!("Shyft price update for {}: {}", mint, price);
+                                                                    // Parse bonding curve state manually
+                                                                    // Skip 8 bytes discriminator, then parse virtual reserves
+                                                                    if bytes.len() >= 24 {
+                                                                        let slice = &bytes[8..];
+                                                                        if slice.len() >= 16 {
+                                                                            let virtual_token_reserves = u64::from_le_bytes(slice[0..8].try_into().unwrap_or([0u8; 8]));
+                                                                            let virtual_sol_reserves = u64::from_le_bytes(slice[8..16].try_into().unwrap_or([0u8; 8]));
+                                                                            if virtual_token_reserves > 0 {
+                                                                                let price = virtual_sol_reserves as f64 / virtual_token_reserves as f64;
+                                                                                let mut cache = price_cache.lock().await;
+                                                                                cache.put(mint.to_string(), (std::time::Instant::now(), price));
+                                                                                debug!("Shyft price update for {}: {}", mint, price);
+                                                                            }
                                                                         }
                                                                     }
                                                                 }

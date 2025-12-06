@@ -11,12 +11,9 @@ use tokio::sync::{Mutex, mpsc};
 use solana_sdk::{
     signature::{Keypair},
 };
-use crate::ws::WsRequest;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use once_cell::sync::Lazy;
 use log::{info, debug, error};
 use chrono::Utc;
-use std::str::FromStr;
 use std::io::Write;
 
 
@@ -39,6 +36,8 @@ pub async fn monitor_holdings(
     // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
     static PRICE_MISS_WARN_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
     const PRICE_MISS_WARN_DEBOUNCE_SECS: u64 = 60;
+    static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+    const SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS: u64 = 30;
     
     let mut subscribed_mints = std::collections::HashSet::new();
 

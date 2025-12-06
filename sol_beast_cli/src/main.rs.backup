@@ -147,8 +147,8 @@ async fn main() -> Result<(), AppError> {
         settings.cache_capacity.try_into()?,
     )));
     // Shared map of active subscriptions for mints we care about. Value is (wss_sender_index, sub_id)
-    // Note: sub_map removed as WebSocket code has been replaced by Shyft
-    // Note: old tx/rx channel removed as detection now uses Shyft
+    let sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let (tx, mut rx) = mpsc::channel::<shyft_monitor::ShyftMonitorMessage>(1000);
     let is_real = std::env::args().any(|arg| arg == "--real");
     // Load real keypair either from path or from JSON in config (optional)
     // Prefer base64 env var for keypairs to avoid storing keys on disk.
@@ -671,7 +671,359 @@ async fn handle_new_token(
             if !m.uri.trim_end_matches('\u{0}').is_empty() && m.seller_fee_basis_points < 500 {
             // Price updates are now provided by Shyft WebSocket monitor through price_cache
             // The old direct WebSocket subscription code has been removed in favor of Shyft integration
-            // (350 lines of WebSocket subscription code omitted - now using Shyft for all price updates)
+            // Old WebSocket code disabled - using Shyft for all price updates
+            #[allow(unreachable_code)]
+            if false {
+                // Dead code: old WebSocket subscription logic (kept for reference)
+                // This entire block is disabled as Shyft handles WebSocket connections
+                panic!("This code path should never execute");
+                    let (resp_tx, resp_rx) = oneshot::channel::<Result<u64, String>>();
+                    // Subscribe to the bonding_curve PDA (streamed state includes virtual reserves)
+                    let pump_prog =
+                        solana_sdk::pubkey::Pubkey::from_str(&settings.pump_fun_program)?;
+                    let mint_pk = solana_sdk::pubkey::Pubkey::from_str(&mint)?;
+                    let (curve_pda, _) = solana_sdk::pubkey::Pubkey::find_program_address(
+                        &[b"bonding-curve", mint_pk.as_ref()],
+                        &pump_prog,
+                    );
+                    let subscribe_req = WsRequest::Subscribe {
+                        account: curve_pda.to_string(),
+                        mint: mint.clone(),
+                        resp: resp_tx,
+                    };
+                    if let Err(e) = sender.send(subscribe_req).await {
+                        log::warn!("Failed to send subscribe request for {}: {}", mint, e);
+                    } else {
+                        // Use aggressive 5s timeout for fast failover
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await
+                        {
+                            Ok(Ok(Ok(sub_id))) => {
+                                _used_wss = true;
+                                debug!("Subscribed to {} on sub {}", mint, sub_id);
+                                // Attempt an immediate RPC fetch to prime the price cache.
+                                // Some WSS providers delay the initial account notification;
+                                // fetching the curve once via RPC gives us an initial price
+                                // we can act on while the WSS subscription delivers updates.
+                                let mut price_opt: Option<f64> = None;
+                                match rpc::fetch_current_price(
+                                    &mint,
+                                    price_cache,
+                                    rpc_client,
+                                    settings,
+                                )
+                                .await
+                                {
+                                    Ok(p) => {
+                                        debug!(
+                                            "Primed price cache for {} via RPC: {:.18} SOL/token",
+                                            mint, p
+                                        );
+                                        price_opt = Some(p);
+                                    }
+                                    Err(e) => {
+                                        debug!("RPC prime failed for {}: {}. Will wait for WSS initial notification ({}s)", mint, e, settings.wss_subscribe_timeout_secs);
+                                    }
+                                }
+
+                                // If RPC prime didn't succeed, wait briefly for the price to appear in the shared cache
+                                // Track whether we want to keep the WSS subscription
+                                // alive after the function returns. If we buy the token
+                                // we keep the subscription active so the monitor gets
+                                // live updates; otherwise we unsubscribe to free slots.
+                                let mut keep_sub = false;
+                                if price_opt.is_none() {
+                                    let start = Instant::now();
+                                    while start.elapsed().as_secs()
+                                        < settings.wss_subscribe_timeout_secs
+                                    {
+                                        if let Some((_, price)) =
+                                            price_cache.lock().await.get(&mint).cloned()
+                                        {
+                                            price_opt = Some(price);
+                                            break;
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(200))
+                                            .await;
+                                    }
+                                }
+                                if let Some(_price) = price_opt {
+                                    let mut holdings_guard = holdings.lock().await;
+                                    if holdings_guard.len() >= settings.max_holded_coins {
+                                        info!(
+                                            "Max held coins reached ({}); skipping buy for {}",
+                                            settings.max_holded_coins, mint
+                                        );
+                                        return Ok(());
+                                    }
+                                    match buyer::buy_token(
+                                        &mint,
+                                        settings.buy_amount,
+                                        is_real,
+                                        keypair,
+                                        simulate_keypair,
+                                        price_cache.clone(),
+                                        rpc_client,
+                                        settings,
+                                    )
+                                    .await
+                                    {
+                                        Ok(mut holding) => {
+                                            holding.metadata = offchain_meta.clone();
+                                            holding.onchain_raw = onchain_raw.clone();
+                                            // Build compact onchain_struct as before
+                                            let mut onchain_struct: Option<
+                                                crate::models::OnchainFullMetadata,
+                                            > = None;
+                                            if let Some(meta) = onchain_meta.as_ref() {
+                                                let name =
+                                                    meta.name.trim_end_matches('\u{0}').to_string();
+                                                let symbol = meta
+                                                    .symbol
+                                                    .trim_end_matches('\u{0}')
+                                                    .to_string();
+                                                let uri =
+                                                    meta.uri.trim_end_matches('\u{0}').to_string();
+                                                onchain_struct =
+                                                    Some(crate::models::OnchainFullMetadata {
+                                                        name: if name.is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(name)
+                                                        },
+                                                        symbol: if symbol.is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(symbol)
+                                                        },
+                                                        uri: if uri.is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(uri)
+                                                        },
+                                                        seller_fee_basis_points: Some(
+                                                            meta.seller_fee_basis_points,
+                                                        ),
+                                                        raw: onchain_raw.clone(),
+                                                    });
+                                            } else if let Some(raw_bytes) = onchain_raw.as_ref() {
+                                                if let Ok(parsed) =
+                                                    OnchainMetadataRaw::safe_deserialize(raw_bytes)
+                                                {
+                                                    let name = parsed
+                                                        .name
+                                                        .trim_end_matches('\u{0}')
+                                                        .to_string();
+                                                    let symbol = parsed
+                                                        .symbol
+                                                        .trim_end_matches('\u{0}')
+                                                        .to_string();
+                                                    let uri = parsed
+                                                        .uri
+                                                        .trim_end_matches('\u{0}')
+                                                        .to_string();
+                                                    onchain_struct =
+                                                        Some(crate::models::OnchainFullMetadata {
+                                                            name: if name.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(name)
+                                                            },
+                                                            symbol: if symbol.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(symbol)
+                                                            },
+                                                            uri: if uri.is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(uri)
+                                                            },
+                                                            seller_fee_basis_points: Some(
+                                                                parsed.seller_fee_basis_points,
+                                                            ),
+                                                            raw: Some(raw_bytes.clone()),
+                                                        });
+                                                }
+                                            }
+                                            holding.onchain = onchain_struct.clone();
+                                            if let Some(off) = &holding.metadata {
+                                                info!("Persisting off-chain metadata for {} into holdings: name={:?}, symbol={:?}, image={:?}", mint, off.name, off.symbol, off.image);
+                                            }
+                                            if let Some(raw) = &holding.onchain_raw {
+                                                info!("Persisting on-chain raw metadata for {} into holdings ({} bytes)", mint, raw.len());
+                                            }
+                                            if let Some(onchain) = &holding.onchain {
+                                                info!("Persisting parsed on-chain metadata for {} into holdings: name={:?}, symbol={:?}, uri={:?}, seller_fee_basis_points={:?}", mint, onchain.name, onchain.symbol, onchain.uri, onchain.seller_fee_basis_points);
+                                            }
+                                            let buy_record = BuyRecord {
+                                                mint: mint.clone(),
+                                                symbol: offchain_meta
+                                                    .as_ref()
+                                                    .and_then(|o| o.symbol.clone()),
+                                                name: offchain_meta
+                                                    .as_ref()
+                                                    .and_then(|o| o.name.clone()),
+                                                uri: offchain_meta
+                                                    .as_ref()
+                                                    .and_then(|o| o.image.clone())
+                                                    .or_else(|| {
+                                                        onchain_struct
+                                                            .as_ref()
+                                                            .and_then(|on| on.uri.clone())
+                                                    }),
+                                                image: offchain_meta
+                                                    .as_ref()
+                                                    .and_then(|o| o.image.clone()),
+                                                creator: creator.clone(),
+                                                detect_time,
+                                                buy_time: holding.buy_time,
+                                                buy_amount_sol: settings.buy_amount,
+                                                buy_amount_tokens: holding.amount,
+                                                buy_price: holding.buy_price,
+                                            };
+                                            // Log successful buy to API (before moving holding)
+                                            bot_log!(
+                                                "info",
+                                                format!("Successfully bought token {}", mint),
+                                                format!(
+                                                    "Amount: {} SOL, Price: {} SOL per token",
+                                                    settings.buy_amount, holding.buy_price
+                                                )
+                                            );
+
+                                            // Update detected coin status to "bought"
+                                            {
+                                                let mut coins = detected_coins.lock().await;
+                                                if let Some(coin) =
+                                                    coins.iter_mut().find(|c| c.mint == mint)
+                                                {
+                                                    coin.status = "bought".to_string();
+                                                    coin.buy_price = Some(holding.buy_price);
+                                                }
+                                            }
+
+                                            // Add buy trade record
+                                            {
+                                                let mut trades = trades_list.lock().await;
+                                                // Convert amount from microtokens to tokens
+                                                let amount_tokens = holding.amount as f64 / 1_000_000.0;
+                                                trades.insert(
+                                                    0,
+                                                    api::TradeRecord {
+                                                        mint: mint.clone(),
+                                                        symbol: offchain_meta
+                                                            .as_ref()
+                                                            .and_then(|o| o.symbol.clone()),
+                                                        name: offchain_meta
+                                                            .as_ref()
+                                                            .and_then(|o| o.name.clone()),
+                                                        image: offchain_meta
+                                                            .as_ref()
+                                                            .and_then(|o| o.image.clone()),
+                                                        trade_type: "buy".to_string(),
+                                                        timestamp: holding.buy_time.to_rfc3339(),
+                                                        tx_signature: None, // TX signature not readily available here
+                                                        amount_sol: settings.buy_amount,
+                                                        amount_tokens,
+                                                        price_per_token: holding.buy_price,
+                                                        profit_loss: None,
+                                                        profit_loss_percent: None,
+                                                        reason: None,
+                                                    },
+                                                );
+                                                // Keep only last 200 trades
+                                                if trades.len() > 200 {
+                                                    trades.truncate(200);
+                                                }
+                                            }
+
+                                            trades_map
+                                                .lock()
+                                                .await
+                                                .insert(mint.clone(), buy_record);
+                                            holdings_guard.insert(mint.clone(), holding);
+
+                                            // Keep the subscription active for this mint
+                                            keep_sub = true;
+                                            // Persist the mapping of mint -> (wss_idx, sub_id)
+                                            let mut map = sub_map.lock().await;
+                                            map.insert(mint.clone(), (idx, sub_id));
+                                        }
+                                        Err(e) => {
+                                            log::warn!("Failed to buy {}: {}", mint, e);
+                                            bot_log!(
+                                                "warn",
+                                                format!("Failed to buy token {}", mint),
+                                                format!("{}", e)
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Collect some diagnostic info so operator can manually
+                                    // inspect the bonding-curve PDA in a Solana explorer.
+                                    let cached_price = price_cache
+                                        .lock()
+                                        .await
+                                        .get(&mint)
+                                        .map(|(_, p)| format!("{:.18}", p))
+                                        .unwrap_or_else(|| "none".to_string());
+
+                                    log::warn!(
+                                    "No WSS price update received for {} within {}s; skipping buy. details: mint={} curve_pda={} holder_addr={} sub_id={} pump_fun_program={} cached_price_sol={}. Paste the curve_pda into a Solana explorer to inspect account data and reserves.",
+                                    mint,
+                                    settings.wss_subscribe_timeout_secs,
+                                    mint,
+                                    curve_pda,
+                                    holder_addr,
+                                    sub_id,
+                                    settings.pump_fun_program,
+                                    cached_price
+                                );
+                                }
+                                // Unsubscribe to minimize active subscriptions if we did
+                                // not keep the subscription (e.g., we skipped buy or buy failed).
+                                if !keep_sub {
+                                    let (u_tx, u_rx) = oneshot::channel::<Result<(), String>>();
+                                    let _ = sender
+                                        .send(WsRequest::Unsubscribe { sub_id, resp: u_tx })
+                                        .await;
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(3),
+                                        u_rx,
+                                    )
+                                    .await;
+                                }
+                            }
+                            Ok(Ok(Err(err_msg))) => {
+                                if err_msg.contains("max subscriptions") {
+                                    debug!(
+                                        "Subscribe rejected for {} (WSS idx={} full)",
+                                        mint, idx
+                                    );
+                                } else if err_msg.contains("degraded") {
+                                    debug!("WSS idx={} degraded, skipped {}", idx, mint);
+                                } else {
+                                    log::warn!(
+                                        "Subscribe request rejected for {}: {}",
+                                        mint,
+                                        err_msg
+                                    );
+                                }
+                            }
+                            Ok(Err(_)) => log::warn!(
+                                "Subscribe channel closed for {} (WSS idx={})",
+                                mint,
+                                idx
+                            ),
+                            Err(_) => {
+                                warn!("Subscribe timed out for {} (WSS idx={}, 5s)", mint, idx)
+                            }
+                        }
+                    }
+                } else {
+                    debug!("No healthy WSS available for {} (all degraded/full)", mint);
+                }
+            }
         } else {
             // No on-chain metadata to validate or price-seller checks; skip buy logic
             debug!("No on-chain metadata to validate buy for mint {} (sig={}) — detected only", mint, signature);

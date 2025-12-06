@@ -35,7 +35,7 @@ fn get_bonding_curve_pda(mint: &str, program_id: &str) -> Option<String> {
 
 pub async fn start_shyft_monitor(
     settings: Arc<Settings>,
-    holdings: Arc<Mutex<HashMap<String, Holding>>>,
+    _holdings: Arc<Mutex<HashMap<String, Holding>>>,
     price_cache: Arc<Mutex<PriceCache>>,
     tx: mpsc::Sender<ShyftMonitorMessage>,
     mut control_rx: mpsc::Receiver<ShyftControlMessage>,
@@ -107,7 +107,7 @@ pub async fn start_shyft_monitor(
                                             if id == "new_tokens" {
                                                 if let Ok(resp) = serde_json::from_value::<GraphQLResponse<NewTokenSubscriptionResponse>>(payload.clone()) {
                                                     if let Some(data) = resp.data {
-                                                        for tx_data in data.Transaction {
+                                                        for tx_data in data.transaction {
                                                             let _ = tx.send(ShyftMonitorMessage::NewToken(tx_data)).await;
                                                         }
                                                     }
@@ -116,7 +116,7 @@ pub async fn start_shyft_monitor(
                                                 // Handle price update
                                                 if let Ok(resp) = serde_json::from_value::<GraphQLResponse<AccountSubscriptionResponse>>(payload.clone()) {
                                                     if let Some(data) = resp.data {
-                                                        for acc in data.Account {
+                                                        for acc in data.account {
                                                             let mint = id.strip_prefix("price_").unwrap_or("");
                                                             if !mint.is_empty() {
                                                                 if let Ok(bytes) = Base64Engine.decode(&acc.data) {

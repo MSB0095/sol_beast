@@ -18,3 +18,4 @@ deployment-test-*.png
 deployment-test-*.json
 bot-test-*.png
 bot-functionality-report.json
+node_modules

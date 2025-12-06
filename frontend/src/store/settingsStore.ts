@@ -1,6 +1,11 @@
 import { create } from 'zustand'
 import { botService } from '../services/botService'
 
+// Optional environment overrides for Shyft
+const env = (import.meta as any)?.env || {}
+const envShyftApiKey = env.VITE_SHYFT_API_KEY as string | undefined
+const envShyftGraphqlUrl = env.VITE_SHYFT_GRAPHQL_URL as string | undefined
+
 export interface Settings {
   // RPC & WebSocket
   solana_ws_urls: string[]
@@ -124,8 +129,8 @@ const defaultSettings: Settings = {
   helius_confirm_timeout_secs: 1,
   dev_tip_percent: 2.0,
   dev_tip_fixed_sol: 0.0,
-  shyft_api_key: undefined,
-  shyft_graphql_url: 'https://programs.shyft.to/v0/graphql',
+  shyft_api_key: envShyftApiKey,
+  shyft_graphql_url: envShyftGraphqlUrl || 'https://programs.shyft.to/v0/graphql/?network=mainnet-beta',
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({

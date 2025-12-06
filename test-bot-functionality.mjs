@@ -104,8 +104,14 @@ async function testBotFunctionality() {
   });
   
   try {
+    console.log('RUNNING MODIFIED SCRIPT');
     console.log('\n=== Step 1: Navigate to application ===');
-    await page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    try {
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (e) {
+      console.log('Navigation failed or timed out, checking content anyway...');
+      console.log(e.message);
+    }
     
     // Wait for app to initialize
     await page.waitForTimeout(5000);

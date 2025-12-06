@@ -25,7 +25,7 @@ fn increment_counter(counter: &Arc<Mutex<u64>>) -> u64 {
 
 // Logging frequency constants
 const STATUS_LOG_FREQUENCY: u64 = 50;  // Log status every N messages
-const FILTERED_LOG_FREQUENCY: u64 = 100; // Log filtered transactions every N occurrences
+const _FILTERED_LOG_FREQUENCY: u64 = 100; // Log filtered transactions every N occurrences
 
 /// Monitor state that tracks subscriptions and detected coins
 pub struct Monitor {
@@ -78,7 +78,14 @@ impl Monitor {
         );
 
         // Create WebSocket connection
-        let ws = WebSocket::new(ws_url)
+        // Shyft GraphQL subscriptions require the graphql-ws subprotocol; legacy Solana RPC does not
+        let ws_result = if is_shyft {
+            WebSocket::new_with_str(ws_url, "graphql-ws")
+        } else {
+            WebSocket::new(ws_url)
+        };
+
+        let ws = ws_result
             .map_err(|e| {
                 let err_msg = format!(
                     "Failed to create WebSocket connection to '{}': {:?}\n\n\
@@ -105,7 +112,7 @@ impl Monitor {
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
         let pump_fun_program = pump_fun_program.to_string();
-        let seen_sigs = self.seen_signatures.clone();
+        let _seen_sigs = self.seen_signatures.clone();
         let msg_count = self.message_count.clone();
         let pump_msg_count = self.pump_fun_message_count.clone();
         let filtered_count = self.filtered_count.clone();

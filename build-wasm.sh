@@ -15,7 +15,7 @@ fi
 cd "$(dirname "$0")/sol_beast_wasm"
 
 # Set RUSTFLAGS for memory configuration
-export RUSTFLAGS="-C link-arg=--initial-memory=16777216 -C link-arg=--max-memory=33554432"
+export RUSTFLAGS="-C link-arg=--initial-memory=33554432 -C link-arg=--max-memory=134217728"
 
 # Build with wasm-pack
 wasm-pack build --target web --out-dir ../frontend/src/wasm --release -- --features wee_alloc

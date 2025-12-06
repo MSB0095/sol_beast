@@ -497,6 +497,7 @@ pub async fn detect_idl_for_mint(mint: &str, rpc_client: &Arc<RpcClient>, settin
 
 /// Given a list of AccountMeta and known context (mint, user, creator, bonding_curve),
 /// return a list of create_associated_token_account instructions to create missing ATAs.
+#[allow(dead_code)]
 pub async fn build_missing_ata_preinstructions(
     context: &HashMap<String, Pubkey>,
 ) -> Result<Vec<solana_program::instruction::Instruction>, Box<dyn std::error::Error + Send + Sync>> {
@@ -525,6 +526,7 @@ pub async fn build_missing_ata_preinstructions(
 }
 
 /// Fetch bonding curve state for safety checks (liquidity validation)
+#[allow(dead_code)]
 pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, settings: &Arc<Settings>) -> Result<BondingCurveState, Box<dyn std::error::Error + Send + Sync>> {
     let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
     let mint_pubkey = Pubkey::from_str(mint)?;

@@ -1,0 +1,7 @@
+{
+  "name": "sol-beast-root",
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}

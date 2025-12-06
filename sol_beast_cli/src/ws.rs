@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::{mpsc, Mutex, oneshot};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum WsRequest {
     Subscribe {
@@ -30,6 +31,7 @@ pub enum WsRequest {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WsHealth {
     pub active_subs: usize,
@@ -38,6 +40,7 @@ pub struct WsHealth {
     pub is_healthy: bool,
 }
 
+#[allow(dead_code)]
 pub async fn run_ws(
     wss_url: &str,
     tx: mpsc::Sender<String>,

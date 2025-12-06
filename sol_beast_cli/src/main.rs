@@ -50,7 +50,6 @@ macro_rules! bot_log {
 }
 
 use once_cell::sync::Lazy;
-use std::str::FromStr;
 
 // Debounce for repetitive "max held coins" logs so we don't spam the logs.
 static LAST_MAX_HELD_LOG: Lazy<tokio::sync::Mutex<Option<Instant>>> =
@@ -64,9 +63,8 @@ use crate::{
     state::BuyRecord,
 };
 use chrono::Utc;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use lru::LruCache;
-use mpl_token_metadata::accounts::Metadata as OnchainMetadataRaw;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signature::Signer;
@@ -76,6 +74,7 @@ use tokio::time::Duration;
 
 /// Select the healthiest WSS endpoint with available slots.
 /// Returns None if all endpoints are degraded or unavailable.
+#[allow(dead_code)]
 async fn select_healthy_wss(
     ws_control_senders: &Arc<Vec<mpsc::Sender<WsRequest>>>,
     settings: &Settings,
@@ -531,21 +530,19 @@ async fn process_shyft_message(
 
 async fn handle_new_token(
     tx: &sol_beast_core::shyft::ShyftTransaction,
-    holdings: &Arc<Mutex<HashMap<String, Holding>>>,
+    _holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     rpc_client: &Arc<RpcClient>,
-    is_real: bool,
-    keypair: Option<&Keypair>,
-    simulate_keypair: Option<&Keypair>,
-    price_cache: &Arc<Mutex<PriceCache>>,
+    _is_real: bool,
+    _keypair: Option<&Keypair>,
+    _simulate_keypair: Option<&Keypair>,
+    _price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
-    shyft_control_tx: mpsc::Sender<shyft_monitor::ShyftControlMessage>,
+    _shyft_control_tx: mpsc::Sender<shyft_monitor::ShyftControlMessage>,
     detect_time: chrono::DateTime<Utc>,
-    trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
+    _trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
-    trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+    _trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::sync::oneshot;
-    
     // Extract details from ShyftTransaction
     // We look for the instruction that calls pump.fun
     let pump_prog = &settings.pump_fun_program;

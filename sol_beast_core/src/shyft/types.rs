@@ -32,8 +32,9 @@ pub struct ShyftInstruction {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
 pub struct NewTokenSubscriptionResponse {
-    pub Transaction: Vec<ShyftTransaction>,
+    pub transaction: Vec<ShyftTransaction>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -44,6 +45,7 @@ pub struct ShyftAccountUpdate {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
 pub struct AccountSubscriptionResponse {
-    pub Account: Vec<ShyftAccountUpdate>,
+    pub account: Vec<ShyftAccountUpdate>,
 }

@@ -104,7 +104,7 @@ pub struct BotSettings {
     pub shyft_graphql_url: String,
 }
 
-fn default_shyft_graphql_url() -> String { "https://programs.shyft.to/v0/graphql".to_string() }
+fn default_shyft_graphql_url() -> String { "https://programs.shyft.to/v0/graphql/?network=mainnet-beta".to_string() }
 
 impl BotSettings {
     /// Validate that settings contain valid data (no corrupted strings or vectors)
@@ -283,54 +283,12 @@ pub struct DetectedToken {
 impl SolBeastBot {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        // Settings loading hierarchy for WASM deployment:
-        // 1. Try localStorage (user's saved settings from previous session)
-        // 2. Validate loaded settings to ensure they're not corrupted
-        // 3. Fall back to built-in defaults if localStorage is empty or corrupted
-        // Note: The frontend will also try loading from static bot-settings.json
-        // if it detects settings are invalid after bot initialization.
-        let settings = match sol_beast_core::wasm::load_settings::<BotSettings>() {
-            Ok(Some(saved_settings)) => {
-                // Validate the loaded settings to prevent memory access errors
-                if saved_settings.is_valid() {
-                    info!("Loaded valid settings from localStorage");
-                    saved_settings
-                } else {
-                    warn!("Loaded settings from localStorage are invalid, attempting to sanitize");
-                    // Try to sanitize the settings first before falling back to defaults
-                    match saved_settings.sanitize() {
-                        Some(sanitized) if sanitized.is_valid() => {
-                            info!("Successfully sanitized settings from localStorage");
-                            // Save the sanitized settings back to localStorage
-                            if let Err(e) = sol_beast_core::wasm::save_settings(&sanitized) {
-                                error!("Failed to save sanitized settings: {:?}", e);
-                            }
-                            sanitized
-                        }
-                        _ => {
-                            error!("Failed to sanitize settings, clearing and using defaults");
-                            // Clear corrupted data from localStorage
-                            if let Err(e) = sol_beast_core::wasm::storage::clear_all() {
-                                error!("Failed to clear corrupted localStorage: {:?}", e);
-                            }
-                            BotSettings::default()
-                        }
-                    }
-                }
-            },
-            Ok(None) => {
-                info!("No saved settings found, using defaults");
-                BotSettings::default()
-            },
-            Err(e) => {
-                error!("Failed to load settings from localStorage: {:?}, using defaults", e);
-                // Try to clear potentially corrupted data
-                if let Err(clear_err) = sol_beast_core::wasm::storage::clear_all() {
-                    error!("Failed to clear localStorage after error: {:?}", clear_err);
-                }
-                BotSettings::default()
-            }
-        };
+        // LocalStorage has been a source of invalid UTF-8/recursive mutex crashes in WASM; disable persistence for stability.
+        // Always start from defaults and aggressively clear any existing stored data.
+        if let Err(e) = sol_beast_core::wasm::storage::clear_all() {
+            warn!("Failed to clear localStorage on init (continuing with defaults): {:?}", e);
+        }
+        let settings = BotSettings::default();
         
         let state = BotState {
             running: false,
@@ -387,7 +345,25 @@ impl SolBeastBot {
         let shyft_graphql_url = state.settings.shyft_graphql_url.clone();
         
         let (ws_url, is_shyft) = if let Some(key) = shyft_api_key {
-             (format!("{}?api_key={}", shyft_graphql_url.replace("https", "wss").replace("http", "ws"), key), true)
+            // Ensure we include both api_key and network params for Shyft GraphQL subscriptions
+            let mut url = shyft_graphql_url
+                .replace("https", "wss")
+                .replace("http", "ws");
+
+            // Append separators correctly whether or not the base URL already has query params
+            if url.contains('?') {
+                url.push('&');
+            } else {
+                url.push('?');
+            }
+            url.push_str(&format!("api_key={}", key));
+
+            // Default to mainnet-beta when the network is not already specified
+            if !url.contains("network=") {
+                url.push_str("&network=mainnet-beta");
+            }
+
+            (url, true)
         } else {
              (state.settings.solana_ws_urls.first()
                 .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
@@ -623,16 +599,9 @@ impl SolBeastBot {
         
         // Update in-memory state first
         state.settings = settings.clone();
-        drop(state); // Release lock before localStorage operation
+        drop(state); // Release lock before log entry
         
-        // Save to localStorage after successful state update
-        sol_beast_core::wasm::save_settings(&settings)
-            .map_err(|e| {
-                error!("Failed to save settings to localStorage: {:?}", e);
-                JsValue::from_str(&format!("Settings updated but failed to save to localStorage: {:?}", e))
-            })?;
-        
-        // Re-acquire lock to add log entries
+        // Re-acquire lock to add log entries (persistence disabled)
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -697,40 +666,13 @@ impl SolBeastBot {
         
         // Validate settings before serialization to prevent memory access errors
         if !state.settings.is_valid() {
-            error!("Settings validation failed - attempting to sanitize");
-            
-            // Try to sanitize the settings
-            if let Some(sanitized) = state.settings.sanitize() {
-                if sanitized.is_valid() {
-                    info!("Successfully sanitized settings");
-                    state.settings = sanitized;
-                    // Save the sanitized settings to prevent future errors
-                    if let Err(e) = sol_beast_core::wasm::save_settings(&state.settings) {
-                        error!("Failed to save sanitized settings: {:?}", e);
-                    }
-                } else {
-                    error!("Sanitization failed, falling back to defaults");
-                    state.settings = BotSettings::default();
-                }
-            } else {
-                error!("Cannot sanitize settings, using defaults");
-                state.settings = BotSettings::default();
-            }
+            error!("Settings validation failed - resetting to defaults (persistence disabled)");
+            state.settings = BotSettings::default();
         }
         
         // Attempt to serialize the validated/sanitized settings
         match serde_json::to_string(&state.settings) {
-            Ok(json) => {
-                // Ensure we have valid UTF-8 JSON without null bytes
-                if json.is_empty() || json.contains('\0') {
-                    error!("Settings serialized to invalid JSON (empty or contains null bytes), using defaults");
-                    return match serde_json::to_string(&BotSettings::default()) {
-                        Ok(default_json) => Ok(default_json),
-                        Err(e) => Err(JsValue::from_str(&format!("Failed to serialize default settings: {}", e)))
-                    };
-                }
-                Ok(json)
-            },
+            Ok(json) => Ok(json),
             Err(e) => {
                 error!("Failed to serialize settings: {}, falling back to defaults", e);
                 // Return default settings as fallback
@@ -1282,17 +1224,7 @@ impl SolBeastBot {
     /// Save current state to localStorage
     #[wasm_bindgen]
     pub fn save_to_storage(&self) -> Result<(), JsValue> {
-        use sol_beast_core::wasm::save_settings;
-        
-        let state = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                info!("Mutex was poisoned in save_to_storage, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        save_settings(&state.settings)?;
-        
+        // Persistence is disabled in WASM mode to avoid localStorage corruption
         Ok(())
     }
     
@@ -1306,77 +1238,13 @@ impl SolBeastBot {
     /// 5. Handles holdings loading separately with error isolation
     #[wasm_bindgen]
     pub fn load_from_storage(&self) -> Result<(), JsValue> {
-        use sol_beast_core::wasm::load_settings;
-        
-        // Attempt to load settings from localStorage
-        // The load_settings function will automatically clear corrupted data
-        match load_settings::<BotSettings>() {
-            Ok(Some(settings)) => {
-                // Validate the loaded settings before applying them
-                if settings.is_valid() {
-                    let mut state = match self.state.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => {
-                            info!("Mutex was poisoned in load_from_storage, recovering...");
-                            poisoned.into_inner()
-                        }
-                    };
-                    state.settings = settings;
-                    info!("Successfully loaded valid settings from localStorage");
-                } else {
-                    // Try to sanitize the loaded settings
-                    warn!("Loaded settings failed validation, attempting to sanitize");
-                    if let Some(sanitized) = settings.sanitize() {
-                        if sanitized.is_valid() {
-                            let mut state = match self.state.lock() {
-                                Ok(guard) => guard,
-                                Err(poisoned) => {
-                                    info!("Mutex was poisoned in load_from_storage (sanitize), recovering...");
-                                    poisoned.into_inner()
-                                }
-                            };
-                            state.settings = sanitized;
-                            info!("Successfully sanitized and loaded settings");
-                        } else {
-                            warn!("Sanitization produced invalid settings, keeping current settings");
-                        }
-                    } else {
-                        warn!("Cannot sanitize settings, keeping current settings");
-                    }
-                }
-            },
-            Ok(None) => {
-                info!("No settings found in localStorage");
-            },
-            Err(e) => {
-                // The load_settings function already handled the error and cleared corrupted data
-                warn!("Error loading settings from localStorage: {:?}", e);
-            }
-        }
-        
-        // Also load holdings from localStorage (isolated error handling)
-        if let Err(e) = self.load_holdings_from_storage() {
-            warn!("Failed to load holdings from localStorage: {:?}", e);
-            // Continue - this is not a critical error
-        }
-        
+        // Persistence is disabled in WASM mode to avoid localStorage corruption
         Ok(())
     }
     
     /// Helper: Save holdings to localStorage
-    fn save_holdings_to_storage(&self, holdings: &[HoldingWithMint]) -> Result<(), JsValue> {
-        let json = serde_json::to_string(holdings)
-            .map_err(|e| JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))?;
-        
-        let window = web_sys::window()
-            .ok_or_else(|| JsValue::from_str("No window object"))?;
-        let storage = window.local_storage()
-            .map_err(|e| JsValue::from_str(&format!("Failed to access localStorage: {:?}", e)))?
-            .ok_or_else(|| JsValue::from_str("localStorage not available"))?;
-        
-        storage.set_item("sol_beast_holdings", &json)
-            .map_err(|e| JsValue::from_str(&format!("Failed to save to localStorage: {:?}", e)))?;
-        
+    fn save_holdings_to_storage(&self, _holdings: &[HoldingWithMint]) -> Result<(), JsValue> {
+        // Persistence is disabled in WASM mode to avoid localStorage corruption
         Ok(())
     }
     
@@ -1386,47 +1254,9 @@ impl SolBeastBot {
     /// 1. Validates JSON string before deserialization
     /// 2. Catches deserialization errors and clears corrupted data
     /// 3. Continues with empty holdings if data is corrupted
+    #[allow(dead_code)]
     fn load_holdings_from_storage(&self) -> Result<(), JsValue> {
-        let window = web_sys::window()
-            .ok_or_else(|| JsValue::from_str("No window object"))?;
-        let storage = window.local_storage()
-            .map_err(|e| JsValue::from_str(&format!("Failed to access localStorage: {:?}", e)))?
-            .ok_or_else(|| JsValue::from_str("localStorage not available"))?;
-        
-        if let Some(json) = storage.get_item("sol_beast_holdings")
-            .map_err(|e| JsValue::from_str(&format!("Failed to read from localStorage: {:?}", e)))? {
-            
-            // Validate JSON string before attempting deserialization
-            if json.is_empty() || json.contains('\0') {
-                error!("Corrupted holdings data detected (empty or contains null bytes), clearing...");
-                let _ = storage.remove_item("sol_beast_holdings");
-                return Ok(());
-            }
-            
-            // Attempt to parse holdings with error recovery
-            match serde_json::from_str::<Vec<HoldingWithMint>>(&json) {
-                Ok(holdings) => {
-                    let mut state = match self.state.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => {
-                            info!("Mutex was poisoned in load_holdings_from_storage, recovering...");
-                            poisoned.into_inner()
-                        }
-                    };
-                    
-                    state.holdings = holdings;
-                    info!("Loaded {} holdings from localStorage", state.holdings.len());
-                },
-                Err(e) => {
-                    error!("Failed to parse holdings from localStorage: {}", e);
-                    // Clear corrupted holdings data
-                    let _ = storage.remove_item("sol_beast_holdings");
-                    info!("Cleared corrupted holdings data");
-                    // Continue with empty holdings
-                }
-            }
-        }
-        
+        // Persistence is disabled in WASM mode to avoid localStorage corruption
         Ok(())
     }
 }

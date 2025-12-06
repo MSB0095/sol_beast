@@ -16,7 +16,7 @@ The Sol Beast repository uses GitHub Actions for continuous integration and depl
 - [Helius](https://helius.dev/) - Recommended for production
 - [QuickNode](https://www.quicknode.com/) - Reliable with good CORS support
 - [Alchemy](https://www.alchemy.com/) - Enterprise-grade infrastructure
-- Public RPC: `https://api.mainnet-beta.solana.com` (rate-limited, for testing only)
+- Public RPC: `https://api.mainnet-beta.solana.com` (rate-limited, **no CORS for browser**, testing only)
 
 **Used in**:
 - CI workflow for bot functionality tests

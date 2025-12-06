@@ -3,7 +3,6 @@ import {
   API_HEALTH_URL,
   API_BOT_STATE_URL,
   API_STATS_URL,
-  API_LOGS_URL,
 } from '../config'
 import { API_DETECTED_COINS_URL } from '../config'
 import { botService } from '../services/botService'
@@ -249,12 +248,13 @@ export const useBotStore = create<BotStore>((set, get) => ({
           // Poll logs
           const pollLogs = async () => {
             try {
-              const res = await fetch(API_LOGS_URL)
-              if (res.ok) {
-                const logsData = await res.json()
-                if (logsData.logs && Array.isArray(logsData.logs)) {
-                  set({ logs: logsData.logs })
-                }
+              // Use botService which handles both WASM and REST API modes
+              const logs = await botService.getLogs()
+              if (logs && Array.isArray(logs)) {
+                set({ logs: logs })
+              } else if (logs && logs.logs && Array.isArray(logs.logs)) {
+                // Handle REST API format with logs wrapper
+                set({ logs: logs.logs })
               }
             } catch (err) {
               console.error('Failed to fetch logs:', err)

@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+wee_alloc = ["dep:wee_alloc"]
+
 [dependencies]
 sol_beast_core = { path = "../sol_beast_core", default-features = false, features = ["wasm"] }
 
@@ -41,6 +45,7 @@ base64 = { workspace = true }
 
 # Additional WASM-specific dependencies
 serde-wasm-bindgen = "0.6"
+wee_alloc = { version = "0.4", optional = true }
 
 # Explicitly add getrandom 0.3 with wasm_js feature for ahash and other deps
 [dependencies.getrandom_v03]
@@ -51,5 +56,10 @@ features = ["wasm_js"]
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true
+codegen-units = 1
+
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
+wasm-opt = ["-Oz", "--enable-bulk-memory", "--enable-mutable-globals", "--enable-nontrapping-float-to-int"]

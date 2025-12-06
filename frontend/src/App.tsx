@@ -27,17 +27,38 @@ function App() {
   useEffect(() => {
     const checkRPCConfig = async () => {
       const wasmMode = isWasmMode(botService)
+      console.log('App: Checking WASM mode:', wasmMode)
       
       if (wasmMode) {
-        const hasConfig = hasValidRPCConfig()
+        // Initialize WASM first to check for default settings
+        try {
+          await botService.init()
+        } catch (err) {
+          console.warn('Failed to initialize bot service:', err)
+        }
+
+        const hasLocalConfig = hasValidRPCConfig()
+        let hasDefaultConfig = false
+        
+        try {
+          const settings = await botService.getSettings()
+          hasDefaultConfig = (
+            Array.isArray(settings.solana_rpc_urls) && settings.solana_rpc_urls.length > 0 &&
+            Array.isArray(settings.solana_ws_urls) && settings.solana_ws_urls.length > 0
+          )
+        } catch (err) {
+          console.warn('Failed to check default settings:', err)
+        }
+
+        // Show modal if no config exists anywhere
+        const hasConfig = hasLocalConfig || hasDefaultConfig
         setShowRPCModal(!hasConfig)
         
-        // If config exists, apply it to bot settings
-        if (hasConfig) {
+        // If local config exists, apply it to bot settings (overriding defaults)
+        if (hasLocalConfig) {
           const config = getStoredRPCConfig()
           if (config) {
             try {
-              await botService.init() // Initialize WASM first
               const settings = await botService.getSettings()
               // Create a new settings object to avoid mutation
               const updatedSettings = {

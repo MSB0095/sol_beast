@@ -5,8 +5,6 @@ echo "=== Sol Beast GitHub Pages Deployment Test ==="
 echo ""
 
 # Check for RPC URL environment variables
-SOLANA_RPC_URL="${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}"
-SOLANA_WS_URL="${SOLANA_WS_URL:-wss://api.mainnet-beta.solana.com}"
 
 echo "Using RPC URLs:"
 echo "  HTTPS: $SOLANA_RPC_URL"
@@ -62,8 +60,9 @@ cat public/bot-settings.json
 
 # Step 5: Build frontend with webpack
 echo ""
-echo "Step 5: Building frontend with webpack (production mode)..."
-NODE_ENV=production VITE_USE_WASM=true npm run build:frontend-webpack
+echo "Step 5: Building frontend with webpack (production mode, BASE_PATH=/ for local test)..."
+# Use BASE_PATH=/ for local server so assets resolve at /assets/
+BASE_PATH=/ NODE_ENV=production VITE_USE_WASM=true npm run build:frontend-webpack
 
 # Step 6: Copy documentation to dist
 echo ""

@@ -115,6 +115,7 @@ const defaultSettings: Settings = {
   bonding_curve_strict: false,
   bonding_curve_log_debounce_secs: 300,
   helius_sender_enabled: true,
+  helius_api_key: undefined,
   helius_sender_endpoint: 'https://sender.helius-rpc.com/fast',
   helius_min_tip_sol: 0.00001,
   helius_priority_fee_multiplier: 1.2,

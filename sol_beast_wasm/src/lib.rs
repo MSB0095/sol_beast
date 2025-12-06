@@ -174,6 +174,8 @@ impl BotSettings {
             dev_wallet_address: None,
             dev_tip_percent: self.dev_tip_percent,
             dev_tip_fixed_sol: self.dev_tip_fixed_sol,
+            shyft_api_key: self.shyft_api_key.clone(),
+            shyft_graphql_url: self.shyft_graphql_url.clone(),
         }
     }
 }
@@ -1424,6 +1426,8 @@ impl Default for BotSettings {
             dev_tip_percent: 2.0,
             dev_tip_fixed_sol: 0.0,
             enable_safer_sniping: false,
+            shyft_api_key: None,
+            shyft_graphql_url: default_shyft_graphql_url(),
         }
     }
 }

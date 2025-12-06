@@ -83,6 +83,35 @@ This architecture ensures:
 
 ---
 
+## 🔄 CI/CD & Automated Testing
+
+**Mobile-First Development**: Complete automated testing environment managed from your phone!
+
+### Quick Setup (5 minutes)
+Configure three repository secrets and get automatic testing on every push:
+- `SOLANA_RPC_URL` - Solana RPC endpoint
+- `SOLANA_WS_URL` - WebSocket endpoint  
+- `SHYFT_API_KEY` - Shyft GraphQL API key (optional but recommended)
+
+**📱 [Quick Start Guide](./QUICK_START_CI.md)** - Get started in 5 minutes from mobile
+
+### Available Workflows
+- **Comprehensive CI** - Automatic testing on push/PR (Rust tests, WASM build, Playwright UI tests, bot tests)
+- **Deploy to GitHub Pages** - Automatic deployment to production
+- **Test Deployment** - Manual validation before deployment
+
+**📚 Detailed Documentation**:
+- [GitHub Secrets Setup Guide](./GITHUB_SECRETS_SETUP.md) - Complete configuration instructions
+- [Workflows README](./.github/workflows/README.md) - Understanding workflows and artifacts
+
+### Benefits
+✅ No local machine needed - runs in GitHub Actions  
+✅ View test results from mobile - screenshots, logs, reports  
+✅ Automatic testing - catches bugs before deployment  
+✅ Free tier available - generous GitHub Actions limits
+
+---
+
 ## Quick Start
 
 ### Option 1: WASM Mode (Browser Only)

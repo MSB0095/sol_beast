@@ -67,7 +67,9 @@ jobs:
             "min_liquidity_sol": 0.0,
             "max_liquidity_sol": 15.0,
             "dev_tip_percent": 2.0,
-            "dev_tip_fixed_sol": 0.0
+            "dev_tip_fixed_sol": 0.0,
+            "shyft_api_key": "${{ secrets.SHYFT_API_KEY || '' }}",
+            "shyft_graphql_url": "https://programs.shyft.to/v0/graphql"
           }
           EOF
           cat bot-settings.json

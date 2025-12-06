@@ -17,10 +17,12 @@
 | `SOLANA_WS_URL` | WebSocket endpoint | Same provider as RPC URL |
 | `SHYFT_API_KEY` | Shyft GraphQL API key | [Shyft.to](https://shyft.to) (optional but recommended) |
 
-**Example values**:
-- `SOLANA_RPC_URL`: `https://mainnet.helius-rpc.com/?api-key=your-key`
-- `SOLANA_WS_URL`: `wss://mainnet.helius-rpc.com/?api-key=your-key`
-- `SHYFT_API_KEY`: `shyft_api_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`
+**Example formats** (replace with your actual values):
+- `SOLANA_RPC_URL`: `https://your-provider.com` (include API key if required by provider)
+- `SOLANA_WS_URL`: `wss://your-provider.com` (matching WebSocket endpoint)
+- `SHYFT_API_KEY`: `shyft_api_xxx...` (your actual Shyft API key)
+
+⚠️ **Important**: Never share your actual API keys publicly!
 
 ### Step 2: Test Your Setup
 

@@ -109,13 +109,17 @@ curl -X POST YOUR_RPC_URL \
 
 **Validate workflow syntax**:
 ```bash
-# In repository root (requires Python 3 with PyYAML installed)
+# Option 1: Use Python locally (requires Python 3 with PyYAML installed)
 python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
 # Should print nothing if valid
 
-# If Python/PyYAML not available, use online YAML validator:
-# https://www.yamllint.com/
+# Option 2: Use yamllint tool locally (install with: pip install yamllint)
+yamllint .github/workflows/ci.yml
+
+# Option 3: Let GitHub validate (push and check for syntax errors in Actions tab)
 ```
+
+⚠️ **Security Note**: Avoid uploading workflow files to online validators as they may contain sensitive configuration details.
 
 **Check Actions are enabled**:
 1. Go to repository Settings

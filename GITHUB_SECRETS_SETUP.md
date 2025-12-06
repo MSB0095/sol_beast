@@ -80,15 +80,23 @@ The Sol Beast repository uses GitHub Actions for continuous integration and depl
 If you have GitHub CLI installed:
 
 ```bash
-# Set SOLANA_RPC_URL
-gh secret set SOLANA_RPC_URL --body "https://your-rpc-url.com"
+# RECOMMENDED: Use interactive prompt (keeps secrets out of shell history)
+gh secret set SOLANA_RPC_URL
+# Then paste your URL when prompted
 
-# Set SOLANA_WS_URL
-gh secret set SOLANA_WS_URL --body "wss://your-ws-url.com"
+gh secret set SOLANA_WS_URL
+# Then paste your URL when prompted
 
-# Set SHYFT_API_KEY
-gh secret set SHYFT_API_KEY --body "shyft_api_your_key_here"
+gh secret set SHYFT_API_KEY
+# Then paste your API key when prompted
+
+# Alternative: Read from file (keeps secrets out of shell history)
+# echo "https://your-rpc-url" > /tmp/rpc_url.txt
+# gh secret set SOLANA_RPC_URL < /tmp/rpc_url.txt
+# rm /tmp/rpc_url.txt
 ```
+
+⚠️ **Security Note**: Avoid using `--body` flag with secrets as it exposes them in shell history!
 
 ## Secret Usage in Workflows
 

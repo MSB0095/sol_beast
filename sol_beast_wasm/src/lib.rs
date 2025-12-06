@@ -128,6 +128,71 @@ impl BotSettings {
         true
     }
     
+    /// Sanitize settings by removing empty URLs and invalid data
+    /// Returns a new BotSettings with cleaned data, or None if settings cannot be repaired
+    fn sanitize(&self) -> Option<Self> {
+        // Filter out empty URLs and URLs containing null bytes
+        let clean_ws_urls: Vec<String> = self.solana_ws_urls
+            .iter()
+            .filter(|url| !url.is_empty() && !url.contains('\0'))
+            .cloned()
+            .collect();
+        
+        let clean_rpc_urls: Vec<String> = self.solana_rpc_urls
+            .iter()
+            .filter(|url| !url.is_empty() && !url.contains('\0'))
+            .cloned()
+            .collect();
+        
+        // If we have no valid URLs after filtering, use defaults
+        let ws_urls = if clean_ws_urls.is_empty() {
+            vec!["wss://api.mainnet-beta.solana.com".to_string()]
+        } else {
+            clean_ws_urls
+        };
+        
+        let rpc_urls = if clean_rpc_urls.is_empty() {
+            vec!["https://api.mainnet-beta.solana.com".to_string()]
+        } else {
+            clean_rpc_urls
+        };
+        
+        // Check program IDs
+        let pump_fun_program = if self.pump_fun_program.is_empty() || self.pump_fun_program.contains('\0') {
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".to_string()
+        } else {
+            self.pump_fun_program.clone()
+        };
+        
+        let metadata_program = if self.metadata_program.is_empty() || self.metadata_program.contains('\0') {
+            "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s".to_string()
+        } else {
+            self.metadata_program.clone()
+        };
+        
+        Some(Self {
+            solana_ws_urls: ws_urls,
+            solana_rpc_urls: rpc_urls,
+            pump_fun_program,
+            metadata_program,
+            tp_percent: self.tp_percent,
+            sl_percent: self.sl_percent,
+            timeout_secs: self.timeout_secs,
+            buy_amount: self.buy_amount,
+            max_holded_coins: self.max_holded_coins,
+            slippage_bps: self.slippage_bps,
+            min_tokens_threshold: self.min_tokens_threshold,
+            max_sol_per_token: self.max_sol_per_token,
+            min_liquidity_sol: self.min_liquidity_sol,
+            max_liquidity_sol: self.max_liquidity_sol,
+            dev_tip_percent: self.dev_tip_percent,
+            dev_tip_fixed_sol: self.dev_tip_fixed_sol,
+            enable_safer_sniping: self.enable_safer_sniping,
+            shyft_api_key: self.shyft_api_key.clone(),
+            shyft_graphql_url: self.shyft_graphql_url.clone(),
+        })
+    }
+    
     /// Convert BotSettings to core Settings
     pub fn to_core_settings(&self) -> sol_beast_core::settings::Settings {
         sol_beast_core::settings::Settings {
@@ -228,12 +293,26 @@ impl SolBeastBot {
                     info!("Loaded valid settings from localStorage");
                     saved_settings
                 } else {
-                    error!("Loaded settings from localStorage are corrupted, clearing and using defaults");
-                    // Clear corrupted data from localStorage
-                    if let Err(e) = sol_beast_core::wasm::storage::clear_all() {
-                        error!("Failed to clear corrupted localStorage: {:?}", e);
+                    warn!("Loaded settings from localStorage are invalid, attempting to sanitize");
+                    // Try to sanitize the settings first before falling back to defaults
+                    match saved_settings.sanitize() {
+                        Some(sanitized) if sanitized.is_valid() => {
+                            info!("Successfully sanitized settings from localStorage");
+                            // Save the sanitized settings back to localStorage
+                            if let Err(e) = sol_beast_core::wasm::save_settings(&sanitized) {
+                                error!("Failed to save sanitized settings: {:?}", e);
+                            }
+                            sanitized
+                        }
+                        _ => {
+                            error!("Failed to sanitize settings, clearing and using defaults");
+                            // Clear corrupted data from localStorage
+                            if let Err(e) = sol_beast_core::wasm::storage::clear_all() {
+                                error!("Failed to clear corrupted localStorage: {:?}", e);
+                            }
+                            BotSettings::default()
+                        }
                     }
-                    BotSettings::default()
                 }
             },
             Ok(None) => {
@@ -475,12 +554,20 @@ impl SolBeastBot {
     #[wasm_bindgen]
     pub fn update_settings(&self, settings_json: &str) -> Result<(), JsValue> {
         // Parse settings first (outside any lock)
-        let settings: BotSettings = serde_json::from_str(settings_json)
+        let mut settings: BotSettings = serde_json::from_str(settings_json)
             .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
         
-        // Validate parsed settings before updating
+        // Validate and sanitize parsed settings before updating
         if !settings.is_valid() {
-            return Err(JsValue::from_str("Invalid settings: missing or corrupted required fields"));
+            warn!("Received invalid settings, attempting to sanitize");
+            settings = settings.sanitize()
+                .ok_or_else(|| JsValue::from_str("Invalid settings: missing or corrupted required fields"))?;
+            
+            // Verify sanitized settings are valid
+            if !settings.is_valid() {
+                return Err(JsValue::from_str("Settings could not be repaired: missing or corrupted required fields"));
+            }
+            info!("Successfully sanitized and validated settings");
         }
         
         // Acquire lock once and hold it to prevent race conditions
@@ -1604,5 +1691,69 @@ mod tests {
             "https://api.secondary.solana.com/".to_string(),
         ];
         assert!(settings.is_valid(), "Settings with multiple valid URLs should be valid");
+    }
+
+    #[test]
+    fn test_sanitize_empty_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec!["".to_string()];
+        settings.solana_rpc_urls = vec!["".to_string()];
+        
+        assert!(!settings.is_valid(), "Settings with empty URLs should be invalid");
+        
+        let sanitized = settings.sanitize().expect("Sanitize should succeed");
+        assert!(sanitized.is_valid(), "Sanitized settings should be valid");
+        assert_eq!(sanitized.solana_ws_urls, vec!["wss://api.mainnet-beta.solana.com"]);
+        assert_eq!(sanitized.solana_rpc_urls, vec!["https://api.mainnet-beta.solana.com"]);
+    }
+
+    #[test]
+    fn test_sanitize_mixed_urls() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec![
+            "wss://valid.url.com".to_string(),
+            "".to_string(),
+            "wss://another.valid.url".to_string(),
+        ];
+        settings.solana_rpc_urls = vec![
+            "".to_string(),
+            "https://valid.rpc.com".to_string(),
+        ];
+        
+        assert!(!settings.is_valid(), "Settings with mixed valid/invalid URLs should be invalid");
+        
+        let sanitized = settings.sanitize().expect("Sanitize should succeed");
+        assert!(sanitized.is_valid(), "Sanitized settings should be valid");
+        assert_eq!(sanitized.solana_ws_urls.len(), 2, "Should have 2 valid WS URLs");
+        assert_eq!(sanitized.solana_rpc_urls.len(), 1, "Should have 1 valid RPC URL");
+    }
+
+    #[test]
+    fn test_sanitize_null_bytes() {
+        let mut settings = BotSettings::default();
+        settings.solana_ws_urls = vec!["wss://test\0corrupted".to_string()];
+        settings.pump_fun_program = "test\0corrupted".to_string();
+        
+        assert!(!settings.is_valid(), "Settings with null bytes should be invalid");
+        
+        let sanitized = settings.sanitize().expect("Sanitize should succeed");
+        assert!(sanitized.is_valid(), "Sanitized settings should be valid");
+        // Corrupted URLs get filtered out, so default is used
+        assert_eq!(sanitized.solana_ws_urls, vec!["wss://api.mainnet-beta.solana.com"]);
+        // Corrupted program ID gets replaced with default
+        assert_eq!(sanitized.pump_fun_program, "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+    }
+
+    #[test]
+    fn test_sanitize_preserves_valid_settings() {
+        let settings = BotSettings::default();
+        
+        assert!(settings.is_valid(), "Default settings should be valid");
+        
+        let sanitized = settings.sanitize().expect("Sanitize should succeed");
+        assert!(sanitized.is_valid(), "Sanitized default settings should be valid");
+        assert_eq!(sanitized.solana_ws_urls, settings.solana_ws_urls);
+        assert_eq!(sanitized.solana_rpc_urls, settings.solana_rpc_urls);
+        assert_eq!(sanitized.pump_fun_program, settings.pump_fun_program);
     }
 }

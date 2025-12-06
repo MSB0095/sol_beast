@@ -66,6 +66,7 @@ impl Monitor {
         pump_fun_program: &str,
         log_callback: Arc<dyn Fn(String, String, String)>,
         signature_callback: Option<Arc<dyn Fn(String)>>,
+        is_shyft: bool,
     ) -> Result<(), JsValue> {
         info!("Starting WASM monitor for pump.fun program: {}", pump_fun_program);
         
@@ -73,7 +74,7 @@ impl Monitor {
         log_callback(
             "info".to_string(),
             "Initializing monitor".to_string(),
-            format!("Connecting to WebSocket: {}\nTarget program: {}", ws_url, pump_fun_program)
+            format!("Connecting to WebSocket: {}\nTarget program: {}\nMode: {}", ws_url, pump_fun_program, if is_shyft { "Shyft GraphQL" } else { "Legacy RPC" })
         );
 
         // Create WebSocket connection
@@ -124,38 +125,49 @@ impl Monitor {
                 "Preparing to subscribe to program logs".to_string()
             );
             
-            // CREATIVE SOLUTION: Dual subscription approach for WebSocket-level filtering!
-            // 
-            // Strategy: Instead of subscribing to all pump.fun transactions, we subscribe to
-            // specific accounts that are ONLY touched during token creation:
-            // 
-            // 1. Token Program with filters for NEW mint creation (dataSize 82 bytes)
-            // 2. Pump.fun program logs as fallback
-            //
-            // When a new token is created:
-            // - Token Program creates a NEW mint account (we get accountNotification)
-            // - We extract the mint address from the notification
-            // - We then query for recent signatures involving that mint + pump.fun program
-            // - This gives us only CREATE transactions at the WebSocket level!
-            //
-            // However, there's a technical limitation: accountNotification doesn't include
-            // transaction signatures. We'd need to poll RPC for recent transactions.
-            //
-            // Given this limitation, the OPTIMAL solution remains:
-            // - Use logsSubscribe for real-time signature delivery
-            // - Filter for CREATE instruction immediately upon receipt (microseconds)
-            // - Skip all Buy/Sell before any expensive RPC calls
-            //
-            // This achieves 95%+ of the benefit of true WebSocket-level filtering.
-            let subscribe_msg = serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "logsSubscribe",
-                "params": [
-                    { "mentions": [ &pump_prog_for_sub ] },
-                    { "commitment": "confirmed" }
-                ]
-            });
+            let subscribe_msg = if is_shyft {
+                // Send connection_init first
+                let init_msg = serde_json::json!({ "type": "connection_init", "payload": {} }).to_string();
+                ws_for_open.send_with_str(&init_msg).ok();
+
+                let query = format!(r#"
+                    subscription {{
+                        Transaction(
+                            where: {{
+                                instructions: {{
+                                    programId: {{ _eq: "{}" }}
+                                }}
+                            }}
+                        ) {{
+                            signature
+                            instructions {{
+                                programId
+                                data
+                                accounts
+                            }}
+                        }}
+                    }}
+                "#, pump_prog_for_sub);
+
+                serde_json::json!({
+                    "id": "1",
+                    "type": "start",
+                    "payload": {
+                        "query": query,
+                        "variables": {}
+                    }
+                })
+            } else {
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "logsSubscribe",
+                    "params": [
+                        { "mentions": [ &pump_prog_for_sub ] },
+                        { "commitment": "confirmed" }
+                    ]
+                })
+            };
 
             if let Ok(msg_str) = serde_json::to_string(&subscribe_msg) {
                 info!("Sending subscription request: {}", msg_str);
@@ -167,12 +179,12 @@ impl Monitor {
                         format!("Error: {:?}", e)
                     );
                 } else {
-                    info!("Successfully sent logsSubscribe request");
+                    info!("Successfully sent subscription request");
                     // Log to UI
                     log_cb_for_open(
                         "info".to_string(),
                         "Subscription request sent".to_string(),
-                        format!("Waiting for confirmation from Solana node\nMonitoring program: {}", pump_prog_for_sub)
+                        format!("Waiting for confirmation from node\nMonitoring program: {}", pump_prog_for_sub)
                     );
                 }
             } else {
@@ -251,53 +263,81 @@ impl Monitor {
                 // Parse the message
                 match serde_json::from_str::<Value>(&message) {
                     Ok(value) => {
-                        // Check if this is a subscription confirmation
-                        if let Some(result) = value.get("result") {
-                            if let Some(sub_id) = result.as_u64() {
-                                info!("✓ Subscription confirmed with ID: {}", sub_id);
-                                log_cb_for_msg(
-                                    "info".to_string(),
-                                    "✓ Subscription confirmed".to_string(),
-                                    format!("Subscription ID: {}\nNow actively monitoring for pump.fun transactions", sub_id)
-                                );
-                                return;
-                            } else {
-                                info!("Received result that is not a u64: {:?}", result);
-                            }
-                        }
-
-                        // Check if this is a log notification
-                        if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
-                            if method == "logsNotification" {
-                                // Increment pump.fun message count
-                                let pump_count = {
-                                    match pump_msg_count_for_handler.lock() {
-                                        Ok(mut count) => {
-                                            *count += 1;
-                                            *count
-                                        },
-                                        Err(e) => {
-                                            error!("Failed to lock pump message count: {:?}", e);
-                                            return;
+                        if is_shyft {
+                            // Handle Shyft GraphQL response
+                            let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if msg_type == "data" {
+                                if let Some(payload) = value.get("payload") {
+                                    if let Some(data) = payload.get("data") {
+                                        if let Some(transactions) = data.get("Transaction").and_then(|t| t.as_array()) {
+                                            for tx in transactions {
+                                                if let Some(sig) = tx.get("signature").and_then(|s| s.as_str()) {
+                                                    // Increment pump count
+                                                    increment_counter(&pump_msg_count_for_handler);
+                                                    
+                                                    // Call signature callback
+                                                    if let Some(cb) = &sig_callback {
+                                                        cb(sig.to_string());
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
-                                };
-                                
-                                info!("Received logsNotification #{}", pump_count);
-                                
-                                if let Some(params) = value
-                                    .get("params")
-                                    .and_then(|p| p.get("result"))
-                                    .and_then(|r| r.get("value"))
-                                {
-                                    // Extract logs and signature
-                                    let logs = params.get("logs").and_then(|l| l.as_array());
-                                    let signature = params.get("signature").and_then(|s| s.as_str());
-                                    let err = params.get("err");
+                                }
+                            } else if msg_type == "connection_ack" {
+                                info!("Shyft connection acknowledged");
+                            }
+                        } else {
+                            // Legacy handling
+                            // Check if this is a subscription confirmation
+                            if let Some(result) = value.get("result") {
+                                if let Some(sub_id) = result.as_u64() {
+                                    info!("✓ Subscription confirmed with ID: {}", sub_id);
+                                    log_cb_for_msg(
+                                        "info".to_string(),
+                                        "✓ Subscription confirmed".to_string(),
+                                        format!("Subscription ID: {}\nNow actively monitoring for pump.fun transactions", sub_id)
+                                    );
+                                    return;
+                                }
+                            }
 
-                                    if let (Some(logs), Some(sig)) = (logs, signature) {
-                                        info!("Processing transaction: {} (logs: {}, err: {})", 
-                                              sig, logs.len(), err.is_some());
+                            // Check if this is a log notification
+                            if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+                                if method == "logsNotification" {
+                                    // Increment pump.fun message count
+                                    increment_counter(&pump_msg_count_for_handler);
+                                    
+                                    if let Some(params) = value
+                                        .get("params")
+                                        .and_then(|p| p.get("result"))
+                                        .and_then(|r| r.get("value"))
+                                    {
+                                        // Extract logs and signature
+                                        let logs = params.get("logs").and_then(|l| l.as_array());
+                                        let signature = params.get("signature").and_then(|s| s.as_str());
+                                        let err = params.get("err");
+
+                                        if let (Some(logs), Some(sig)) = (logs, signature) {
+                                            info!("Processing transaction: {} (logs: {}, err: {})", 
+                                                  sig, logs.len(), err.is_some());
+                                            
+                                            // Call signature callback
+                                            if let Some(cb) = &sig_callback {
+                                                cb(sig.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to parse message: {:?}", e);
+                    }
+                }
+            }
+        }) as Box<dyn FnMut(_)>);
                                         
                                         // Log detailed info for this transaction
                                         log_cb_for_msg(

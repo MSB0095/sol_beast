@@ -8,6 +8,7 @@ mod rpc;
 mod settings;
 mod state;
 mod ws;
+mod shyft_monitor;
 
 // Use core library modules
 use sol_beast_core::{models, idl, tx_builder, error::CoreError};
@@ -233,52 +234,30 @@ async fn main() -> Result<(), AppError> {
     let simulate_keypair_clone = simulate_keypair.clone();
     let trades_map_clone_monitor = trades_map.clone();
 
-    // Spawn WSS tasks and keep control senders so we can request subscriptions
-    let mut ws_control_senders: Vec<mpsc::Sender<WsRequest>> = Vec::new();
-    let mut ws_handles = Vec::new(); // New vector to store JoinHandles
-    for wss_url in settings.solana_ws_urls.iter() {
-        let tx = tx.clone();
-        let seen = seen.clone();
-        let holdings_clone = holdings.clone();
-        let price_cache_clone = price_cache.clone();
-        let settings_clone = settings.clone();
-        let wss_url = wss_url.clone();
-        let (ctrl_tx, ctrl_rx) = mpsc::channel(256);
-        ws_control_senders.push(ctrl_tx.clone());
-        // Spawn a single task that owns the control receiver. `ws::run_ws` will
-        // manage its own internal state and reconnect logic where appropriate.
-        let handle = tokio::spawn(async move {
-            if let Err(e) = ws::run_ws(
-                &wss_url,
-                tx.clone(),
-                seen.clone(),
-                holdings_clone.clone(),
-                price_cache_clone.clone(),
-                ctrl_rx,
-                settings_clone.clone(),
-            )
-            .await
-            {
-                error!("WSS connection to {} failed: {}.", wss_url, e);
-                bot_log!(
-                    "error",
-                    "WSS connection failed",
-                    format!("WSS: {}, Error: {}", wss_url, e)
-                );
-            }
-        });
-        ws_handles.push(handle);
-    }
-    let ws_control_senders = Arc::new(ws_control_senders);
-    // Round-robin index for WSS sender selection (true round-robin)
-    let next_wss_sender = Arc::new(AtomicUsize::new(0usize));
+    // Channel for receiving new token notifications from Shyft
+    let (tx, mut rx) = mpsc::channel::<shyft_monitor::ShyftMonitorMessage>(100);
+    let (shyft_control_tx, shyft_control_rx) = mpsc::channel::<shyft_monitor::ShyftControlMessage>(100);
 
-    // Now spawn price monitoring (after ws_control_senders exists so monitor
+    // Spawn Shyft Monitor
+    let holdings_clone_shyft = holdings.clone();
+    let price_cache_clone_shyft = price_cache.clone();
+    let settings_clone_shyft = settings.clone();
+    let tx_clone = tx.clone();
+    
+    let shyft_handle = tokio::spawn(async move {
+        shyft_monitor::start_shyft_monitor(
+            settings_clone_shyft,
+            holdings_clone_shyft,
+            price_cache_clone_shyft,
+            tx_clone,
+            shyft_control_rx,
+        ).await;
+    });
+
+    // Now spawn price monitoring (after shyft_control_tx exists so monitor
     // can unsubscribe subscriptions on sell).
     let rpc_client_clone = rpc_client.clone();
-    let ws_control_senders_clone_for_monitor = ws_control_senders.clone();
-    let sub_map_clone_for_monitor = sub_map.clone();
-    let next_wss_sender_clone_for_monitor = next_wss_sender.clone();
+    let shyft_control_tx_clone_for_monitor = shyft_control_tx.clone();
     let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();
     let trades_list_clone_for_monitor = trades_list.clone();
     let bot_control_for_monitor = bot_control.clone();
@@ -293,9 +272,7 @@ async fn main() -> Result<(), AppError> {
             simulate_keypair_clone_for_monitor.as_deref(),
             settings_clone_monitor,
             trades_map_clone_monitor,
-            ws_control_senders_clone_for_monitor,
-            sub_map_clone_for_monitor,
-            next_wss_sender_clone_for_monitor,
+            shyft_control_tx_clone_for_monitor,
             trades_list_clone_for_monitor,
             bot_control_for_monitor,
         )
@@ -450,8 +427,8 @@ async fn main() -> Result<(), AppError> {
 
     // Process messages
     while let Some(msg) = rx.recv().await {
-        if let Err(e) = process_message(
-            &msg,
+        if let Err(e) = process_shyft_message(
+            msg,
             &seen,
             &holdings,
             &rpc_client,
@@ -460,24 +437,17 @@ async fn main() -> Result<(), AppError> {
             simulate_keypair.as_deref(),
             &price_cache,
             &settings,
-            ws_control_senders.clone(),
-            next_wss_sender.clone(),
+            shyft_control_tx.clone(),
             trades_map.clone(),
-            sub_map.clone(),
             detected_coins.clone(),
             trades_list.clone(),
         )
         .await
         {
-            // Log the error and a truncated preview of the incoming message for debugging.
-            let preview: String = msg.chars().take(200).collect();
-            error!(
-                "process_message failed for incoming message (truncated): {}... error: {}",
-                preview, e
-            );
+            error!("process_shyft_message failed: {}", e);
             bot_log!(
                 "error",
-                "Failed to process WebSocket message",
+                "Failed to process Shyft message",
                 format!("{}", e)
             );
         }
@@ -487,7 +457,7 @@ async fn main() -> Result<(), AppError> {
     // This will block until all tasks complete or panic.
     info!("Main message processing loop ended. Awaiting background tasks...");
 
-    let all_handles = vec![monitor_handle, api_sync_handle, api_server_handle];
+    let all_handles = vec![monitor_handle, api_sync_handle, api_server_handle, shyft_handle];
 
     for handle in all_handles {
         if let Err(e) = handle.await {
@@ -496,18 +466,11 @@ async fn main() -> Result<(), AppError> {
         }
     }
 
-    for handle in ws_handles {
-        if let Err(e) = handle.await {
-            error!("A WSS task panicked or exited unexpectedly: {:?}", e);
-            bot_log!("error", "WSS task failed", format!("{:?}", e));
-        }
-    }
-
     Ok(())
 }
 
-async fn process_message(
-    text: &str,
+async fn process_shyft_message(
+    msg: shyft_monitor::ShyftMonitorMessage,
     seen: &Arc<Mutex<LruCache<String, ()>>>,
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     rpc_client: &Arc<RpcClient>,
@@ -516,59 +479,15 @@ async fn process_message(
     simulate_keypair: Option<&Keypair>,
     price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
-    ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
-    next_wss_sender: Arc<AtomicUsize>,
+    shyft_control_tx: mpsc::Sender<shyft_monitor::ShyftControlMessage>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
-    sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // NOTE: don't short-circuit all incoming messages when max held coins is
-    // reached — that would also skip websocket account notifications which we
-    // rely on to update cached prices. Only skip handling of new token
-    // detection (InitializeMint2) when at capacity. We'll perform a debounced
-    // debug log where appropriate.
-    let value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Failed to parse incoming websocket message as JSON: {}. message (truncated)={}",
-                e,
-                text.chars().take(200).collect::<String>()
-            );
-            return Err(Box::new(e));
-        }
-    };
-    if let Some(params) = value
-        .get("params")
-        .and_then(|p| p.get("result"))
-        .and_then(|r| r.get("value"))
-    {
-        let logs_opt = params.get("logs").and_then(|l| l.as_array());
-        let sig_opt = params.get("signature").and_then(|s| s.as_str());
-        if logs_opt.is_none() {
-            debug!("Incoming message missing logs field: {:?}", params);
-        }
-        if sig_opt.is_none() {
-            debug!("Incoming message missing signature field: {:?}", params);
-        }
-
-        if let (Some(logs), Some(signature)) = (logs_opt, sig_opt) {
-            // Only process if logs mention the pump.fun program id
-            // This ensures we only process transactions that actually interact with pump.fun
-            let pump_prog_id = &settings.pump_fun_program;
-            let logs_mention_pump = logs.iter().any(|log| {
-                log.as_str()
-                    .map(|s| s.contains(pump_prog_id))
-                    .unwrap_or(false)
-            });
-            
-            if logs_mention_pump && seen.lock().await.put(signature.to_string(), ()).is_none()
-            {
-                // If we're already at max holdings, skip detection work
-                // but do not block processing of other websocket messages
-                // (like account notifications). Debounce the debug log
-                // so it doesn't spam the logs.
+    match msg {
+        shyft_monitor::ShyftMonitorMessage::NewToken(tx) => {
+            let signature = tx.signature.clone();
+            if seen.lock().await.put(signature.clone(), ()).is_none() {
                 if holdings.lock().await.len() >= settings.max_holded_coins {
                     let mut last_lock = LAST_MAX_HELD_LOG.lock().await;
                     let now = Instant::now();
@@ -583,19 +502,12 @@ async fn process_message(
                             settings.max_holded_coins
                         );
                     }
-                    // Do not attempt handle_new_token when at capacity.
                     return Ok(());
                 }
 
                 let detect_time = Utc::now();
-                // Validate signature before attempting expensive RPC fetch to skip obvious invalid signatures.
-                let signature_valid = solana_sdk::signature::Signature::from_str(signature).is_ok();
-                if !signature_valid {
-                    debug!("Skipping invalid signature for pump.fun notification: {}", signature);
-                    return Ok(());
-                }
                 if let Err(e) = handle_new_token(
-                    signature,
+                    &tx,
                     holdings,
                     rpc_client,
                     is_real,
@@ -603,13 +515,11 @@ async fn process_message(
                     simulate_keypair,
                     price_cache,
                     settings,
-                    ws_control_senders.clone(),
-                    next_wss_sender.clone(),
+                    shyft_control_tx,
                     detect_time,
-                    trades_map.clone(),
-                    sub_map.clone(),
-                    detected_coins.clone(),
-                    trades_list.clone(),
+                    trades_map,
+                    detected_coins,
+                    trades_list,
                 )
                 .await
                 {
@@ -618,14 +528,12 @@ async fn process_message(
                 }
             }
         }
-    } else {
-        debug!("Websocket message missing params/result/value: {:?}", value);
     }
     Ok(())
 }
 
 async fn handle_new_token(
-    signature: &str,
+    tx: &sol_beast_core::shyft::ShyftTransaction,
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     rpc_client: &Arc<RpcClient>,
     is_real: bool,
@@ -633,22 +541,43 @@ async fn handle_new_token(
     simulate_keypair: Option<&Keypair>,
     price_cache: &Arc<Mutex<PriceCache>>,
     settings: &Arc<Settings>,
-    ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
-    _next_wss_sender: Arc<AtomicUsize>,
+    shyft_control_tx: mpsc::Sender<shyft_monitor::ShyftControlMessage>,
     detect_time: chrono::DateTime<Utc>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
-    sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::sync::oneshot;
-    let (creator, mint, curve_pda, holder_addr, is_initialization) =
-        rpc::fetch_transaction_details(signature, rpc_client, settings).await?;
-    if !is_initialization {
-        // Not a pump.fun create instruction; skip detection.
-        debug!("Transaction {} is not a pump.fun CREATE instruction; skipping detection", signature);
+    
+    // Extract details from ShyftTransaction
+    // We look for the instruction that calls pump.fun
+    let pump_prog = &settings.pump_fun_program;
+    let instruction = tx.instructions.iter().find(|ix| ix.programId == *pump_prog);
+    
+    let (creator, mint, curve_pda, holder_addr) = if let Some(ix) = instruction {
+        // Assuming standard create instruction layout
+        // Accounts: [Mint, MintAuth, BondingCurve, BondingCurveVault, ..., Creator]
+        // We need to be careful about indices.
+        // If we can't rely on indices, we might need to fetch.
+        // But let's try to use indices if possible.
+        if ix.accounts.len() > 7 {
+            (
+                ix.accounts[7].clone(), // Creator
+                ix.accounts[0].clone(), // Mint
+                ix.accounts[2].clone(), // Bonding Curve
+                ix.accounts[7].clone(), // Holder (Creator)
+            )
+        } else {
+            // Fallback to RPC if accounts are missing or structure is different
+            let (c, m, cp, h, is_init) = rpc::fetch_transaction_details(&tx.signature, rpc_client, settings).await?;
+            if !is_init { return Ok(()); }
+            (c, m, cp, h)
+        }
+    } else {
         return Ok(());
-    }
+    };
+
+    let signature = &tx.signature;
     let (onchain_meta, offchain_meta, onchain_raw) =
         rpc::fetch_token_metadata(&mint, rpc_client, settings).await?;
     // Attempt to fetch the bonding curve creator so we can validate pump.fun token

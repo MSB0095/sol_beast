@@ -21,6 +21,8 @@ use std::io::Write;
 
 
 
+use crate::shyft_monitor::ShyftControlMessage;
+
 pub async fn monitor_holdings(
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
     price_cache: Arc<Mutex<PriceCache>>,
@@ -30,17 +32,16 @@ pub async fn monitor_holdings(
     simulate_keypair: Option<&Keypair>,
     settings: Arc<Settings>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
-    ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
-    sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
-    _next_wss_sender: Arc<AtomicUsize>,
+    shyft_control_tx: mpsc::Sender<ShyftControlMessage>,
     trades_list: Arc<tokio::sync::Mutex<Vec<TradeRecord>>>,
     bot_control: Arc<BotControl>,
 ) {
     // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
-    static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-    const SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS: u64 = 30;
     static PRICE_MISS_WARN_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
     const PRICE_MISS_WARN_DEBOUNCE_SECS: u64 = 60;
+    
+    let mut subscribed_mints = std::collections::HashSet::new();
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         
@@ -64,11 +65,16 @@ pub async fn monitor_holdings(
                 to_remove.push(mint.clone());
                 continue;
             }
+            
+            // Ensure subscription if using WSS
+            if settings.price_source == "wss" {
+                if !subscribed_mints.contains(mint) {
+                    let _ = shyft_control_tx.send(ShyftControlMessage::SubscribePrice(mint.clone())).await;
+                    subscribed_mints.insert(mint.clone());
+                }
+            }
+
             // Prefer WSS-provided cached prices when configured to use WSS only.
-            // This avoids RPC polling and keeps the monitor reacting to real-time
-            // websocket updates. If `price_source` is not strict "wss", fall
-            // back to the RPC fetcher which itself will consult the same cache
-            // and only call RPC when needed.
             let current_price_result: Result<f64, Box<dyn std::error::Error + Send + Sync>> = if settings.price_source == "wss" {
                 let mut cache_guard = price_cache.lock().await;
                 if let Some((ts, price)) = cache_guard.get(mint) {
@@ -88,95 +94,29 @@ pub async fn monitor_holdings(
             let current_price = match current_price_result {
                 Ok(price) => price,
                 Err(e) => {
-                    // If we're using WSS as the source, try to ensure a subscription
-                    // exists and attempt a single RPC prime before giving up. Rate-
-                    // limit subscribe/prime attempts per-mint to avoid storms.
+                    // If WSS failed (expired or missing), try one RPC prime
                     if settings.price_source == "wss" {
-                        // Check if a subscription exists for this mint
-                        let has_sub = { sub_map.lock().await.get(mint).is_some() };
-                        let mut attempted_subscribe = false;
-                        if !has_sub {
-                            let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
-                            let now = Instant::now();
-                            let do_try = !matches!(attempts.get(mint), Some(last) if now.duration_since(*last).as_secs() < SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS);
-                            if do_try {
-                                attempts.insert(mint.clone(), now);
-                                if !ws_control_senders.is_empty() {
-                                    let idx = _next_wss_sender.fetch_add(1, Ordering::Relaxed) % ws_control_senders.len();
-                                    let sender = &ws_control_senders[idx];
-                                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
-                                    let pump_prog = match solana_sdk::pubkey::Pubkey::from_str(&settings.pump_fun_program) {
-                                        Ok(pk) => pk,
-                                        Err(_) => {
-                                            debug!("Invalid pump_fun_program pubkey in settings");
-                                            solana_sdk::pubkey::Pubkey::default()
-                                        }
-                                    };
-                                    if let Ok(mint_pk) = solana_sdk::pubkey::Pubkey::from_str(mint) {
-                                        let (curve_pda, _) = solana_sdk::pubkey::Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
-                                        let _ = sender.send(WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.clone(), resp: resp_tx }).await;
-                                        match tokio::time::timeout(std::time::Duration::from_secs(settings.wss_subscribe_timeout_secs), resp_rx).await {
-                                            Ok(Ok(Ok(sub_id))) => {
-                                                // persist mapping
-                                                sub_map.lock().await.insert(mint.clone(), (idx, sub_id));
-                                                debug!("Monitor auto-subscribed {} on sub {} (idx={})", mint, sub_id, idx);
-                                                attempted_subscribe = true;
-                                            }
-                                            _ => {
-                                                debug!("Monitor subscribe attempt failed/timed out for {}", mint);
-                                            }
-                                        }
-                                    }
+                         match rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await {
+                            Ok(p) => {
+                                debug!("Monitor primed price via RPC for {}: {:.18}", mint, p);
+                                p
+                            }
+                            Err(e2) => {
+                                let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
+                                let now = Instant::now();
+                                let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
+                                if should_log {
+                                    warns.insert(mint.clone(), now);
+                                    log::warn!("Price fetch failed for {}: {}", mint, e2);
                                 }
-                            }
-                        }
-
-                        // If subscription exists or we attempted one, try one RPC prime
-                        // to populate the cache (rate-limited implicitly by subscribe debounce).
-                        if has_sub || attempted_subscribe {
-                            match rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await {
-                                Ok(p) => {
-                                    debug!("Monitor primed price via RPC for {}: {:.18}", mint, p);
-                                    // Continue to compute using the newly-fetched price
-                                    p
+                                if e2.to_string().contains("migrated") {
+                                    to_remove.push(mint.clone());
                                 }
-                                Err(e2) => {
-                                    // Debounced warn
-                                    let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                                    let now = Instant::now();
-                                    let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
-                                    if should_log {
-                                        warns.insert(mint.clone(), now);
-                                        log::warn!("Price fetch failed for {}: {}", mint, e2);
-                                    } else {
-                                        debug!("Suppressed repeated price-miss warn for {}: {}", mint, e2);
-                                    }
-                                    // If migrated, schedule removal
-                                    if e2.to_string().contains("migrated") {
-                                        to_remove.push(mint.clone());
-                                    }
-                                    continue;
-                                }
+                                continue;
                             }
-                        } else {
-                            // No subscription and we didn't attempt one — debounced warn and continue
-                            let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                            let now = Instant::now();
-                            let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
-                            if should_log {
-                                warns.insert(mint.clone(), now);
-                                log::warn!("Price fetch failed for {}: {}", mint, e);
-                            } else {
-                                debug!("Suppressed repeated price-miss warn for {}: {}", mint, e);
-                            }
-                            if e.to_string().contains("migrated") {
-                                to_remove.push(mint.clone());
-                            }
-                            continue;
                         }
                     } else {
                         log::warn!("Price fetch failed for {}: {}", mint, e);
-                        // If the curve reports migrated, schedule removal of holding
                         if e.to_string().contains("migrated") {
                             to_remove.push(mint.clone());
                         }
@@ -336,16 +276,10 @@ pub async fn monitor_holdings(
 
         if !to_remove.is_empty() {
             // Unsubscribe from WSS for removed holdings to free subscription slots.
-            let mut submap = sub_map.lock().await;
             for mint in &to_remove {
-                if let Some((idx, sub_id)) = submap.remove(mint) {
-                    if idx < ws_control_senders.len() {
-                        let sender = &ws_control_senders[idx];
-                        let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-                        let _ = sender.send(WsRequest::Unsubscribe { sub_id, resp: u_tx }).await;
-                        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
-                        debug!("Unsubscribed {} sub {} after sell", mint, sub_id);
-                    }
+                if subscribed_mints.remove(mint) {
+                    let _ = shyft_control_tx.send(ShyftControlMessage::UnsubscribePrice(mint.clone())).await;
+                    debug!("Unsubscribed {} after sell", mint);
                 }
             }
 

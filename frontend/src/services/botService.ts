@@ -109,7 +109,7 @@ async function initWasm() {
     
     // Initialize WASM with memory growth enabled (this calls wasm-bindgen initialization)
     // Pass WebAssembly.Memory options to enable memory growth
-    await wasm.default(undefined)
+    await wasm.default()
     
     // Note: wasm.init() is called automatically by #[wasm_bindgen(start)]
     // during wasm.default(), so we don't need to call it explicitly

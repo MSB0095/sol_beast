@@ -25,7 +25,8 @@ pub struct ShyftTransaction {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ShyftInstruction {
-    pub programId: String,
+    #[serde(rename = "programId")]
+    pub program_id: String,
     pub data: String,
     pub accounts: Vec<String>,
 }

@@ -128,7 +128,14 @@ impl Monitor {
             let subscribe_msg = if is_shyft {
                 // Send connection_init first
                 let init_msg = serde_json::json!({ "type": "connection_init", "payload": {} }).to_string();
-                ws_for_open.send_with_str(&init_msg).ok();
+                if let Err(e) = ws_for_open.send_with_str(&init_msg) {
+                    error!("Failed to send connection_init: {:?}", e);
+                    log_cb_for_open(
+                        "error".to_string(),
+                        "Failed to send connection_init".to_string(),
+                        format!("Error: {:?}", e)
+                    );
+                }
 
                 let query = format!(r#"
                     subscription {{
@@ -336,143 +343,6 @@ impl Monitor {
                         error!("Failed to parse message: {:?}", e);
                     }
                 }
-            }
-        }) as Box<dyn FnMut(_)>);
-                                        
-                                        // Log detailed info for this transaction
-                                        log_cb_for_msg(
-                                            "info".to_string(),
-                                            format!("Transaction received (#{} total)", pump_count),
-                                            format!("Signature: {}\nLogs: {} entries\nError: {}", 
-                                                   sig, logs.len(), 
-                                                   if err.is_some() { "Yes" } else { "No" })
-                                        );
-                                        
-                                        // Check if we've seen this signature before
-                                        let is_new = {
-                                            match seen_sigs.lock() {
-                                                Ok(mut seen) => seen.insert(sig.to_string()),
-                                                Err(e) => {
-                                                    error!("Failed to lock seen signatures: {:?}", e);
-                                                    return;
-                                                }
-                                            }
-                                        };
-
-                                        if !is_new {
-                                            info!("Transaction {} already seen, skipping", sig);
-                                            return;
-                                        }
-
-                                        // OPTIMIZATION: Check for CREATE instruction FIRST before any other processing
-                                        // This filters out Buy/Sell transactions immediately without expensive operations
-                                        let mut is_create = false;
-                                        for log in logs.iter().filter_map(|l| l.as_str()) {
-                                            if log.contains("Program log: Instruction: Create") {
-                                                is_create = true;
-                                                break; // Found CREATE, no need to check more logs
-                                            }
-                                        }
-
-                                        // Skip non-CREATE transactions entirely
-                                        if !is_create {
-                                            // Increment filtered count
-                                            let filtered_total = increment_counter(&filtered_count_for_handler);
-                                            
-                                            // Only log occasionally to avoid spam
-                                            if pump_count <= 5 || pump_count % FILTERED_LOG_FREQUENCY == 0 {
-                                                info!("Transaction {} is not a CREATE instruction, filtered (total: {})", sig, filtered_total);
-                                            }
-                                            return;
-                                        }
-
-                                        // This is a CREATE transaction - proceed with processing
-                                        // Increment create count
-                                        let create_total = increment_counter(&create_count_for_handler);
-                                        
-                                        info!("✅ CREATE instruction detected #{}: {}", create_total, sig);
-                                        
-                                        // Check if any log mentions the pump.fun program (double verification)
-                                        let pump_fun_logs: Vec<String> = logs.iter()
-                                            .filter_map(|log| log.as_str())
-                                            .filter(|s| s.contains(&pump_fun_program))
-                                            .map(|s| s.to_string())
-                                            .collect();
-
-                                        if !pump_fun_logs.is_empty() {
-                                            info!("  Verified pump.fun program in logs");
-                                            
-                                            // Log the detection with details
-                                            log_cb_for_msg(
-                                                "info".to_string(),
-                                                "🎯 New token creation detected!".to_string(),
-                                                format!("Signature: {}\nInstruction: Create\nLogs: {} entries\n\nProcessing new token...", 
-                                                       sig, pump_fun_logs.len())
-                                            );
-
-                                            // Notify callback to process the signature
-                                            if let Some(ref callback) = sig_callback {
-                                                callback(sig.to_string());
-                                            }
-                                        } else {
-                                            // Log that we received a message but it didn't match
-                                            if pump_count <= 10 || pump_count % 25 == 0 {
-                                                info!("Transaction {} does not contain pump.fun program ID", sig);
-                                                log_cb_for_msg(
-                                                    "info".to_string(),
-                                                    format!("Non-pump.fun transaction (#{} total)", pump_count),
-                                                    format!("Signature: {}\nThis transaction doesn't involve the pump.fun program", sig)
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        error!("logsNotification missing logs or signature");
-                                        log_cb_for_msg(
-                                            "warn".to_string(),
-                                            "Incomplete transaction data".to_string(),
-                                            "Received logsNotification without proper logs or signature".to_string()
-                                        );
-                                    }
-                                } else {
-                                    error!("logsNotification has unexpected structure");
-                                }
-                            } else {
-                                // Unknown method
-                                info!("Received message with method: {}", method);
-                            }
-                        } else if value.get("error").is_some() {
-                            // This is an error response
-                            error!("Received error from WebSocket: {:?}", value.get("error"));
-                            log_cb_for_msg(
-                                "error".to_string(),
-                                "WebSocket error response".to_string(),
-                                format!("{:?}", value.get("error"))
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to parse WebSocket message: {}", e);
-                        if current_count <= 5 {
-                            log_cb_for_msg(
-                                "warn".to_string(),
-                                "Message parsing failed".to_string(),
-                                format!("Error: {}\nMessage preview: {}", e, 
-                                       if message.len() > 100 { 
-                                           format!("{}...", &message[..100]) 
-                                       } else { 
-                                           message.clone() 
-                                       })
-                            );
-                        }
-                    }
-                }
-            } else {
-                error!("Received non-text WebSocket message");
-                log_cb_for_msg(
-                    "warn".to_string(),
-                    "Non-text message received".to_string(),
-                    "WebSocket sent binary or other non-text data".to_string()
-                );
             }
         }) as Box<dyn FnMut(_)>);
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));

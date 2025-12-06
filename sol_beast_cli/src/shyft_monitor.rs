@@ -52,7 +52,7 @@ pub async fn start_shyft_monitor(
     };
 
     // Shyft GraphQL WSS URL
-    // Ensure we use wss:// protocol
+    // Ensure we use the wss:// protocol
     let base_url = settings.shyft_graphql_url.replace("https://", "wss://").replace("http://", "ws://");
     let url_str = format!("{}?api_key={}", base_url, shyft_service.api_key);
     let url = Url::parse(&url_str).expect("Invalid Shyft URL");
@@ -174,7 +174,7 @@ pub async fn start_shyft_monitor(
                                                 "type": "start",
                                                 "payload": serde_json::from_str::<serde_json::Value>(&query).unwrap()
                                             }).to_string();
-                                            if let Ok(_) = write.send(Message::Text(start_msg)).await {
+                                            if write.send(Message::Text(start_msg)).await.is_ok() {
                                                 price_subs.insert(mint.clone(), id);
                                                 debug!("Subscribed to price updates for {}", mint);
                                             }

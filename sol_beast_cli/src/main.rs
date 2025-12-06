@@ -552,14 +552,22 @@ async fn handle_new_token(
     // Extract details from ShyftTransaction
     // We look for the instruction that calls pump.fun
     let pump_prog = &settings.pump_fun_program;
-    let instruction = tx.instructions.iter().find(|ix| ix.programId == *pump_prog);
+    let instruction = tx.instructions.iter().find(|ix| ix.program_id == *pump_prog);
     
     let (creator, mint, curve_pda, holder_addr) = if let Some(ix) = instruction {
         // Assuming standard create instruction layout
         // Accounts: [Mint, MintAuth, BondingCurve, BondingCurveVault, ..., Creator]
-        // We need to be careful about indices.
-        // If we can't rely on indices, we might need to fetch.
-        // But let's try to use indices if possible.
+        // Expected account layout for pump.fun create instruction:
+        // [0] = Mint account
+        // [1] = Mint authority  
+        // [2] = Bonding curve account
+        // [3] = Associated bonding curve token account
+        // [4] = Global account
+        // [5] = MPL token metadata
+        // [6] = Metadata account
+        // [7] = Creator/payer account
+        // This layout is based on the pump.fun program's create instruction format.
+        // If the instruction format changes, this will need to be updated.
         if ix.accounts.len() > 7 {
             (
                 ix.accounts[7].clone(), // Creator

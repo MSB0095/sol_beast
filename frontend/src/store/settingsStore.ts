@@ -65,6 +65,9 @@ export interface Settings {
   // Dev Tip
   dev_tip_percent: number
   dev_tip_fixed_sol: number
+  
+  // Shyft
+  shyft_api_key?: string
 }
 
 type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
@@ -119,6 +122,7 @@ const defaultSettings: Settings = {
   helius_confirm_timeout_secs: 1,
   dev_tip_percent: 2.0,
   dev_tip_fixed_sol: 0.0,
+  shyft_api_key: undefined,
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({

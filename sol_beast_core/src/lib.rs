@@ -12,6 +12,7 @@ pub mod settings;
 pub mod buyer;
 pub mod rpc_client;
 pub mod transaction_service;
+pub mod shyft;
 
 #[cfg(feature = "native")]
 pub mod native;

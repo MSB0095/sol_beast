@@ -95,7 +95,13 @@ pub struct BotSettings {
     pub dev_tip_fixed_sol: f64,
     #[serde(default = "default_enable_safer_sniping")]
     pub enable_safer_sniping: bool,
+    #[serde(default)]
+    pub shyft_api_key: Option<String>,
+    #[serde(default = "default_shyft_graphql_url")]
+    pub shyft_graphql_url: String,
 }
+
+fn default_shyft_graphql_url() -> String { "https://programs.shyft.to/v0/graphql".to_string() }
 
 impl BotSettings {
     /// Validate that settings contain valid data (no corrupted strings or vectors)
@@ -293,9 +299,17 @@ impl SolBeastBot {
         state.repair_mode_if_needed();
         
         let mode = state.mode.clone();
-        let ws_url = state.settings.solana_ws_urls.first()
-            .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
-            .clone();
+        let shyft_api_key = state.settings.shyft_api_key.clone();
+        let shyft_graphql_url = state.settings.shyft_graphql_url.clone();
+        
+        let (ws_url, is_shyft) = if let Some(key) = shyft_api_key {
+             (format!("{}?api_key={}", shyft_graphql_url.replace("https", "wss").replace("http", "ws"), key), true)
+        } else {
+             (state.settings.solana_ws_urls.first()
+                .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
+                .clone(), false)
+        };
+
         let pump_fun_program = state.settings.pump_fun_program.clone();
         
         // Drop the lock before creating callbacks and starting monitor to avoid recursive locking
@@ -336,7 +350,7 @@ impl SolBeastBot {
         
         // Create and start monitor
         let mut monitor = Monitor::new();
-        monitor.start(&ws_url, &pump_fun_program, log_callback, Some(signature_callback))
+        monitor.start(&ws_url, &pump_fun_program, log_callback, Some(signature_callback), is_shyft)
             .map_err(|e| JsValue::from_str(&format!("Failed to start monitor: {:?}", e)))?;
         
         // Re-acquire lock to update state

@@ -16,7 +16,10 @@ use monitor::Monitor;
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 // Constants for configuration defaults and limits
-const DEFAULT_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+const DEFAULT_SOLANA_RPC_URL: &str = "https://api.mainnet-beta.solana.com/";
+const DEFAULT_SOLANA_WS_URL: &str = "wss://api.mainnet-beta.solana.com/";
+const DEFAULT_PUMP_FUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const DEFAULT_METADATA_PROGRAM: &str = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
 const DEFAULT_CACHE_CAPACITY: usize = 1000;
 const DEFAULT_PRICE_CACHE_TTL_SECS: u64 = 60;
 const MAX_FETCH_RETRIES: u8 = 3;
@@ -146,26 +149,26 @@ impl BotSettings {
         
         // If we have no valid URLs after filtering, use defaults
         let ws_urls = if clean_ws_urls.is_empty() {
-            vec!["wss://api.mainnet-beta.solana.com".to_string()]
+            vec![DEFAULT_SOLANA_WS_URL.to_string()]
         } else {
             clean_ws_urls
         };
         
         let rpc_urls = if clean_rpc_urls.is_empty() {
-            vec!["https://api.mainnet-beta.solana.com".to_string()]
+            vec![DEFAULT_SOLANA_RPC_URL.to_string()]
         } else {
             clean_rpc_urls
         };
         
         // Check program IDs
         let pump_fun_program = if self.pump_fun_program.is_empty() || self.pump_fun_program.contains('\0') {
-            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".to_string()
+            DEFAULT_PUMP_FUN_PROGRAM.to_string()
         } else {
             self.pump_fun_program.clone()
         };
         
         let metadata_program = if self.metadata_program.is_empty() || self.metadata_program.contains('\0') {
-            "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s".to_string()
+            DEFAULT_METADATA_PROGRAM.to_string()
         } else {
             self.metadata_program.clone()
         };
@@ -1496,10 +1499,10 @@ async fn process_detected_signature(signature: String, state: Arc<Mutex<BotState
 impl Default for BotSettings {
     fn default() -> Self {
         Self {
-            solana_ws_urls: vec!["wss://api.mainnet-beta.solana.com/".to_string()],
-            solana_rpc_urls: vec!["https://api.mainnet-beta.solana.com/".to_string()],
-            pump_fun_program: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P".to_string(),
-            metadata_program: "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s".to_string(),
+            solana_ws_urls: vec![DEFAULT_SOLANA_WS_URL.to_string()],
+            solana_rpc_urls: vec![DEFAULT_SOLANA_RPC_URL.to_string()],
+            pump_fun_program: DEFAULT_PUMP_FUN_PROGRAM.to_string(),
+            metadata_program: DEFAULT_METADATA_PROGRAM.to_string(),
             tp_percent: 100.0,
             sl_percent: -50.0,
             timeout_secs: 50,
@@ -1703,8 +1706,8 @@ mod tests {
         
         let sanitized = settings.sanitize().expect("Sanitize should succeed");
         assert!(sanitized.is_valid(), "Sanitized settings should be valid");
-        assert_eq!(sanitized.solana_ws_urls, vec!["wss://api.mainnet-beta.solana.com"]);
-        assert_eq!(sanitized.solana_rpc_urls, vec!["https://api.mainnet-beta.solana.com"]);
+        assert_eq!(sanitized.solana_ws_urls, vec![DEFAULT_SOLANA_WS_URL]);
+        assert_eq!(sanitized.solana_rpc_urls, vec![DEFAULT_SOLANA_RPC_URL]);
     }
 
     #[test]
@@ -1739,9 +1742,9 @@ mod tests {
         let sanitized = settings.sanitize().expect("Sanitize should succeed");
         assert!(sanitized.is_valid(), "Sanitized settings should be valid");
         // Corrupted URLs get filtered out, so default is used
-        assert_eq!(sanitized.solana_ws_urls, vec!["wss://api.mainnet-beta.solana.com"]);
+        assert_eq!(sanitized.solana_ws_urls, vec![DEFAULT_SOLANA_WS_URL]);
         // Corrupted program ID gets replaced with default
-        assert_eq!(sanitized.pump_fun_program, "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+        assert_eq!(sanitized.pump_fun_program, DEFAULT_PUMP_FUN_PROGRAM);
     }
 
     #[test]

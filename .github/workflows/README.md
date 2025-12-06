@@ -4,7 +4,27 @@ This directory contains GitHub Actions workflows for continuous integration, dep
 
 ## Workflows Overview
 
-### 1. ci.yml - Comprehensive CI Pipeline
+### 1. validate-setup.yml - Validate CI Setup
+**Trigger**: Manual workflow dispatch only  
+**Purpose**: Quick validation of repository secrets and RPC connectivity  
+**Duration**: ~1 minute  
+**When to use**: First-time setup, troubleshooting, verifying secrets
+
+**What it checks**:
+- All required secrets are configured
+- Secret values have correct format (https://, wss://)
+- RPC endpoint is accessible and responding
+- Provides summary of configuration status
+
+**How to use**:
+1. Go to Actions tab
+2. Select "Validate CI Setup"
+3. Click "Run workflow"
+4. Review output for any issues
+
+---
+
+### 2. ci.yml - Comprehensive CI Pipeline
 **Trigger**: Push to main branches, Pull Requests  
 **Purpose**: Complete automated testing and validation  
 **Jobs**:
@@ -73,6 +93,9 @@ This directory contains GitHub Actions workflows for continuous integration, dep
 ## Workflow Dependencies
 
 ```
+validate-setup.yml (manual only, recommended first run)
+└── check-secrets → test-connectivity → summary
+
 ci.yml (on push/PR)
 ├── build-rust-wasm → build-frontend → ui-tests
 └── build-rust-wasm → build-frontend → bot-functionality-tests
@@ -83,6 +106,12 @@ deploy.yml (on push to master)
 test-deployment.yml (manual only)
 └── test-build → playwright-tests
 ```
+
+**Recommended workflow order for new setup**:
+1. Run `validate-setup.yml` first to verify configuration
+2. Run `ci.yml` manually to test full pipeline
+3. Use `test-deployment.yml` before important merges
+4. Let `deploy.yml` run automatically on master
 
 ## Using Workflows from Mobile
 

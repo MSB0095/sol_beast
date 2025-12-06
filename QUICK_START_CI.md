@@ -97,22 +97,20 @@ CI runs automatically on PRs to ensure changes don't break anything.
 
 ## 🔍 Troubleshooting
 
-### "Secret not found" error
-- Check secret names are exact: `SOLANA_RPC_URL`, `SOLANA_WS_URL`, `SHYFT_API_KEY`
-- Verify you have admin access to repository
+### Quick Fixes
+- **"Secret not found"**: Check exact spelling - `SOLANA_RPC_URL`, `SOLANA_WS_URL`, `SHYFT_API_KEY`
+- **Connection errors**: Verify RPC/WS URLs are correct and use proper protocol (https://, wss://)
+- **Rate limiting**: Free tier has limits - check provider dashboard
+- **Missing artifacts**: Only kept 7-14 days - re-run if expired
 
-### Tests failing with connection errors
-- Verify RPC/WS URLs are correct
-- Check API keys are valid
-- Ensure URLs use correct protocol (https:// and wss://)
+### Detailed Help
+📖 **[Complete Troubleshooting Guide](./TROUBLESHOOTING_CI.md)** - Comprehensive solutions for all issues
 
-### Rate limiting errors
-- Free tier RPC has limits
-- Consider upgrading or using different provider for testing
-
-### Can't see artifacts
-- Artifacts only kept 7-14 days
-- Re-run workflow if expired
+### Validate Your Setup
+Run the **"Validate CI Setup"** workflow to check configuration:
+1. Actions tab → "Validate CI Setup" → Run workflow
+2. Reviews secrets and tests connectivity
+3. Quick diagnosis in ~1 minute
 
 ## 📚 More Information
 

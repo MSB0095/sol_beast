@@ -436,7 +436,7 @@ export const botService = {
             console.error('Failed to load default settings during recovery:', recoveryError)
           }
           
-          throw new Error(`Failed to recover bot settings: ${errorMsg}. Original error: ${errorMsg}`)
+          throw new Error(`Failed to recover bot settings: ${errorMsg}`)
         }
         
         throw new Error(errorMsg)

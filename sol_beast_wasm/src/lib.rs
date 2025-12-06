@@ -691,7 +691,8 @@ impl SolBeastBot {
         };
         
         // Repair mode if needed before any operations
-        // This prevents mode corruption from propagating to the settings response
+        // The mode is part of the bot's overall state and could affect UI display,
+        // so we ensure it's valid before returning settings to prevent confusion
         state.repair_mode_if_needed();
         
         // Validate settings before serialization to prevent memory access errors

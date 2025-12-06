@@ -69,7 +69,7 @@ jobs:
         run: ./build-wasm.sh
 
       - name: Upload WASM artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: wasm-build
           path: |
@@ -93,7 +93,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Download WASM artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: wasm-build
           path: frontend/public/pkg/
@@ -110,7 +110,7 @@ jobs:
           VITE_USE_WASM: 'true'
 
       - name: Upload frontend build
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: frontend-build
           path: frontend/dist/
@@ -131,7 +131,7 @@ jobs:
           node-version: '20.x'
 
       - name: Download frontend build
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: frontend-build
           path: frontend/dist/
@@ -190,7 +190,7 @@ jobs:
 
       - name: Upload Playwright screenshots
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: playwright-ui-screenshots
           path: |
@@ -213,7 +213,7 @@ jobs:
           node-version: '20.x'
 
       - name: Download frontend build
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: frontend-build
           path: frontend/dist/
@@ -274,7 +274,7 @@ jobs:
 
       - name: Upload bot test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bot-test-results
           path: |
@@ -291,7 +291,10 @@ jobs:
     if: always()
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          merge-multiple: true
 
       - name: Generate summary
         run: |
@@ -312,7 +315,7 @@ jobs:
           cat summary.md
 
       - name: Upload summary
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-summary
           path: summary.md

@@ -94,7 +94,7 @@ pub fn parse_offchain_metadata(json_str: &str) -> MetadataResult<OffchainTokenMe
 }
 
 /// Fetch and parse off-chain metadata from URI
-pub async fn fetch_offchain_metadata<H: HttpClient>(
+pub async fn fetch_offchain_metadata<H: HttpClient + ?Sized>(
     uri: &str,
     http_client: &H,
 ) -> MetadataResult<OffchainTokenMetadata> {
@@ -144,7 +144,7 @@ pub fn decode_account_data(account_info: &serde_json::Value) -> MetadataResult<V
 /// 
 /// This function orchestrates fetching both on-chain metadata from Solana
 /// and off-chain metadata from the URI specified in the on-chain data.
-pub async fn fetch_token_metadata<H: HttpClient>(
+pub async fn fetch_token_metadata<H: HttpClient + ?Sized>(
     mint: &str,
     _metadata_program: &str,
     account_data: Option<Vec<u8>>,

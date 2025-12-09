@@ -158,7 +158,7 @@ export default function Dashboard() {
                 {detectedCoins?.length || 0}
               </h3>
               {detectedCoins && detectedCoins.length > 0 && (
-                <p className="text-sm mt-3 text-gray-400 truncate">Latest: {detectedCoins[0].name || detectedCoins[0].symbol || detectedCoins[0].mint}</p>
+                <p className="text-sm mt-3 text-gray-400 truncate">Latest: {(detectedCoins[0] as { name?: string }).name || (detectedCoins[0] as { symbol?: string }).symbol || (detectedCoins[0] as { mint?: string }).mint}</p>
               )}
             </div>
           </div>
@@ -186,7 +186,7 @@ export default function Dashboard() {
                   backdropFilter: 'blur(12px)'
                 }}
                 cursor={{ stroke: 'var(--theme-accent)' }}
-                formatter={(value: any) => value.toFixed(9)}
+                formatter={(value: number) => value.toFixed(9)}
                 labelFormatter={(label) => `Point ${label}`}
               />
               <Line 

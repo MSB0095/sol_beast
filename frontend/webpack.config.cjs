@@ -77,12 +77,18 @@ module.exports = {
     }),
     new webpack.DefinePlugin({
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
-      'import.meta.env.VITE_USE_WASM': JSON.stringify(process.env.VITE_USE_WASM || 'false'),
-      'import.meta.env.MODE': JSON.stringify(isProduction ? 'production' : 'development'),
-      'import.meta.env.DEV': JSON.stringify(!isProduction),
-      'import.meta.env.PROD': JSON.stringify(isProduction),
-      'import.meta.env.BASE_URL': JSON.stringify(isProduction ? BASE_PATH : '/'),
-      global: 'globalThis',
+      '__VITE_ENV__': JSON.stringify({
+        VITE_USE_WASM: process.env.VITE_USE_WASM || 'false',
+        MODE: isProduction ? 'production' : 'development',
+        DEV: !isProduction,
+        PROD: isProduction,
+        BASE_URL: isProduction ? BASE_PATH : '/',
+        VITE_API_BASE_URL: process.env.VITE_API_BASE_URL || 'http://localhost:8080',
+        VITE_WS_URL: process.env.VITE_WS_URL || 'ws://localhost:8080/ws',
+        VITE_SHYFT_API_KEY: process.env.VITE_SHYFT_API_KEY || undefined,
+        VITE_SHYFT_GRAPHQL_URL: process.env.VITE_SHYFT_GRAPHQL_URL || undefined,
+      }),
+      'global': 'globalThis',
     }),
     new webpack.NormalModuleReplacementPlugin(/^process\/browser$/, 'process/browser.js'),
     new CopyPlugin({
@@ -109,8 +115,20 @@ module.exports = {
   devServer: {
     static: './dist',
     port: 3000,
+    host: '0.0.0.0',
     hot: true,
     historyApiFallback: true,
+    allowedHosts: 'all',
+    client: {
+      webSocketURL: 'auto://0.0.0.0:0/ws',
+      // Reduce reconnection attempts to avoid console spam
+      reconnect: 3,
+    },
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+      'Access-Control-Allow-Headers': 'X-Requested-With, content-type, Authorization',
+    },
   },
   optimization: {
     splitChunks: {

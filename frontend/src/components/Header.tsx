@@ -101,13 +101,13 @@ export default function Header() {
                 }}
               ></div>
               <span className="font-semibold text-blue-400">
-                {(import.meta.env.VITE_USE_WASM === 'true' || window.location.hostname.includes('github.io')) ? '[WASM]' : '[API]'}
+                {((typeof __VITE_ENV__ !== 'undefined' && __VITE_ENV__.VITE_USE_WASM === 'true') || window.location.hostname.includes('github.io')) ? '[WASM]' : '[API]'}
               </span>
             </div>
             
             {/* Docs Button */}
             <a
-              href={`${import.meta.env.BASE_URL || '/'}sol_beast_docs/`}
+              href={`${typeof __VITE_ENV__ !== 'undefined' ? __VITE_ENV__.BASE_URL : '/'}sol_beast_docs/`}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-4 py-2 bg-black electric-border font-mono-tech text-xs uppercase tracking-wider hover:bg-[var(--theme-accent)] hover:text-black transition-all duration-300 group"
@@ -127,7 +127,7 @@ export default function Header() {
           {tabs.map(({ id, label, icon: Icon }, index) => (
             <div key={id} className="flex items-center">
               <button
-                onClick={() => setActiveTab(id as any)}
+                onClick={() => setActiveTab(id as 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile')}
                 className={`px-4 sm:px-6 py-3 font-mono-tech text-[10px] sm:text-xs font-semibold uppercase tracking-widest flex items-center gap-2 transition-all duration-200 relative overflow-hidden whitespace-nowrap ${
                   activeTab === id
                     ? 'text-black bg-[var(--theme-accent)]'

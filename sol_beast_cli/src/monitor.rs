@@ -1,45 +1,64 @@
 use crate::{
-    models::{Holding, PriceCache},
-    settings::Settings,
+    models::Holding,
     rpc,
     api::{TradeRecord, BotControl},
     state::BuyRecord,
+    price_subscriber::CliPriceSubscriber,
 };
+use sol_beast_core::settings::Settings;
+use sol_beast_core::sell_service::{SellService, SellConfig};
+use sol_beast_core::native::{NativeRpcClient, transaction_signer::NativeTransactionSigner};
 use solana_client::rpc_client::RpcClient;
-use std::{collections::HashMap, sync::Arc, time::Instant};
-use tokio::sync::{Mutex, mpsc};
-use solana_sdk::{
-    signature::{Keypair},
-};
-use once_cell::sync::Lazy;
-use log::{info, debug, error};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::Mutex;
+use solana_sdk::signature::Keypair;
+use log::{info, debug, error, warn};
 use chrono::Utc;
 use std::io::Write;
 
-
-
-use crate::shyft_monitor::ShyftControlMessage;
-
 pub async fn monitor_holdings(
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
-    price_cache: Arc<Mutex<PriceCache>>,
     rpc_client: Arc<RpcClient>,
     is_real: bool,
     keypair: Option<&Keypair>,
-    simulate_keypair: Option<&Keypair>,
+    _simulate_keypair: Option<&Keypair>,
     settings: Arc<Settings>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
-    shyft_control_tx: mpsc::Sender<ShyftControlMessage>,
+    price_subscriber: Arc<Mutex<CliPriceSubscriber>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<TradeRecord>>>,
     bot_control: Arc<BotControl>,
 ) {
-    // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
-    static PRICE_MISS_WARN_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-    const PRICE_MISS_WARN_DEBOUNCE_SECS: u64 = 60;
-    static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-    const SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS: u64 = 30;
-    
-    let mut subscribed_mints = std::collections::HashSet::new();
+    // Helper to resolve the current price using PriceSubscriber, with RPC fallback
+    async fn resolve_price(
+        mint: &str,
+        price_subscriber: &Arc<Mutex<CliPriceSubscriber>>,
+        rpc_client: &Arc<RpcClient>,
+        settings: &Arc<Settings>,
+    ) -> Option<f64> {
+        if settings.price_source == "wss" {
+            // Ensure subscription and try cached price first
+            {
+                let sub = price_subscriber.lock().await;
+                let _ = sub.subscribe_mint(mint).await;
+                if let Some(p) = sub.cached_price(mint).await {
+                    return Some(p);
+                }
+            }
+
+            // Fallback to RPC and seed the cache
+            let cache = price_subscriber.lock().await.price_cache();
+            if let Ok(p) = rpc::fetch_current_price(mint, &cache, rpc_client, settings).await {
+                price_subscriber.lock().await.prime_price(mint, p).await;
+                return Some(p);
+            }
+        } else {
+            let cache = price_subscriber.lock().await.price_cache();
+            if let Ok(p) = rpc::fetch_current_price(mint, &cache, rpc_client, settings).await {
+                return Some(p);
+            }
+        }
+        None
+    }
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -64,64 +83,10 @@ pub async fn monitor_holdings(
                 to_remove.push(mint.clone());
                 continue;
             }
-            
-            // Ensure subscription if using WSS
-            if settings.price_source == "wss" {
-                if !subscribed_mints.contains(mint) {
-                    let _ = shyft_control_tx.send(ShyftControlMessage::SubscribePrice(mint.clone())).await;
-                    subscribed_mints.insert(mint.clone());
-                }
-            }
 
-            // Prefer WSS-provided cached prices when configured to use WSS only.
-            let current_price_result: Result<f64, Box<dyn std::error::Error + Send + Sync>> = if settings.price_source == "wss" {
-                let mut cache_guard = price_cache.lock().await;
-                if let Some((ts, price)) = cache_guard.get(mint) {
-                    // honor the cache TTL
-                    if Instant::now().duration_since(*ts) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
-                        Ok(*price)
-                    } else {
-                        Err(Box::new(std::io::Error::other(format!("WSS cached price for {} expired", mint))))
-                    }
-                } else {
-                    Err(Box::new(std::io::Error::other(format!("No WSS cached price for {}", mint))))
-                }
-            } else {
-                rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await
-            };
-
-            let current_price = match current_price_result {
-                Ok(price) => price,
-                Err(e) => {
-                    // If WSS failed (expired or missing), try one RPC prime
-                    if settings.price_source == "wss" {
-                         match rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await {
-                            Ok(p) => {
-                                debug!("Monitor primed price via RPC for {}: {:.18}", mint, p);
-                                p
-                            }
-                            Err(e2) => {
-                                let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                                let now = Instant::now();
-                                let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
-                                if should_log {
-                                    warns.insert(mint.clone(), now);
-                                    log::warn!("Price fetch failed for {}: {}", mint, e2);
-                                }
-                                if e2.to_string().contains("migrated") {
-                                    to_remove.push(mint.clone());
-                                }
-                                continue;
-                            }
-                        }
-                    } else {
-                        log::warn!("Price fetch failed for {}: {}", mint, e);
-                        if e.to_string().contains("migrated") {
-                            to_remove.push(mint.clone());
-                        }
-                        continue;
-                    }
-                }
+            let Some(current_price) = resolve_price(mint, &price_subscriber, &rpc_client, &settings).await else {
+                warn!("Price unavailable for {} - skipping", mint);
+                continue;
             };
             // current_price and holding.buy_price are SOL per token
             let profit_percent = if holding.buy_price != 0.0 {
@@ -144,17 +109,34 @@ pub async fn monitor_holdings(
 
             if should_sell {
                 // Attempt sell
-                match rpc::sell_token(
-                    mint,
-                    holding.amount,
-                    current_price,
-                    is_real,
-                    keypair,
-                    simulate_keypair,
-                    &rpc_client,
-                    &settings,
-                )
-                .await
+                let sell_result = if is_real {
+                    if let Some(payer) = keypair {
+                        let owned_kp = Keypair::try_from(&payer.to_bytes()[..]).unwrap();
+                        let signer = NativeTransactionSigner::new(owned_kp);
+                        let rpc_wrapper = NativeRpcClient::from_arc(rpc_client.clone());
+                        
+                        let config = SellConfig {
+                            mint: mint.clone(),
+                            amount: holding.amount,
+                            current_price_sol: current_price,
+                            close_ata: true,
+                        };
+                        
+                        SellService::execute_sell(config, &rpc_wrapper, &signer, &settings).await
+                    } else {
+                        Err(sol_beast_core::error::CoreError::Validation("Keypair required for real sell".to_string()))
+                    }
+                } else {
+                    info!("Simulating sell for {} (Dry Run)", mint);
+                    Ok(sol_beast_core::sell_service::SellResult {
+                        mint: mint.clone(),
+                        amount: holding.amount,
+                        transaction_signature: "simulated_sell_sig".to_string(),
+                        timestamp: Utc::now().timestamp(),
+                    })
+                };
+
+                match sell_result
                 {
                     Ok(_) => {
                         let _reason = if profit_percent >= settings.tp_percent {
@@ -274,16 +256,10 @@ pub async fn monitor_holdings(
         }
 
         if !to_remove.is_empty() {
-            // Unsubscribe from WSS for removed holdings to free subscription slots.
-            for mint in &to_remove {
-                if subscribed_mints.remove(mint) {
-                    let _ = shyft_control_tx.send(ShyftControlMessage::UnsubscribePrice(mint.clone())).await;
-                    debug!("Unsubscribed {} after sell", mint);
-                }
-            }
-
             let mut holdings_lock = holdings.lock().await;
             for mint in to_remove {
+                // Unsubscribe from price stream
+                let _ = price_subscriber.lock().await.unsubscribe_mint(&mint).await;
                 // Log removal to API for better observability
                 let _ = bot_control
                     .add_log(
@@ -294,25 +270,6 @@ pub async fn monitor_holdings(
                     .await;
                 holdings_lock.remove(&mint);
             }
-        }
-
-        // Clean up old entries from debounce maps (every 10 minutes) to prevent unbounded growth
-        static LAST_CLEANUP: Lazy<tokio::sync::Mutex<Option<Instant>>> = 
-            Lazy::new(|| tokio::sync::Mutex::new(None));
-        let mut last_cleanup = LAST_CLEANUP.lock().await;
-        let now = Instant::now();
-        if last_cleanup.is_none() || now.duration_since(last_cleanup.unwrap()) > std::time::Duration::from_secs(600) {
-            *last_cleanup = Some(now);
-            
-            // Clean up SUBSCRIBE_ATTEMPT_TIMES
-            let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
-            let cutoff = now - std::time::Duration::from_secs(SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS * 2);
-            attempts.retain(|_, last_time| *last_time > cutoff);
-            
-            // Clean up PRICE_MISS_WARN_TIMES  
-            let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-            let cutoff = now - std::time::Duration::from_secs(PRICE_MISS_WARN_DEBOUNCE_SECS * 2);
-            warns.retain(|_, last_time| *last_time > cutoff);
         }
     }
 }

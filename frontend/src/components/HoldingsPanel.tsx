@@ -106,7 +106,7 @@ export default function HoldingsPanel() {
       const instructionData = Buffer.from(txData.data, 'base64')
       
       // Step 3: Convert accounts to web3.js format
-      const keys = txData.accounts.map((acc: any) => ({
+      const keys = txData.accounts.map((acc: { pubkey: string; isSigner: boolean; isWritable: boolean }) => ({
         pubkey: new PublicKey(acc.pubkey),
         isSigner: acc.isSigner,
         isWritable: acc.isWritable,

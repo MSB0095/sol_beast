@@ -66,6 +66,9 @@ function App() {
                 solana_rpc_urls: config.httpsUrls,
                 solana_ws_urls: config.wssUrls,
               }
+              if (config.shyftApiKey) {
+                updatedSettings.shyft_api_key = config.shyftApiKey
+              }
               await botService.updateSettings(updatedSettings)
             } catch (err) {
               console.warn('Could not apply stored RPC config:', err)

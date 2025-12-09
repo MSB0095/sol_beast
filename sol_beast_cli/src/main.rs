@@ -1,17 +1,18 @@
 mod api;
 mod error;
 mod buyer;
-mod dev_fee;
-mod helius_sender;
+
 mod monitor;
 mod rpc;
-mod settings;
 mod state;
 mod ws;
 mod shyft_monitor;
+mod models;
+mod buy_wrapper;
+mod price_subscriber;
 
 // Use core library modules
-use sol_beast_core::{models, idl, tx_builder, error::CoreError};
+use sol_beast_core::{error::CoreError, settings};
 type AppError = CoreError;
 use api::{create_router, ApiState, BotStats};
 use ws::WsRequest;
@@ -61,6 +62,7 @@ use sol_beast_core::settings::{load_keypair_from_env_var, parse_private_key_stri
 use crate::{
     models::{Holding, PriceCache},
     state::BuyRecord,
+    price_subscriber::CliPriceSubscriber,
 };
 use chrono::Utc;
 use log::{debug, error, info};
@@ -224,7 +226,6 @@ async fn main() -> Result<(), AppError> {
 
     // Spawn price monitoring
     let holdings_clone_monitor = holdings.clone();
-    let price_cache_clone_monitor = price_cache.clone();
     let settings_clone_monitor = settings.clone();
     let keypair_clone_monitor = keypair.clone();
     let simulate_keypair_clone = simulate_keypair.clone();
@@ -233,6 +234,12 @@ async fn main() -> Result<(), AppError> {
     // Channel for receiving new token notifications from Shyft
     let (tx, mut rx) = mpsc::channel::<shyft_monitor::ShyftMonitorMessage>(100);
     let (shyft_control_tx, shyft_control_rx) = mpsc::channel::<shyft_monitor::ShyftControlMessage>(100);
+
+    let price_subscriber = Arc::new(Mutex::new(CliPriceSubscriber::new(
+        price_cache.clone(),
+        shyft_control_tx.clone(),
+        settings.price_cache_ttl_secs,
+    )));
 
     // Spawn Shyft Monitor
     let holdings_clone_shyft = holdings.clone();
@@ -253,7 +260,6 @@ async fn main() -> Result<(), AppError> {
     // Now spawn price monitoring (after shyft_control_tx exists so monitor
     // can unsubscribe subscriptions on sell).
     let rpc_client_clone = rpc_client.clone();
-    let shyft_control_tx_clone_for_monitor = shyft_control_tx.clone();
     let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();
     let trades_list_clone_for_monitor = trades_list.clone();
     let bot_control_for_monitor = bot_control.clone();
@@ -261,14 +267,13 @@ async fn main() -> Result<(), AppError> {
     let monitor_handle = tokio::spawn(async move {
         monitor::monitor_holdings(
             holdings_clone_monitor,
-            price_cache_clone_monitor,
             rpc_client_clone,
             is_real,
             keypair_clone_monitor.as_deref(),
             simulate_keypair_clone_for_monitor.as_deref(),
             settings_clone_monitor,
             trades_map_clone_monitor,
-            shyft_control_tx_clone_for_monitor,
+            price_subscriber.clone(),
             trades_list_clone_for_monitor,
             bot_control_for_monitor,
         )

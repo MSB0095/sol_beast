@@ -50,9 +50,11 @@ impl BondingCurveState {
 // Holdings and Price Cache
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Holding {
+    pub mint: String,
     pub amount: u64,
     pub buy_price: f64,
     pub buy_time: DateTime<Utc>,
+    pub creator: Option<String>,
     // Optional off-chain metadata retrieved from the token's URI (name, symbol, image, etc.)
     pub metadata: Option<OffchainTokenMetadata>,
     // Optional on-chain metadata (trimmed fields) retrieved from the token's metadata account

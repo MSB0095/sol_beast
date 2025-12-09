@@ -66,7 +66,7 @@ interface BotStore {
   pollInterval: number | null
   historicalData: HistoricalDataPoint[]
   lastStatUpdate: number
-  detectedCoins: any[]
+  detectedCoins: unknown[]
   initializeConnection: () => Promise<void>
   updateStatus: (status: BotStatus) => void
   updateStats: (stats: BotStats) => void
@@ -115,9 +115,9 @@ export const useBotStore = create<BotStore>((set, get) => ({
         // The stats will be managed by the WASM bot internally
         const pollWasmStats = async () => {
           try {
+            // IMPORTANT: WASM calls must be sequential, not parallel
+            // WASM mutexes are single-threaded and cannot handle concurrent access
             const status = await botService.getStatus()
-            const holdings = await botService.getHoldings()
-            const logs = await botService.getLogs()
             
             const now = Date.now()
             
@@ -125,11 +125,31 @@ export const useBotStore = create<BotStore>((set, get) => ({
             const runningState: BotRunningState = status.running ? 'running' : 'stopped'
             const botMode: BotMode = status.mode || 'dry-run'
             
+            // Only fetch holdings and logs if we successfully got status
+            // This avoids cascading mutex errors
+            let holdings = null
+            let logs = null
+            
+            try {
+              holdings = await botService.getHoldings()
+            } catch (holdingsErr) {
+              // console.warn('Failed to get holdings:', holdingsErr)
+            }
+            
+            try {
+              logs = await botService.getLogs()
+            } catch (logsErr) {
+              // console.warn('Failed to get logs:', logsErr)
+            }
+            
+            const currentStore = get()
+            const fallbackHoldings = currentStore.stats?.current_holdings || []
+
             const stats: BotStats = {
               total_buys: 0,
               total_sells: 0,
               total_profit: 0,
-              current_holdings: holdings || [],
+              current_holdings: holdings || fallbackHoldings,
               uptime_secs: 0,
               last_activity: new Date().toISOString(),
               running_state: runningState,
@@ -150,9 +170,10 @@ export const useBotStore = create<BotStore>((set, get) => ({
                   }
                 ].slice(-100)
                 
+                const safeLogs = logs && logs.length > 0 ? logs : state.logs
                 return {
                   stats,
-                  logs: logs || state.logs,
+                  logs: safeLogs,
                   historicalData: newHistoricalData,
                   lastStatUpdate: now,
                   runningState,
@@ -160,9 +181,10 @@ export const useBotStore = create<BotStore>((set, get) => ({
                 }
               }
               
+              const safeLogs = logs && logs.length > 0 ? logs : state.logs
               return {
                 stats,
-                logs: logs || state.logs,
+                logs: safeLogs,
                 runningState,
                 mode: botMode
               }
@@ -250,12 +272,14 @@ export const useBotStore = create<BotStore>((set, get) => ({
             try {
               // Use botService which handles both WASM and REST API modes
               const logs = await botService.getLogs()
-              if (logs && Array.isArray(logs)) {
-                set({ logs: logs })
-              } else if (logs && logs.logs && Array.isArray(logs.logs)) {
-                // Handle REST API format with logs wrapper
-                set({ logs: logs.logs })
-              }
+              const nextLogs = Array.isArray(logs)
+                ? logs
+                : Array.isArray((logs as { logs?: unknown }).logs)
+                  ? (logs as { logs?: unknown[] }).logs as unknown[]
+                  : null
+              set((state) => ({
+                logs: nextLogs && nextLogs.length > 0 ? nextLogs as typeof state.logs : state.logs
+              }))
             } catch (err) {
               console.error('Failed to fetch logs:', err)
             }

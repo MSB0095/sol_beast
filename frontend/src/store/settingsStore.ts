@@ -2,9 +2,9 @@ import { create } from 'zustand'
 import { botService } from '../services/botService'
 
 // Optional environment overrides for Shyft
-const env = (import.meta as any)?.env || {}
-const envShyftApiKey = env.VITE_SHYFT_API_KEY as string | undefined
-const envShyftGraphqlUrl = env.VITE_SHYFT_GRAPHQL_URL as string | undefined
+const env: Partial<typeof __VITE_ENV__> = typeof __VITE_ENV__ !== 'undefined' ? __VITE_ENV__ : {}
+const envShyftApiKey = env.VITE_SHYFT_API_KEY
+const envShyftGraphqlUrl = env.VITE_SHYFT_GRAPHQL_URL
 
 export interface Settings {
   // RPC & WebSocket

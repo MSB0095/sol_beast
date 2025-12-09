@@ -1,10 +1,11 @@
-// Vite environment variables
+// Environment variables (compatible with both Vite and Webpack)
 const getEnv = (key: string, fallback: string): string => {
-  try {
-    return (import.meta as any).env[key] || fallback
-  } catch {
-    return fallback
+  // @ts-expect-error - webpack DefinePlugin replaces these at build time
+  if (typeof __VITE_ENV__ !== 'undefined' && __VITE_ENV__[key]) {
+    // @ts-expect-error - Dynamic access to environment variables
+    return __VITE_ENV__[key]
   }
+  return fallback
 }
 
 export const API_BASE_URL = getEnv('VITE_API_BASE_URL', 'http://localhost:8080')

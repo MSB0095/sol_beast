@@ -87,7 +87,7 @@ pub async fn fetch_and_parse_transaction<R: RpcClient + ?Sized>(
 /// 
 /// # Returns
 /// * `Ok(TokenMetadata)` with whatever metadata could be fetched
-pub async fn fetch_complete_token_metadata<R: RpcClient + ?Sized, H: HttpClient>(
+pub async fn fetch_complete_token_metadata<R: RpcClient + ?Sized, H: HttpClient + ?Sized>(
     mint: &str,
     metadata_program: &str,
     rpc_client: &R,

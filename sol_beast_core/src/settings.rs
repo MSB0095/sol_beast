@@ -358,6 +358,58 @@ impl Settings {
     }
 }
 
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            solana_ws_urls: vec![],
+            solana_rpc_urls: vec![],
+            pump_fun_program: "".to_string(),
+            metadata_program: "".to_string(),
+            wallet_keypair_path: None,
+            wallet_keypair_json: None,
+            wallet_private_key_string: None,
+            simulate_wallet_private_key_string: None,
+            tp_percent: 0.0,
+            sl_percent: 0.0,
+            timeout_secs: 0,
+            cache_capacity: 1000,
+            price_cache_ttl_secs: 60,
+            buy_amount: default_buy_amount(),
+            price_source: default_price_source(),
+            rotate_rpc: default_rotate_rpc(),
+            rpc_rotate_interval_secs: default_rpc_rotate_interval_secs(),
+            max_holded_coins: default_max_holded_coins(),
+            max_subs_per_wss: default_max_subs_per_wss(),
+            sub_ttl_secs: default_sub_ttl_secs(),
+            wss_subscribe_timeout_secs: default_wss_subscribe_timeout_secs(),
+            max_create_to_buy_secs: default_max_create_to_buy_secs(),
+            bonding_curve_strict: default_bonding_curve_strict(),
+            bonding_curve_log_debounce_secs: default_bonding_curve_log_debounce_secs(),
+            simulate_wallet_keypair_json: None,
+            min_tokens_threshold: default_min_tokens_threshold(),
+            max_sol_per_token: default_max_sol_per_token(),
+            slippage_bps: default_slippage_bps(),
+            enable_safer_sniping: default_enable_safer_sniping(),
+            min_liquidity_sol: default_min_liquidity_sol(),
+            max_liquidity_sol: default_max_liquidity_sol(),
+            helius_sender_enabled: false,
+            helius_api_key: None,
+            helius_sender_endpoint: default_helius_sender_endpoint(),
+            helius_min_tip_sol: default_helius_min_tip_sol(),
+            helius_priority_fee_multiplier: default_helius_priority_fee_multiplier(),
+            helius_use_swqos_only: false,
+            helius_use_dynamic_tips: default_helius_use_dynamic_tips(),
+            helius_confirm_timeout_secs: default_helius_confirm_timeout_secs(),
+            dev_fee_enabled: default_dev_fee_enabled(),
+            dev_wallet_address: None,
+            dev_tip_percent: default_dev_tip_percent(),
+            dev_tip_fixed_sol: default_dev_tip_fixed_sol(),
+            shyft_api_key: None,
+            shyft_graphql_url: default_shyft_graphql_url(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

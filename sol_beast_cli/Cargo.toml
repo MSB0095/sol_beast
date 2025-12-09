@@ -24,6 +24,7 @@ futures-util = { workspace = true }
 once_cell = { workspace = true }
 chrono = { workspace = true }
 lru = { workspace = true }
+async-trait = "0.1"
 
 # HTTP server
 axum = { workspace = true }

@@ -1,7 +1,7 @@
-import { useSettingsStore } from '../store/settingsStore'
+import { useSettingsStore, Settings } from '../store/settingsStore'
 import { useBotStore } from '../store/botStore'
 import { useState } from 'react'
-import { Save, AlertCircle, CheckCircle, Settings } from 'lucide-react'
+import { Save, AlertCircle, CheckCircle, Settings as SettingsIcon } from 'lucide-react'
 import RPCConfigModal from './RPCConfigModal'
 import { botService } from '../services/botService'
 import { isWasmMode } from '../utils/wasmDetection'
@@ -26,8 +26,8 @@ export default function ConfigurationPanel() {
     setTimeout(() => setSuccessMessage(''), 5000)
   }
 
-  const handleChange = <K extends keyof typeof settings>(key: K, value: any) => {
-    updateSetting(key, value)
+  const handleChange = <K extends keyof typeof settings>(key: K, value: unknown) => {
+    updateSetting(key, value as Settings[K])
   }
 
   const handleRPCConfigured = async () => {
@@ -37,7 +37,7 @@ export default function ConfigurationPanel() {
       const updatedSettings = await botService.getSettings()
       // Update each setting
       Object.entries(updatedSettings).forEach(([key, value]) => {
-        updateSetting(key as any, value)
+        updateSetting(key as keyof typeof settings, value as Settings[keyof Settings])
       })
       setSuccessMessage('RPC configuration updated successfully!')
       setTimeout(() => setSuccessMessage(''), 5000)
@@ -193,7 +193,7 @@ export default function ConfigurationPanel() {
                 onClick={() => setShowRPCModal(true)}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg btn-secondary text-xs font-mono-tech uppercase tracking-wider"
               >
-                <Settings size={16} />
+                <SettingsIcon size={16} />
                 Guided Setup
               </button>
             )}
@@ -204,14 +204,14 @@ export default function ConfigurationPanel() {
               <div key={setting.key}>
                 <label className="block text-sm font-medium mb-2">
                   {setting.label}
-                  {(setting as any).help && <span className="text-xs ml-2" style={{ color: 'var(--theme-text-muted)' }}>({(setting as any).help})</span>}
+                  {'help' in setting && <span className="text-xs ml-2" style={{ color: 'var(--theme-text-muted)' }}>({(setting as { help: string }).help})</span>}
                 </label>
 
                 {setting.type === 'checkbox' && (
                   <div className="flex items-center gap-3">
                     <input
                       type="checkbox"
-                      checked={settings[setting.key] as any}
+                      checked={settings[setting.key] as boolean}
                       onChange={(e) => handleChange(setting.key, e.target.checked)}
                       className="w-5 h-5 rounded cursor-pointer accent-[var(--theme-accent)]"
                       style={{
@@ -228,7 +228,7 @@ export default function ConfigurationPanel() {
                 {setting.type === 'number' && (
                   <input
                     type="number"
-                    value={settings[setting.key] as any}
+                    value={settings[setting.key] as number}
                     onChange={(e) => handleChange(setting.key, parseFloat(e.target.value))}
                     className="w-full px-3 py-2 rounded-xl transition-all"
                     step="any"
@@ -268,7 +268,7 @@ export default function ConfigurationPanel() {
                     onChange={(e) => handleChange(setting.key, e.target.value)}
                     className="w-full px-3 py-2 rounded-xl transition-all uppercase"
                   >
-                    {(setting as any).options?.map((opt: string) => (
+                    {('options' in setting ? (setting as { options: string[] }).options : []).map((opt: string) => (
                       <option key={opt} value={opt} style={{ 
                         backgroundColor: 'var(--theme-bg-input)',
                         color: 'var(--theme-input-text)'

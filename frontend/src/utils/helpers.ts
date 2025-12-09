@@ -63,7 +63,7 @@ export const abbreviateNumber = (num: number): string => {
 }
 
 // Debounce helper
-export const debounce = <T extends (...args: any[]) => any>(
+export const debounce = <T extends (...args: unknown[]) => unknown>(
   fn: T,
   delay: number
 ): ((...args: Parameters<T>) => void) => {
@@ -77,7 +77,7 @@ export const debounce = <T extends (...args: any[]) => any>(
 
 // Local storage helpers
 export const storage = {
-  get: (key: string): any => {
+  get: (key: string): unknown => {
     try {
       const item = localStorage.getItem(key)
       return item ? JSON.parse(item) : null
@@ -85,7 +85,7 @@ export const storage = {
       return null
     }
   },
-  set: (key: string, value: any): void => {
+  set: (key: string, value: unknown): void => {
     localStorage.setItem(key, JSON.stringify(value))
   },
   remove: (key: string): void => {

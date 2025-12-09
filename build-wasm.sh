@@ -14,11 +14,12 @@ fi
 # Build WASM package with memory growth and larger initial memory
 cd "$(dirname "$0")/sol_beast_wasm"
 
-# Set RUSTFLAGS for memory configuration
-export RUSTFLAGS="-C link-arg=--initial-memory=33554432 -C link-arg=--max-memory=134217728"
+# Set RUSTFLAGS for memory configuration with larger limits
+# Initial: 128MB (134217728 bytes), Max: 512MB (536870912 bytes)
+export RUSTFLAGS="-C link-arg=--initial-memory=134217728 -C link-arg=--max-memory=536870912"
 
 # Build with wasm-pack
-wasm-pack build --target web --out-dir ../frontend/src/wasm --release -- --features wee_alloc
+wasm-pack build --target web --out-dir ../frontend/src/wasm --release
 
 # Optional: Run wasm-opt for further optimization (requires binaryen)
 if command -v wasm-opt &> /dev/null; then
@@ -28,4 +29,4 @@ fi
 
 echo "✓ WASM module built successfully!"
 echo "Output: frontend/src/wasm/"
-echo "Memory configuration: Initial=16MB, Max=32MB"
+echo "Memory configuration: Initial=128MB, Max=512MB"

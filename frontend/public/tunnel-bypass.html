@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sol Beast - Loading...</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+        }
+        .loader-container {
+            text-align: center;
+            padding: 2rem;
+        }
+        .loader {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 1.5rem;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        h1 {
+            font-size: 2rem;
+            margin: 0 0 0.5rem;
+        }
+        p {
+            font-size: 1rem;
+            opacity: 0.9;
+            margin: 0.5rem 0;
+        }
+        .info {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1.5rem;
+            font-size: 0.9rem;
+            max-width: 400px;
+        }
+        .error {
+            background: rgba(255, 0, 0, 0.2);
+            border: 1px solid rgba(255, 0, 0, 0.5);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+            display: none;
+        }
+        .manual-link {
+            display: none;
+            margin-top: 1rem;
+        }
+        .manual-link a {
+            color: white;
+            text-decoration: underline;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="loader-container">
+        <div class="loader"></div>
+        <h1>🐺 Sol Beast</h1>
+        <p id="status">Bypassing tunnel screen...</p>
+        <div class="info">
+            <p>Setting up direct access to avoid password prompt</p>
+        </div>
+        <div class="error" id="error">
+            <p>Unable to bypass automatically. Please click below:</p>
+        </div>
+        <div class="manual-link" id="manual-link">
+            <a href="#" id="direct-link">Click here to access Sol Beast</a>
+        </div>
+    </div>
+
+    <script>
+        // Get the actual tunnel URL from the current location
+        const tunnelUrl = window.location.href;
+        
+        // Function to create iframe with custom headers approach
+        function bypassWithIframe() {
+            const status = document.getElementById('status');
+            status.textContent = 'Setting up bypass...';
+            
+            // Create a form that will POST to the tunnel with bypass header
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = tunnelUrl;
+            form.style.display = 'none';
+            
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'bypass-tunnel-reminder';
+            input.value = 'true';
+            form.appendChild(input);
+            
+            document.body.appendChild(form);
+            
+            // Try to redirect with modified request
+            setTimeout(() => {
+                // Method 1: Try to set custom User-Agent via fetch and redirect
+                fetch(tunnelUrl, {
+                    method: 'GET',
+                    headers: {
+                        'bypass-tunnel-reminder': 'true',
+                        'User-Agent': 'SolBeast-Direct-Access/1.0'
+                    }
+                }).then(() => {
+                    window.location.href = tunnelUrl;
+                }).catch(() => {
+                    // Method 2: Show manual link
+                    showManualLink();
+                });
+            }, 1000);
+        }
+        
+        // Function to show manual link with custom User-Agent hint
+        function showManualLink() {
+            const status = document.getElementById('status');
+            const error = document.getElementById('error');
+            const manualLink = document.getElementById('manual-link');
+            const directLink = document.getElementById('direct-link');
+            
+            status.textContent = 'Bypass requires manual access';
+            error.style.display = 'block';
+            manualLink.style.display = 'block';
+            
+            // Set the direct link
+            directLink.href = tunnelUrl;
+            directLink.onclick = (e) => {
+                e.preventDefault();
+                // Open in new window with custom attributes
+                window.open(tunnelUrl, '_blank', 'noopener,noreferrer');
+            };
+        }
+        
+        // Auto-redirect approach: Since we can't set headers from HTML,
+        // we'll create a service that does this server-side
+        function autoBypass() {
+            const status = document.getElementById('status');
+            status.textContent = 'Attempting automatic bypass...';
+            
+            // Check if we're already at the actual tunnel URL
+            if (window.location.hostname.includes('loca.lt')) {
+                // We're at the tunnel, just redirect
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1500);
+            } else {
+                showManualLink();
+            }
+        }
+        
+        // Start bypass on load
+        window.onload = () => {
+            autoBypass();
+        };
+    </script>
+</body>
+</html>

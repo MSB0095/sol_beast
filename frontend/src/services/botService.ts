@@ -2,7 +2,7 @@
 import { API_BASE_URL, API_DETECTED_COINS_URL } from '../config'
 
 // Feature detection - automatically enable WASM mode on GitHub Pages
-const USE_WASM = import.meta.env.VITE_USE_WASM === 'true' || 
+const USE_WASM = (typeof __VITE_ENV__ !== 'undefined' && __VITE_ENV__.VITE_USE_WASM === 'true') || 
                  window.location.hostname.endsWith('.github.io')
 
 // TypeScript interface for WASM bot methods
@@ -31,6 +31,45 @@ interface WasmBot {
 
 let wasmBot: WasmBot | null = null
 let wasmInitialized = false
+
+type BotSettingsShape = {
+  solana_ws_urls: string[]
+  solana_rpc_urls: string[]
+  pump_fun_program: string
+  metadata_program: string
+  tp_percent: number
+  sl_percent: number
+  timeout_secs: number
+  buy_amount: number
+  max_holded_coins: number
+  slippage_bps: number
+  min_tokens_threshold: number
+  max_sol_per_token: number
+  min_liquidity_sol: number
+  max_liquidity_sol: number
+  dev_tip_percent: number
+  dev_tip_fixed_sol: number
+  shyft_api_key: string
+  shyft_graphql_url: string
+  enable_safer_sniping?: boolean
+}
+
+// Force a full WASM restart and reapply sane defaults to recover from memory corruption
+async function rebuildWasm(reason: string): Promise<WasmBot> {
+  console.warn('Rebuilding WASM bot after critical error:', reason)
+  wasmBot = null
+  wasmInitialized = false
+  const ok = await initWasm()
+  if (!ok || !wasmBot) {
+    throw new Error('Failed to reinitialize WASM bot')
+  }
+
+  // Re-seed settings with validated defaults to avoid corrupted state lingering in memory
+  const defaults = await loadDefaultSettings()
+  const bot = wasmBot as WasmBot
+  bot.update_settings(JSON.stringify(defaults))
+  return bot
+}
 
 // Check if an error is a critical WASM error that requires recovery
 function isCriticalWasmError(err: unknown, errorMsg: string): boolean {
@@ -70,30 +109,60 @@ function validateSettings(settings: unknown): boolean {
   return hasValidArrays && hasValidStrings
 }
 
+const HARDCODED_DEFAULTS: BotSettingsShape = {
+  solana_ws_urls: ["wss://api.mainnet-beta.solana.com/"],
+  solana_rpc_urls: ["https://api.mainnet-beta.solana.com"],
+  pump_fun_program: "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  metadata_program: "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+  tp_percent: 100.0,
+  sl_percent: -50.0,
+  timeout_secs: 50,
+  buy_amount: 0.001,
+  max_holded_coins: 4,
+  slippage_bps: 500,
+  min_tokens_threshold: 30000,
+  max_sol_per_token: 0.002,
+  min_liquidity_sol: 0.0,
+  max_liquidity_sol: 15.0,
+  dev_tip_percent: 2.0,
+  dev_tip_fixed_sol: 0.0,
+  shyft_api_key: "",
+  shyft_graphql_url: "https://programs.shyft.to/v0/graphql/?api_key=&network=mainnet-beta"
+}
+
 // Load default settings from static JSON file
-async function loadDefaultSettings() {
+async function loadDefaultSettings(): Promise<BotSettingsShape> {
   try {
-    // Determine the base path for the static file
-    // In production (GitHub Pages), this needs to include the repo name
-    const basePath = import.meta.env.BASE_URL || '/'
-    const response = await fetch(`${basePath}bot-settings.json`)
+    // Try loading from the public directory
+    // For local development, use relative path from root
+    // For production (GitHub Pages), use base path
+    let response
+    try {
+      // Try relative path first (works in dev mode)
+      response = await fetch('/bot-settings.json')
+    } catch (err) {
+      // If that fails, try with base path (for production)
+      const basePath = typeof __VITE_ENV__ !== 'undefined' ? __VITE_ENV__.BASE_URL : '/'
+      response = await fetch(`${basePath}bot-settings.json`)
+    }
+    
     if (!response.ok) {
-      console.warn('Could not load default settings from bot-settings.json')
-      return null
+      console.warn('Could not load default settings from bot-settings.json, using hardcoded defaults')
+      return HARDCODED_DEFAULTS
     }
     const settings = await response.json()
     
     // Validate loaded settings before returning
     if (!validateSettings(settings)) {
-      console.warn('Loaded settings from bot-settings.json are invalid')
-      return null
+      console.warn('Loaded settings from bot-settings.json are invalid, using hardcoded defaults')
+      return HARDCODED_DEFAULTS
     }
     
     console.log('✓ Loaded default settings from bot-settings.json')
     return settings
   } catch (error) {
-    console.warn('Failed to load default settings:', error)
-    return null
+    console.warn('Failed to load default settings, using hardcoded defaults:', error)
+    return HARDCODED_DEFAULTS
   }
 }
 
@@ -104,18 +173,33 @@ async function initWasm() {
   
   try {
     console.log('Initializing WASM module...')
+    
+    // Clear potentially corrupted localStorage before initialization
+    try {
+      localStorage.removeItem('sol_beast_settings')
+      localStorage.removeItem('sol_beast_state')
+      localStorage.removeItem('sol_beast_holdings')
+      console.log('✓ Cleared localStorage before WASM initialization')
+    } catch (e) {
+      console.warn('Could not clear localStorage:', e)
+    }
+    
     // Dynamically import WASM module
     const wasm = await import('../wasm/sol_beast_wasm')
+    console.log('✓ WASM module imported successfully')
     
-    // Initialize WASM with memory growth enabled (this calls wasm-bindgen initialization)
-    // Pass WebAssembly.Memory options to enable memory growth
+    // Initialize WASM module without custom memory (let wasm-bindgen handle it)
+    // The custom memory approach was causing initialization issues
     await wasm.default()
+    console.log('✓ WASM module initialized')
     
     // Note: wasm.init() is called automatically by #[wasm_bindgen(start)]
     // during wasm.default(), so we don't need to call it explicitly
     
     // Create bot instance (this will load from localStorage if available)
+    console.log('Creating SolBeastBot instance...')
     wasmBot = new wasm.SolBeastBot()
+    console.log('✓ SolBeastBot instance created')
     
     // Check if settings are present and valid, if not, try to load from static file
     try {
@@ -169,7 +253,7 @@ export const botService = {
 
   // Check if using WASM mode
   isWasmMode() {
-    return USE_WASM && wasmInitialized
+    return USE_WASM
   },
 
   // Start bot
@@ -196,19 +280,14 @@ export const botService = {
           
           // Attempt recovery for critical errors (WASM panics, uninitialized state, etc.)
           if (isCriticalWasmError(err, errorMsg)) {
-            console.log('Critical error detected, attempting recovery by loading defaults...')
-            const defaultSettings = await loadDefaultSettings()
-            if (defaultSettings) {
-              try {
-                wasmBot.update_settings(JSON.stringify(defaultSettings))
-                settingsJson = wasmBot.get_settings()
-                console.log('✓ Successfully recovered with default settings')
-              } catch (recoveryError) {
-                const recoveryMsg = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
-                throw new Error(`Failed to recover bot settings: ${recoveryMsg}. Original error: ${errorMsg}`)
-              }
-            } else {
-              throw new Error(`Failed to get bot settings and could not load defaults. Please refresh the page. Error: ${errorMsg}`)
+            console.log('Critical error detected, attempting full WASM rebuild...')
+            try {
+              const bot: WasmBot = await rebuildWasm('settings retrieval failed during start')
+              settingsJson = bot.get_settings()
+              console.log('✓ Successfully recovered via WASM rebuild')
+            } catch (recoveryError) {
+              const recoveryMsg = recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+              throw new Error(`Failed to recover bot settings after rebuild: ${recoveryMsg}. Original error: ${errorMsg}`)
             }
           } else {
             throw new Error(`Failed to get bot settings: ${errorMsg}`)
@@ -233,6 +312,15 @@ export const botService = {
           wasmBot.start()
         } catch (err) {
           console.error('Failed to start WASM bot:', err)
+          const errorMsg = err instanceof Error ? err.message : String(err)
+          
+          // Check for critical WASM errors
+          if (isCriticalWasmError(err, errorMsg)) {
+             console.error('Critical WASM error during start, resetting instance...')
+             wasmInitialized = false
+             wasmBot = null
+          }
+
           // Re-throw to preserve error information
           if (err instanceof Error) {
             throw err
@@ -303,23 +391,13 @@ export const botService = {
         if (isCriticalWasmError(error, errorMsg)) {
           console.log('Critical WASM error detected during mode change, attempting recovery...')
           
-          // Try to recover by clearing corrupted state
           try {
-            // Clear corrupted data from localStorage
             localStorage.removeItem('sol_beast_settings')
             localStorage.removeItem('sol_beast_state')
             localStorage.removeItem('sol_beast_holdings')
-            
-            // Load default settings
-            const defaultSettings = await loadDefaultSettings()
-            if (defaultSettings) {
-              wasmBot.update_settings(JSON.stringify(defaultSettings))
-              console.log('✓ Recovered with default settings after mode change error')
-              
-              // Retry mode change after recovery
-              wasmBot.set_mode(mode)
-              return { success: true, mode }
-            }
+            const bot: WasmBot = await rebuildWasm('mode change memory error')
+            bot.set_mode(mode)
+            return { success: true, mode }
           } catch (recoveryError) {
             console.error('Recovery failed:', recoveryError)
             throw new Error(`Failed to recover from memory error. Please refresh the page. Original error: ${errorMsg}`)
@@ -373,6 +451,8 @@ export const botService = {
           try {
             localStorage.removeItem('sol_beast_settings')
             localStorage.removeItem('sol_beast_state')
+            // Attempt a lightweight rebuild so subsequent calls have a clean instance
+            await rebuildWasm('getStatus memory error')
           } catch (e) {
             console.error('Failed to clear localStorage:', e)
           }
@@ -398,10 +478,15 @@ export const botService = {
   async getSettings() {
     if (this.isWasmMode()) {
       if (!wasmBot || !wasmInitialized) {
-        // Wait a moment for initialization
+        // If WASM failed to init, try to return defaults so UI can work
+        console.warn('WASM not initialized, returning default settings')
+        const defaults = await loadDefaultSettings()
+        if (defaults) return defaults
+        
+        // Wait a moment for initialization as a last resort
         await new Promise(resolve => setTimeout(resolve, 100))
         if (!wasmBot || !wasmInitialized) {
-          throw new Error('WASM bot is not initialized')
+          throw new Error('WASM bot is not initialized and defaults could not be loaded')
         }
       }
       try {
@@ -425,13 +510,11 @@ export const botService = {
           
           // Try to recover by loading defaults
           try {
+            const bot: WasmBot = await rebuildWasm('get_settings memory error')
             const defaultSettings = await loadDefaultSettings()
-            if (defaultSettings && wasmBot) {
-              // Update WASM with default settings
-              wasmBot.update_settings(JSON.stringify(defaultSettings))
-              console.log('✓ Recovered settings from default configuration')
-              return defaultSettings
-            }
+            bot.update_settings(JSON.stringify(defaultSettings))
+            console.log('✓ Recovered settings from default configuration after rebuild')
+            return defaultSettings
           } catch (recoveryError) {
             console.error('Failed to load default settings during recovery:', recoveryError)
           }
@@ -451,7 +534,7 @@ export const botService = {
   },
 
   // Update settings
-  async updateSettings(settings: any) {
+  async updateSettings(settings: unknown) {
     if (this.isWasmMode()) {
       if (!wasmBot) {
         throw new Error('WASM bot is not initialized')
@@ -605,7 +688,7 @@ export const botService = {
   // Phase 4: Holdings Management Methods
 
   // Add a holding after successful purchase
-  addHolding(mint: string, amount: bigint, buyPrice: number, metadata?: any) {
+  addHolding(mint: string, amount: bigint, buyPrice: number, metadata?: unknown) {
     if (this.isWasmMode()) {
       if (!wasmBot) {
         throw new Error('WASM bot is not initialized')

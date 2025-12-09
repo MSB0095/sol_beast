@@ -33,7 +33,8 @@ impl NativeRpcClient {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(feature = "native", async_trait)]
+#[cfg_attr(not(feature = "native"), async_trait(?Send))]
 impl RpcClientTrait for NativeRpcClient {
     async fn get_latest_blockhash(&self) -> RpcResult<String> {
         debug!("Native RPC: get_latest_blockhash");

@@ -14,8 +14,7 @@ export function isWasmMode(botService?: { isWasmMode: () => boolean }): boolean 
   // Check environment variable
   try {
     // Direct access to allow Webpack DefinePlugin to replace the whole expression
-    // @ts-ignore
-    if (import.meta.env.VITE_USE_WASM === 'true') {
+    if (typeof __VITE_ENV__ !== 'undefined' && __VITE_ENV__.VITE_USE_WASM === 'true') {
       return true
     }
   } catch {

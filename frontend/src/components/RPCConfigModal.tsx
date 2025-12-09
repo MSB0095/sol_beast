@@ -4,6 +4,7 @@ import { botService } from '../services/botService'
 interface RPCConfig {
   httpsUrls: string[]
   wssUrls: string[]
+  shyftApiKey?: string
 }
 
 interface RPCConfigModalProps {
@@ -46,6 +47,7 @@ export function getStoredRPCConfig(): RPCConfig | null {
 export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
   const [httpsUrl, setHttpsUrl] = useState('')
   const [wssUrl, setWssUrl] = useState('')
+  const [shyftApiKey, setShyftApiKey] = useState('')
   const [httpsUrls, setHttpsUrls] = useState<string[]>([])
   const [wssUrls, setWssUrls] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -58,6 +60,9 @@ export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
     if (config) {
       setHttpsUrls(config.httpsUrls)
       setWssUrls(config.wssUrls)
+      if (config.shyftApiKey) {
+        setShyftApiKey(config.shyftApiKey)
+      }
     }
   }, [])
 
@@ -217,6 +222,7 @@ export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
     const config: RPCConfig = {
       httpsUrls,
       wssUrls,
+      shyftApiKey: shyftApiKey.trim() || undefined,
     }
 
     // Save to localStorage
@@ -228,6 +234,9 @@ export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
       const settings = await botService.getSettings()
       settings.solana_rpc_urls = httpsUrls
       settings.solana_ws_urls = wssUrls
+      if (shyftApiKey.trim()) {
+        settings.shyft_api_key = shyftApiKey.trim()
+      }
       await botService.updateSettings(settings)
     } catch (err) {
       console.warn('Could not update bot settings immediately:', err)
@@ -344,6 +353,25 @@ export default function RPCConfigModal({ onConfigured }: RPCConfigModalProps) {
               </div>
             ))}
           </div>
+        </div>
+
+        {/* Shyft API Key (Optional) */}
+        <div className="mb-6">
+          <label className="font-mono-tech font-bold text-sm mb-2 block uppercase tracking-wider text-[var(--theme-accent)]">
+            Shyft API Key (Optional)
+          </label>
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={shyftApiKey}
+              onChange={(e) => setShyftApiKey(e.target.value)}
+              placeholder="Enter your Shyft API Key"
+              className="flex-1 font-mono-tech text-sm p-3 bg-black electric-border focus:outline-none focus:ring-2 focus:ring-[var(--theme-accent)]"
+            />
+          </div>
+          <p className="font-mono-tech text-xs text-[var(--theme-text-secondary)]">
+            Required for some advanced features.
+          </p>
         </div>
 
         {/* Test Results */}

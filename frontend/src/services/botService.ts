@@ -41,6 +41,7 @@ type BotSettingsShape = {
   sl_percent: number
   timeout_secs: number
   buy_amount: number
+  cache_capacity: number
   max_holded_coins: number
   slippage_bps: number
   min_tokens_threshold: number
@@ -118,6 +119,7 @@ const HARDCODED_DEFAULTS: BotSettingsShape = {
   sl_percent: -50.0,
   timeout_secs: 50,
   buy_amount: 0.001,
+  cache_capacity: 1024,
   max_holded_coins: 4,
   slippage_bps: 500,
   min_tokens_threshold: 30000,

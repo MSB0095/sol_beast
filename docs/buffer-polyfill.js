@@ -1,0 +1,1 @@
+!function(){"use strict";void 0===window.Buffer?(window.global=window,console.log("Buffer polyfill placeholder loaded, waiting for module initialization")):console.log("Buffer already defined")}();

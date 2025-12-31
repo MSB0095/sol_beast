@@ -66,15 +66,17 @@ impl Monitor {
         pump_fun_program: &str,
         log_callback: Arc<dyn Fn(String, String, String)>,
         signature_callback: Option<Arc<dyn Fn(String)>>,
-        is_shyft: bool,
     ) -> Result<(), JsValue> {
+        // Simplified start: always use standard RPC logic
+        let is_shyft = false; // Rigidly false
+
         info!("Starting WASM monitor for pump.fun program: {}", pump_fun_program);
         
         // Log the start attempt
         log_callback(
             "info".to_string(),
             "Initializing monitor".to_string(),
-            format!("Connecting to WebSocket: {}\nTarget program: {}\nMode: {}", ws_url, pump_fun_program, if is_shyft { "Shyft GraphQL" } else { "Legacy RPC" })
+            format!("Connecting to WebSocket: {}\nTarget program: {}\nMode: Standard RPC", ws_url, pump_fun_program)
         );
 
         // Create WebSocket connection
@@ -132,47 +134,7 @@ impl Monitor {
                 "Preparing to subscribe to program logs".to_string()
             );
             
-            let subscribe_msg = if is_shyft {
-                // Send connection_init first
-                let init_msg = serde_json::json!({ "type": "connection_init", "payload": {} }).to_string();
-                if let Err(e) = ws_for_open.send_with_str(&init_msg) {
-                    error!("Failed to send connection_init: {:?}", e);
-                    log_cb_for_open(
-                        "error".to_string(),
-                        "Failed to send connection_init".to_string(),
-                        format!("Error: {:?}", e)
-                    );
-                }
-
-                let query = format!(r#"
-                    subscription {{
-                        Transaction(
-                            where: {{
-                                instructions: {{
-                                    programId: {{ _eq: "{}" }}
-                                }}
-                            }}
-                        ) {{
-                            signature
-                            instructions {{
-                                programId
-                                data
-                                accounts
-                            }}
-                        }}
-                    }}
-                "#, pump_prog_for_sub);
-
-                serde_json::json!({
-                    "id": "1",
-                    "type": "start",
-                    "payload": {
-                        "query": query,
-                        "variables": {}
-                    }
-                })
-            } else {
-                serde_json::json!({
+            let subscribe_msg = serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "logsSubscribe",
@@ -180,8 +142,7 @@ impl Monitor {
                         { "mentions": [ &pump_prog_for_sub ] },
                         { "commitment": "confirmed" }
                     ]
-                })
-            };
+                });
 
             if let Ok(msg_str) = serde_json::to_string(&subscribe_msg) {
                 info!("Sending subscription request: {}", msg_str);
@@ -277,32 +238,8 @@ impl Monitor {
                 // Parse the message
                 match serde_json::from_str::<Value>(&message) {
                     Ok(value) => {
-                        if is_shyft {
-                            // Handle Shyft GraphQL response
-                            let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if msg_type == "data" {
-                                if let Some(payload) = value.get("payload") {
-                                    if let Some(data) = payload.get("data") {
-                                        if let Some(transactions) = data.get("Transaction").and_then(|t| t.as_array()) {
-                                            for tx in transactions {
-                                                if let Some(sig) = tx.get("signature").and_then(|s| s.as_str()) {
-                                                    // Increment pump count
-                                                    increment_counter(&pump_msg_count_for_handler);
-                                                    
-                                                    // Call signature callback
-                                                    if let Some(cb) = &sig_callback {
-                                                        cb(sig.to_string());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            } else if msg_type == "connection_ack" {
-                                info!("Shyft connection acknowledged");
-                            }
-                        } else {
-                            // Legacy handling
+                        {
+                            // Standard RPC handling only
                             // Check if this is a subscription confirmation
                             if let Some(result) = value.get("result") {
                                 if let Some(sub_id) = result.as_u64() {

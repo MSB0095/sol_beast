@@ -1,33 +1,39 @@
 use crate::models::PriceCache;
-use crate::shyft_monitor::ShyftControlMessage;
+use crate::ws::WsRequest;
 use sol_beast_core::error::CoreError;
 use sol_beast_core::price_subscriber::PriceSubscriber;
 use async_trait::async_trait;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, oneshot};
 use std::time::Instant;
+use solana_program::pubkey::Pubkey;
+use std::str::FromStr;
 
-/// CLI-specific PriceSubscriber that bridges the Shyft control channel and shared price cache.
+/// CLI-specific PriceSubscriber that bridges the WSS control channel and shared price cache.
 /// It implements the Core PriceSubscriber trait so monitor logic can stay thin.
 pub struct CliPriceSubscriber {
     price_cache: Arc<Mutex<PriceCache>>,
-    shyft_control_tx: mpsc::Sender<ShyftControlMessage>,
-    subscribed: StdMutex<HashSet<String>>,
+    ws_control_tx: mpsc::Sender<WsRequest>,
+    // Map mint -> subscription ID (returned by RPC)
+    subscribed: StdMutex<HashMap<String, u64>>,
     price_cache_ttl_secs: u64,
+    pump_fun_program: String,
 }
 
 impl CliPriceSubscriber {
     pub fn new(
         price_cache: Arc<Mutex<PriceCache>>,
-        shyft_control_tx: mpsc::Sender<ShyftControlMessage>,
+        ws_control_tx: mpsc::Sender<WsRequest>,
         price_cache_ttl_secs: u64,
+        pump_fun_program: String,
     ) -> Self {
         Self {
             price_cache,
-            shyft_control_tx,
-            subscribed: StdMutex::new(HashSet::new()),
+            ws_control_tx,
+            subscribed: StdMutex::new(HashMap::new()),
             price_cache_ttl_secs,
+            pump_fun_program,
         }
     }
 
@@ -44,36 +50,63 @@ impl CliPriceSubscriber {
 
     /// Subscribe to price updates (idempotent) using interior mutability.
     pub async fn subscribe_mint(&self, mint: &str) -> Result<(), CoreError> {
-        let should_send = {
-            let mut set = self.subscribed.lock().unwrap();
-            if set.contains(mint) {
-                false
-            } else {
-                set.insert(mint.to_string());
-                true
-            }
+        let should_subscribe = {
+            let map = self.subscribed.lock().unwrap();
+            !map.contains_key(mint)
         };
-        if should_send {
-            let _ = self
-                .shyft_control_tx
-                .send(ShyftControlMessage::SubscribePrice(mint.to_string()))
-                .await;
+
+        if should_subscribe {
+            // Derive Bonding Curve PDA
+            let program_id = Pubkey::from_str(&self.pump_fun_program)
+                .map_err(|e| CoreError::ParseError(format!("Invalid pump program: {}", e)))?;
+            let mint_pk = Pubkey::from_str(mint)
+                .map_err(|e| CoreError::ParseError(format!("Invalid mint: {}", e)))?;
+            let (pda, _) = Pubkey::find_program_address(
+                &[b"bonding-curve", mint_pk.as_ref()],
+                &program_id,
+            );
+            
+            let (tx, rx) = oneshot::channel();
+            self.ws_control_tx
+                .send(WsRequest::Subscribe {
+                    account: pda.to_string(),
+                    mint: mint.to_string(),
+                    resp: tx,
+                })
+                .await
+                .map_err(|e| CoreError::Rpc(format!("Failed to send WSS subscribe request: {}", e)))?;
+            
+            match rx.await {
+                Ok(Ok(sub_id)) => {
+                    let mut map = self.subscribed.lock().unwrap();
+                    map.insert(mint.to_string(), sub_id);
+                }
+                Ok(Err(e)) => return Err(CoreError::Rpc(format!("WSS subscription failed: {}", e))),
+                Err(e) => return Err(CoreError::Rpc(format!("WSS response channel closed: {}", e))),
+            }
         }
         Ok(())
     }
 
     /// Unsubscribe and clear cached price.
     pub async fn unsubscribe_mint(&self, mint: &str) -> Result<(), CoreError> {
-        let should_send = {
-            let mut set = self.subscribed.lock().unwrap();
-            set.remove(mint)
+        let sub_id = {
+            let mut map = self.subscribed.lock().unwrap();
+            map.remove(mint)
         };
-        if should_send {
-            let _ = self
-                .shyft_control_tx
-                .send(ShyftControlMessage::UnsubscribePrice(mint.to_string()))
+        
+        if let Some(id) = sub_id {
+            let (tx, rx) = oneshot::channel();
+            let _ = self.ws_control_tx
+                .send(WsRequest::Unsubscribe {
+                    sub_id: id,
+                    resp: tx,
+                })
                 .await;
+            // Best effort await
+            let _ = rx.await;
         }
+        
         let mut cache = self.price_cache.lock().await;
         cache.pop(mint);
         Ok(())
@@ -94,35 +127,11 @@ impl CliPriceSubscriber {
 #[async_trait(?Send)]
 impl PriceSubscriber for CliPriceSubscriber {
     async fn subscribe(&mut self, mint: &str) -> Result<(), CoreError> {
-        let should_send = {
-            let mut set = self.subscribed.lock().unwrap();
-            if set.contains(mint) {
-                false
-            } else {
-                set.insert(mint.to_string());
-                true
-            }
-        };
-        if should_send {
-            let _ = self
-                .shyft_control_tx
-                .send(ShyftControlMessage::SubscribePrice(mint.to_string()))
-                .await;
-        }
-        Ok(())
+        self.subscribe_mint(mint).await
     }
 
     async fn unsubscribe(&mut self, mint: &str) -> Result<(), CoreError> {
-        let should_send = {
-            let mut set = self.subscribed.lock().unwrap();
-            if set.remove(mint) { true } else { false }
-        };
-        if should_send {
-            let _ = self
-                .shyft_control_tx
-                .send(ShyftControlMessage::UnsubscribePrice(mint.to_string()))
-                .await;
-        }
+        self.unsubscribe_mint(mint).await?;
         // Also drop cached price
         let mut cache = self.price_cache.lock().await;
         cache.pop(mint);
@@ -141,7 +150,7 @@ impl PriceSubscriber for CliPriceSubscriber {
         self.subscribed
             .lock()
             .unwrap()
-            .iter()
+            .keys()
             .cloned()
             .collect()
     }

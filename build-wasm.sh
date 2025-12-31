@@ -4,6 +4,7 @@
 set -e
 
 echo "Building WASM module..."
+export PATH="$HOME/.cargo/bin:$PATH"
 
 # Install wasm-pack if not installed
 if ! command -v wasm-pack &> /dev/null; then

@@ -15,7 +15,7 @@ pub mod transaction_service;
 pub mod transaction_signer;
 pub mod price_subscriber;
 pub mod buy_service;
-pub mod shyft;
+
 pub mod strategy;
 pub mod pipeline;
 pub mod dev_fee;

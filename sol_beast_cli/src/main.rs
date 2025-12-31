@@ -6,13 +6,13 @@ mod monitor;
 mod rpc;
 mod state;
 mod ws;
-mod shyft_monitor;
+// mod shyft_monitor; (Removed)
 mod models;
 mod buy_wrapper;
 mod price_subscriber;
 
 // Use core library modules
-use sol_beast_core::{error::CoreError, settings};
+use sol_beast_core::{error::CoreError, settings, native::http::NativeHttpClient, native::rpc_impl::NativeRpcClient, pipeline::process_new_token};
 type AppError = CoreError;
 use api::{create_router, ApiState, BotStats};
 use ws::WsRequest;
@@ -128,6 +128,7 @@ async fn main() -> Result<(), AppError> {
     settings.validate()?;
     
     let rpc_client = Arc::new(RpcClient::new(settings.solana_rpc_urls[0].clone()));
+    let http_client = Arc::new(NativeHttpClient::new());
     // Touch these settings here so they are used by the binary (avoid warnings)
     let price_source_cfg = settings.price_source.clone();
     let rpc_rotate_secs_cfg = settings.rpc_rotate_interval_secs;
@@ -231,30 +232,44 @@ async fn main() -> Result<(), AppError> {
     let simulate_keypair_clone = simulate_keypair.clone();
     let trades_map_clone_monitor = trades_map.clone();
 
-    // Channel for receiving new token notifications from Shyft
-    let (tx, mut rx) = mpsc::channel::<shyft_monitor::ShyftMonitorMessage>(100);
-    let (shyft_control_tx, shyft_control_rx) = mpsc::channel::<shyft_monitor::ShyftControlMessage>(100);
+    // Channel for receiving WSS messages is created below
+    // (removed Shyft channels)
+
+    // Channel to control WSS (subscribe/unsubscribe)
+    let (ws_control_tx, ws_control_rx) = mpsc::channel::<WsRequest>(100);
 
     let price_subscriber = Arc::new(Mutex::new(CliPriceSubscriber::new(
         price_cache.clone(),
-        shyft_control_tx.clone(),
+        ws_control_tx.clone(),
         settings.price_cache_ttl_secs,
+        settings.pump_fun_program.clone(),
     )));
 
-    // Spawn Shyft Monitor
-    let holdings_clone_shyft = holdings.clone();
-    let price_cache_clone_shyft = price_cache.clone();
-    let settings_clone_shyft = settings.clone();
-    let tx_clone = tx.clone();
+    // Spawn Standard WSS Monitor
+    let holdings_clone_ws = holdings.clone();
+    let price_cache_clone_ws = price_cache.clone();
+    let settings_clone_ws = settings.clone();
+    // Channel for raw WSS messages (mostly logs)
+    let (tx, mut rx) = mpsc::channel::<String>(100);
     
-    let shyft_handle = tokio::spawn(async move {
-        shyft_monitor::start_shyft_monitor(
-            settings_clone_shyft,
-            holdings_clone_shyft,
-            price_cache_clone_shyft,
-            tx_clone,
-            shyft_control_rx,
-        ).await;
+    // Select a WSS URL (using first for now, or rotate)
+    let wss_url = settings.solana_ws_urls.first().cloned().unwrap_or_else(|| {
+        settings.solana_rpc_urls[0].replace("http", "ws")
+    });
+    
+    let seen_clone = seen.clone();
+    let ws_handle = tokio::spawn(async move {
+        if let Err(e) = ws::run_ws(
+            &wss_url,
+            tx,
+            seen_clone,
+            holdings_clone_ws,
+            price_cache_clone_ws,
+            ws_control_rx,
+            settings_clone_ws,
+        ).await {
+            error!("WSS task failed: {}", e);
+        }
     });
 
     // Now spawn price monitoring (after shyft_control_tx exists so monitor
@@ -427,28 +442,30 @@ async fn main() -> Result<(), AppError> {
     });
 
     // Process messages
-    while let Some(msg) = rx.recv().await {
-        if let Err(e) = process_shyft_message(
-            msg,
+    while let Some(msg_json) = rx.recv().await {
+        // Parse raw JSON from WSS
+        if let Err(e) = process_wss_message(
+            &msg_json,
             &seen,
             &holdings,
             &rpc_client,
+            &http_client,
             is_real,
             keypair.as_deref(),
             simulate_keypair.as_deref(),
-            &price_cache,
+
             &settings,
-            shyft_control_tx.clone(),
+            ws_control_tx.clone(),
             trades_map.clone(),
             detected_coins.clone(),
             trades_list.clone(),
         )
         .await
         {
-            error!("process_shyft_message failed: {}", e);
+            error!("process_wss_message failed: {}", e);
             bot_log!(
                 "error",
-                "Failed to process Shyft message",
+                "Failed to process WSS message",
                 format!("{}", e)
             );
         }
@@ -458,7 +475,7 @@ async fn main() -> Result<(), AppError> {
     // This will block until all tasks complete or panic.
     info!("Main message processing loop ended. Awaiting background tasks...");
 
-    let all_handles = vec![monitor_handle, api_sync_handle, api_server_handle, shyft_handle];
+    let all_handles = vec![monitor_handle, api_sync_handle, api_server_handle, ws_handle];
 
     for handle in all_handles {
         if let Err(e) = handle.await {
@@ -470,218 +487,163 @@ async fn main() -> Result<(), AppError> {
     Ok(())
 }
 
-async fn process_shyft_message(
-    msg: shyft_monitor::ShyftMonitorMessage,
+async fn process_wss_message(
+    msg_json: &str,
     seen: &Arc<Mutex<LruCache<String, ()>>>,
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     rpc_client: &Arc<RpcClient>,
-    is_real: bool,
-    keypair: Option<&Keypair>,
-    simulate_keypair: Option<&Keypair>,
-    price_cache: &Arc<Mutex<PriceCache>>,
+    http_client: &Arc<NativeHttpClient>,
+    _is_real: bool,
+    _keypair: Option<&Keypair>,
+    _simulate_keypair: Option<&Keypair>,
     settings: &Arc<Settings>,
-    shyft_control_tx: mpsc::Sender<shyft_monitor::ShyftControlMessage>,
+    ws_control_tx: mpsc::Sender<WsRequest>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match msg {
-        shyft_monitor::ShyftMonitorMessage::NewToken(tx) => {
-            let signature = tx.signature.clone();
-            if seen.lock().await.put(signature.clone(), ()).is_none() {
-                if holdings.lock().await.len() >= settings.max_holded_coins {
-                    let mut last_lock = LAST_MAX_HELD_LOG.lock().await;
-                    let now = Instant::now();
-                    let should_log = match *last_lock {
-                        Some(ts) => now.duration_since(ts).as_secs() > MAX_HELD_LOG_DEBOUNCE_SECS,
-                        None => true,
-                    };
-                    if should_log {
-                        *last_lock = Some(now);
-                        debug!(
-                            "Max held coins reached ({}); skipping incoming message processing",
-                            settings.max_holded_coins
-                        );
-                    }
-                    return Ok(());
-                }
-
-                let detect_time = Utc::now();
-                if let Err(e) = handle_new_token(
-                    &tx,
-                    holdings,
-                    rpc_client,
-                    is_real,
-                    keypair,
-                    simulate_keypair,
-                    price_cache,
-                    settings,
-                    shyft_control_tx,
-                    detect_time,
-                    trades_map,
-                    detected_coins,
-                    trades_list,
-                )
-                .await
-                {
-                    error!("handle_new_token failed for {}: {}", signature, e);
-                    return Err(e);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn handle_new_token(
-    tx: &sol_beast_core::shyft::ShyftTransaction,
-    _holdings: &Arc<Mutex<HashMap<String, Holding>>>,
-    rpc_client: &Arc<RpcClient>,
-    _is_real: bool,
-    _keypair: Option<&Keypair>,
-    _simulate_keypair: Option<&Keypair>,
-    _price_cache: &Arc<Mutex<PriceCache>>,
-    settings: &Arc<Settings>,
-    _shyft_control_tx: mpsc::Sender<shyft_monitor::ShyftControlMessage>,
-    detect_time: chrono::DateTime<Utc>,
-    _trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
-    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
-    _trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Extract details from ShyftTransaction
-    // We look for the instruction that calls pump.fun
-    let pump_prog = &settings.pump_fun_program;
-    let instruction = tx.instructions.iter().find(|ix| ix.program_id == *pump_prog);
+    let v: serde_json::Value = serde_json::from_str(msg_json)?;
     
-    let (creator, mint, curve_pda, holder_addr) = if let Some(ix) = instruction {
-        // Assuming standard create instruction layout
-        // Accounts: [Mint, MintAuth, BondingCurve, BondingCurveVault, ..., Creator]
-        // Expected account layout for pump.fun create instruction:
-        // [0] = Mint account
-        // [1] = Mint authority  
-        // [2] = Bonding curve account
-        // [3] = Associated bonding curve token account
-        // [4] = Global account
-        // [5] = MPL token metadata
-        // [6] = Metadata account
-        // [7] = Creator/payer account
-        // This layout is based on the pump.fun program's create instruction format.
-        // If the instruction format changes, this will need to be updated.
-        if ix.accounts.len() > 7 {
-            (
-                ix.accounts[7].clone(), // Creator
-                ix.accounts[0].clone(), // Mint
-                ix.accounts[2].clone(), // Bonding Curve
-                ix.accounts[7].clone(), // Holder (Creator)
-            )
-        } else {
-            // Fallback to RPC if accounts are missing or structure is different
-            let (c, m, cp, h, is_init) = rpc::fetch_transaction_details(&tx.signature, rpc_client, settings).await?;
-            if !is_init { return Ok(()); }
-            (c, m, cp, h)
-        }
-    } else {
-        return Ok(());
-    };
-
-    let signature = &tx.signature;
-    let (onchain_meta, offchain_meta, onchain_raw) =
-        rpc::fetch_token_metadata(&mint, rpc_client, settings).await?;
-    // Attempt to fetch the bonding curve creator so we can validate pump.fun token
-    // and use the creator for additional verification, but do not require it for detection
-    // because some RPCs may not have the PDA available immediately.
-    let bonding_creator_opt = rpc::fetch_bonding_curve_creator(&mint, rpc_client, settings).await.ok().flatten();
-    if bonding_creator_opt.is_none() {
-        // Not fatal: the bonding curve PDA may not be indexed yet by the RPC node.
-        // Log at debug and continue detection using transaction-parsed creator and curve.
-        debug!("Bonding curve creator not found for mint {} (tx sig={}) — continuing detection using transaction parsed values", mint, signature);
-    }
-
-    // We treat lack of on-chain metadata as expected in some cases — continue
-    // detection even when `onchain_meta` is None. Use offchain meta or onchain
-    // raw to fill in display fields when available.
-    // NOTE: we want to continue regardless of name and URI being present.
-    if onchain_meta.is_some() || offchain_meta.is_some() || onchain_raw.is_some() {
-        // Prepare display fields using available on-chain or off-chain metadata
-        let token_name = offchain_meta
-            .as_ref()
-            .and_then(|off| off.name.clone())
-            .or_else(|| onchain_meta.as_ref().map(|m| m.name.trim_end_matches('\u{0}').to_string()))
-            .unwrap_or_else(|| "Unknown".to_string());
-        let token_symbol = offchain_meta
-            .as_ref()
-            .and_then(|off| off.symbol.clone())
-            .or_else(|| onchain_meta.as_ref().map(|m| m.symbol.trim_end_matches('\u{0}').to_string()));
-        let metadata_uri_opt = if let Some(m) = onchain_meta.as_ref() {
-            let uri = m.uri.trim_end_matches('\u{0}').to_string();
-            if uri.is_empty() { None } else { Some(uri) }
-        } else if let Some(off) = offchain_meta.as_ref() { off.image.clone() } else { None };
-
-        // Log token detection using the available fields
-        info!(
-            "New pump.fun token detected: mint={} signature={} creator={} curve={} holder={} URI={}",
-            mint,
-            signature,
-            creator,
-            curve_pda,
-            holder_addr,
-            metadata_uri_opt.clone().unwrap_or_else(|| "<none>".to_string())
-        );
-        // (already logged above using `metadata_uri_opt`)
-
-        // Log new token detection to API
-        bot_log!(
-            "info",
-            format!("New token detected: {}", token_name),
-            format!("Mint: {}, Creator: {}", mint, creator)
-        );
-
-        // Add to detected coins list. Use offchain metadata if present, else fallback to on-chain
-        // parsed metadata; otherwise mark name as Unknown and symbol None.
-        {
-            let mut coins = detected_coins.lock().await;
-            coins.insert(
-                0,
-                api::DetectedCoin {
-                    mint: mint.clone(),
-                    name: Some(token_name.clone()),
-                    symbol: token_symbol.clone(),
-                    image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
-                    creator: creator.clone(),
-                    bonding_curve: curve_pda.clone(),
-                    detected_at: detect_time.to_rfc3339(),
-                    metadata_uri: metadata_uri_opt.clone(),
-                    buy_price: None,
-                    status: "detected".to_string(),
-                },
-            );
-            // Keep only last 100 detected coins
-            if coins.len() > 100 {
-                coins.truncate(100);
+    // Check if this is a logsNotification
+    if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
+        if method == "logsNotification" {
+            if let Some(params) = v.get("params") {
+                if let Some(result) = params.get("result") {
+                    if let Some(value) = result.get("value") {
+                        // Check for error
+                        if let Some(err) = value.get("err") { 
+                           if !err.is_null() { return Ok(()); }
+                        }
+                        
+                        let signature = match value.get("signature").and_then(|s| s.as_str()) {
+                            Some(s) => s.to_string(),
+                            None => return Ok(()),
+                        };
+                        
+                        // Check logs for "Instruction: Create"
+                        let mut is_create = false;
+                        if let Some(logs) = value.get("logs").and_then(|l| l.as_array()) {
+                            for log_val in logs {
+                                if let Some(log) = log_val.as_str() {
+                                    if log.contains("Program log: Instruction: Create") {
+                                        is_create = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if is_create {
+                            if seen.lock().await.put(signature.clone(), ()).is_none() {
+                                if holdings.lock().await.len() >= settings.max_holded_coins {
+                                    // ... (max holdings logic similar to before)
+                                    let mut last_lock = LAST_MAX_HELD_LOG.lock().await;
+                                    let now = Instant::now();
+                                    let should_log = match *last_lock {
+                                        Some(ts) => now.duration_since(ts).as_secs() > MAX_HELD_LOG_DEBOUNCE_SECS,
+                                        None => true,
+                                    };
+                                    if should_log {
+                                        *last_lock = Some(now);
+                                        debug!(
+                                            "Max held coins reached ({}); skipping incoming message processing",
+                                            settings.max_holded_coins
+                                        );
+                                    }
+                                    return Ok(());
+                                }
+                
+                                let detect_time = Utc::now();
+                                // We need to fetch transaction details effectively since we only have signature from logs
+                                // The unified `pipeline` handles this fetching internally using `rpc_client`.
+                                
+                                // Synthesize a ShyftTransaction-like struct? No, `process_new_token` takes `signature` and `rpc_client`.
+                                // `handle_new_token` previously took `ShyftTransaction` mostly for the signature and instructions.
+                                // We can simplify `handle_new_token` to just take signature and do the work.
+                                // Actually `handle_new_token` in my previous refactor called `process_new_token`.
+                                // AND `handle_new_token` tried to peek at instructions.
+                                // I should refactor `handle_new_token` to accept just the signature or basic info.
+                                // Or, I can call `handle_new_token_from_sig`.
+                                
+                                if let Err(e) = handle_new_token_from_sig(
+                                    &signature,
+                                    rpc_client,
+                                    http_client,
+                                    settings,
+                                    detect_time,
+                                    detected_coins,
+                                ).await {
+                                    error!("handle_new_token failed for {}: {}", signature, e);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
-
-        if let Some(off) = &offchain_meta {
-            info!(
-                "Off-chain metadata for {}: name={:?}, symbol={:?}, image={:?}",
-                mint, off.name, off.symbol, off.image
-            );
-        }
-        if let Some(m) = onchain_meta.as_ref() {
-            if !m.uri.trim_end_matches('\u{0}').is_empty() && m.seller_fee_basis_points < 500 {
-            // Note: The old WebSocket subscription code (~350 lines) has been removed.
-            // Price updates are now provided by the Shyft GraphQL WebSocket monitor which
-            // subscribes to bonding curve accounts and updates the shared price_cache.
-            // This centralized approach eliminates complex per-token subscription management
-            // and provides more reliable price updates through Shyft's infrastructure.
-        } else {
-            // No on-chain metadata to validate or price-seller checks; skip buy logic
-            debug!("No on-chain metadata to validate buy for mint {} (sig={}) — detected only", mint, signature);
-        }
-            // We do not fall back to RPC here; WSS-only mode requires a streamed
-            // price update from the bonding_curve PDA. If no WSS price was used,
-            // skip buying.
         }
     }
     Ok(())
 }
+
+async fn handle_new_token_from_sig(
+    signature: &str,
+    rpc_client: &Arc<RpcClient>,
+    http_client: &Arc<NativeHttpClient>,
+    settings: &Arc<Settings>,
+    detect_time: chrono::DateTime<Utc>,
+    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Phase 5: Use unified pipeline logic
+    // Wrap the native solana_client RpcClient in our core-compatible NativeRpcClient
+    let native_rpc = NativeRpcClient::from_arc(rpc_client.clone());
+    
+    // We pass the signature directly. The pipeline handles fetching tx, metadata, etc.
+    let result = process_new_token(
+        signature.to_string(),
+        &native_rpc,
+        http_client.as_ref(),
+        settings,
+    ).await?;
+
+    // Log token detection to API (maintain CLI behavior)
+    bot_log!(
+        "info",
+        format!("New token detected: {}", result.name.as_deref().unwrap_or("Unknown")),
+        format!("Mint: {}, Creator: {}", result.mint, result.creator)
+    );
+
+    // Add to detected coins list
+    {
+        let mut coins = detected_coins.lock().await;
+        coins.insert(
+            0,
+            api::DetectedCoin {
+                mint: result.mint.clone(),
+                name: result.name.clone(),
+                symbol: result.symbol.clone(),
+                image: result.image_uri.clone(),
+                creator: result.creator.clone(),
+                bonding_curve: result.bonding_curve.clone(),
+                detected_at: detect_time.to_rfc3339(),
+                metadata_uri: None, // Simplified, pipeline handles metadata extraction
+                buy_price: Some(result.buy_price_sol),
+                status: if result.should_buy { "buy_candidate" } else { "rejected" }.to_string(),
+            },
+        );
+        // Keep only last 100 detected coins
+        if coins.len() > 100 {
+            coins.truncate(100);
+        }
+    }
+
+    // Pass through pipeline decision
+    if result.should_buy {
+        info!("Pipeline approved buy for {} (Reason: {})", result.mint, result.evaluation_reason);
+    } else {
+        info!("Pipeline rejected {} (Reason: {})", result.mint, result.evaluation_reason);
+    }
+    
+    Ok(())
+}
+

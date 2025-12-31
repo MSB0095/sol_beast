@@ -1,0 +1,21 @@
+{
+  "_comment": "Default settings with Shyft RPC for better performance and reliability. Note: WebSocket must be standard Solana endpoint, not Shyft RPC.",
+  "solana_ws_urls": ["wss://api.mainnet-beta.solana.com/"],
+  "solana_rpc_urls": ["https://rpc.shyft.to?api_key=ULYlbsBOcBGDjY-a"],
+  "pump_fun_program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  "metadata_program": "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+  "tp_percent": 100.0,
+  "sl_percent": -50.0,
+  "timeout_secs": 50,
+  "buy_amount": 0.001,
+  "max_holded_coins": 4,
+  "slippage_bps": 500,
+  "min_tokens_threshold": 30000,
+  "max_sol_per_token": 0.002,
+  "min_liquidity_sol": 0.0,
+  "max_liquidity_sol": 15.0,
+  "dev_tip_percent": 2.0,
+  "dev_tip_fixed_sol": 0.0,
+  "shyft_api_key": "ULYlbsBOcBGDjY-a",
+  "shyft_graphql_url": "https://programs.shyft.to/v0/graphql/?api_key=ULYlbsBOcBGDjY-a&network=mainnet-beta"
+}

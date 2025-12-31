@@ -223,8 +223,7 @@ impl SolBeastBot {
         };
         
         // Always use standard Solana WebSocket protocol (logsSubscribe), not Shyft GraphQL
-        // Shyft API key is only for RPC calls, not WebSocket subscriptions
-        let is_shyft = false;
+
         
         // Validate strings are ASCII (which is valid UTF-8) before using
         if !ws_url.is_ascii() || !pump_fun_program.is_ascii() {
@@ -272,7 +271,7 @@ impl SolBeastBot {
         
         // Create and start monitor
         let mut monitor = Monitor::new();
-        monitor.start(&ws_url, &pump_fun_program, log_callback, Some(signature_callback), is_shyft)
+        monitor.start(&ws_url, &pump_fun_program, log_callback, Some(signature_callback))
             .map_err(|e| JsValue::from_str(&format!("Failed to start monitor: {:?}", e)))?;
         
         // Re-acquire lock to update state

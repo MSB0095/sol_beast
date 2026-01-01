@@ -11,6 +11,11 @@ use log::{info, debug};
 /// This is the 8-byte Anchor discriminator for the `create` instruction that creates new tokens.
 pub const PUMP_CREATE_DISCRIMINATOR: [u8; 8] = [24, 30, 200, 40, 5, 28, 7, 119];
 
+/// Pump.fun `create_v2` instruction discriminator: [214, 144, 76, 236, 95, 139, 49, 180]
+/// This is the 8-byte Anchor discriminator for the newer `create_v2` instruction.
+/// Computed as: sha256("global:create_v2")[0..8]
+pub const PUMP_CREATE_V2_DISCRIMINATOR: [u8; 8] = [214, 144, 76, 236, 95, 139, 49, 180];
+
 /// Extracted data from a pump.fun create instruction
 #[derive(Debug, Clone)]
 pub struct PumpCreateData {
@@ -38,7 +43,9 @@ fn try_extract_pump_create_data(
     account_keys: &[String],
     pump_fun_program_id: &str,
 ) -> Option<PumpCreateData> {
-    // Get program ID
+    // Get program ID - handle both JsonParsed and raw formats
+    // JsonParsed: "programId" is a direct string
+    // Raw/Json: "programIdIndex" is an index into account_keys
     let program_id = instr
         .get("programId")
         .and_then(|p| p.as_str())
@@ -53,9 +60,27 @@ fn try_extract_pump_create_data(
         return None;
     }
     
-    // Check instruction data for create discriminator
-    let data_str = instr.get("data").and_then(|d| d.as_str())?;
-    let data_bytes = match bs58::decode(data_str).into_vec() {
+    // For JsonParsed encoding, check if instruction data is in the "data" field directly
+    // or might be under a nested structure. Pump.fun is not a "known" program so data
+    // should be a direct base58 string. Try multiple paths:
+    // 1. Direct "data" field as string (standard for unrecognized programs)
+    // 2. "data" as array [encoding, data_string] format (some RPC endpoints use this)
+    let data_str = instr.get("data").and_then(|d| {
+        // First try as direct string
+        if let Some(s) = d.as_str() {
+            return Some(s.to_string());
+        }
+        // Try as array [encoding, data_string] format
+        if let Some(arr) = d.as_array() {
+            if arr.len() >= 2 {
+                // Format is often ["base58", "actual_data"] or similar
+                return arr.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
+            }
+        }
+        None
+    })?;
+    
+    let data_bytes = match bs58::decode(&data_str).into_vec() {
         Ok(bytes) => bytes,
         Err(e) => {
             // Log error for debugging but return None (not a valid instruction)
@@ -68,9 +93,18 @@ fn try_extract_pump_create_data(
         return None;
     }
     
-    if data_bytes[..8] != PUMP_CREATE_DISCRIMINATOR {
+    // Check for either create or create_v2 instruction discriminator
+    let is_create_v1 = data_bytes[..8] == PUMP_CREATE_DISCRIMINATOR;
+    let is_create_v2 = data_bytes[..8] == PUMP_CREATE_V2_DISCRIMINATOR;
+    
+    if !is_create_v1 && !is_create_v2 {
+        // Log the actual discriminator for debugging
+        debug!("Pump.fun instruction found but discriminator doesn't match. Got: {:?}, expected v1: {:?} or v2: {:?}", 
+               &data_bytes[..8], PUMP_CREATE_DISCRIMINATOR, PUMP_CREATE_V2_DISCRIMINATOR);
         return None;
     }
+    
+    debug!("Matched pump.fun {} discriminator", if is_create_v1 { "create (v1)" } else { "create_v2" });
     
     // Extract accounts - per pump.fun IDL:
     // [0] mint, [1] mint_authority, [2] bonding_curve, [3] associated_bonding_curve,
@@ -78,15 +112,20 @@ fn try_extract_pump_create_data(
     let accounts = instr.get("accounts").and_then(|a| a.as_array())?;
     
     if accounts.len() < 8 {
+        debug!("Pump.fun instruction has {} accounts, expected at least 8", accounts.len());
         return None;
     }
     
     // Helper to extract account at index
+    // JsonParsed: accounts are direct pubkey strings
+    // Raw/Json: accounts are indices into account_keys
     let get_account = |idx: usize| -> Option<String> {
         let account_val = accounts.get(idx)?;
         if let Some(i) = account_val.as_u64() {
+            // Index into account_keys (raw format)
             account_keys.get(i as usize).cloned()
         } else {
+            // Direct pubkey string (JsonParsed format)
             account_val.as_str().map(|s| s.to_string())
         }
     };
@@ -95,6 +134,7 @@ fn try_extract_pump_create_data(
     let creator = get_account(7)?;
     let curve = get_account(2);
     
+    debug!("Found pump.fun create instruction: mint={}, creator={}", mint, creator);
     Some(PumpCreateData { mint, creator, curve })
 }
 
@@ -202,6 +242,7 @@ pub fn parse_transaction(
     
     // Normalize account keys
     let account_keys = normalize_account_keys(transaction_json)?;
+    debug!("Normalized {} account keys", account_keys.len());
     
     // STEP 1: Check for pump.fun `create` instruction in main instructions
     if let Some(instructions) = transaction_json
@@ -210,32 +251,68 @@ pub fn parse_transaction(
         .and_then(|m| m.get("instructions"))
         .and_then(|i| i.as_array())
     {
-        for instr in instructions {
+        debug!("Found {} main instructions", instructions.len());
+        for (idx, instr) in instructions.iter().enumerate() {
+            // Log program ID for each instruction to help debug
+            let prog_id = instr
+                .get("programId")
+                .and_then(|p| p.as_str())
+                .or_else(|| {
+                    instr
+                        .get("programIdIndex")
+                        .and_then(|idx| idx.as_u64())
+                        .and_then(|i| account_keys.get(i as usize).map(|s| s.as_str()))
+                });
+            debug!("Main instruction {}: programId={:?}", idx, prog_id);
+            
             if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
                 return process_pump_create_data(data, pump_fun_program_id, "main instructions");
             }
         }
+    } else {
+        debug!("No main instructions found in transaction.message.instructions");
     }
     
     // STEP 2: Fallback - check inner instructions for pump.fun create
     // This handles cases where the create is wrapped in a CPI call
     if let Some(meta) = transaction_json.get("meta") {
         if let Some(inner_instructions) = meta.get("innerInstructions").and_then(|v| v.as_array()) {
+            debug!("Found {} inner instruction groups", inner_instructions.len());
             for inner_instruction in inner_instructions {
                 if let Some(instructions) = inner_instruction.get("instructions").and_then(|v| v.as_array()) {
-                    for instr in instructions {
+                    debug!("Inner instruction group has {} instructions", instructions.len());
+                    for (idx, instr) in instructions.iter().enumerate() {
+                        // Log program ID for each inner instruction
+                        let prog_id = instr.get("programId").and_then(|p| p.as_str());
+                        if prog_id == Some(pump_fun_program_id) {
+                            debug!("Found pump.fun instruction at inner index {}, data field: {:?}", 
+                                   idx, instr.get("data"));
+                        }
+                        
                         if let Some(data) = try_extract_pump_create_data(instr, &account_keys, pump_fun_program_id) {
                             return process_pump_create_data(data, pump_fun_program_id, "inner instructions");
                         }
                     }
                 }
             }
+        } else {
+            debug!("No inner instructions found in meta.innerInstructions");
         }
+    } else {
+        debug!("No meta field found in transaction JSON");
     }
     
-    // No pump.fun create instruction found
+    // No pump.fun create instruction found - log more details for debugging
     debug!("No pump.fun CREATE instruction found in transaction");
     debug!("Account keys (len={}): {:?}", account_keys.len(), account_keys);
+    
+    // Check if pump.fun program is even present in account keys
+    if account_keys.iter().any(|k| k == pump_fun_program_id) {
+        debug!("Pump.fun program {} IS present in account keys but no create instruction found", pump_fun_program_id);
+    } else {
+        debug!("Pump.fun program {} is NOT in account keys", pump_fun_program_id);
+    }
+    
     Err(CoreError::NotFound("Could not find pump.fun create instruction".to_string()))
 }
 

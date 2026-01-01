@@ -15,4 +15,5 @@ pub struct BuyRecord {
     pub buy_amount_sol: f64,
     pub buy_amount_tokens: u64,
     pub buy_price: f64,
+    pub buy_signature: Option<String>,
 }

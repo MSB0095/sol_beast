@@ -10,11 +10,12 @@ mod ws;
 mod models;
 mod buy_wrapper;
 mod price_subscriber;
+mod trade_logger;
 
 // Use core library modules
 use sol_beast_core::{error::CoreError, settings, native::http::NativeHttpClient, native::rpc_impl::NativeRpcClient, pipeline::process_new_token};
 type AppError = CoreError;
-use api::{create_router, ApiState, BotStats};
+use api::{create_router, ApiState, BotStats, TradeRecord};
 use ws::WsRequest;
 
 // Global bot control for logging
@@ -65,7 +66,7 @@ use crate::{
     price_subscriber::CliPriceSubscriber,
 };
 use chrono::Utc;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use lru::LruCache;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::signature::Keypair;
@@ -493,9 +494,9 @@ async fn process_wss_message(
     holdings: &Arc<Mutex<HashMap<String, Holding>>>,
     rpc_client: &Arc<RpcClient>,
     http_client: &Arc<NativeHttpClient>,
-    _is_real: bool,
-    _keypair: Option<&Keypair>,
-    _simulate_keypair: Option<&Keypair>,
+    is_real: bool,
+    keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
     settings: &Arc<Settings>,
     ws_control_tx: mpsc::Sender<WsRequest>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
@@ -572,6 +573,13 @@ async fn process_wss_message(
                                     settings,
                                     detect_time,
                                     detected_coins,
+                                    holdings.clone(),
+                                    is_real,
+                                    keypair,
+                                    simulate_keypair,
+                                    ws_control_tx.clone(),
+                                    trades_map.clone(),
+                                    trades_list.clone(),
                                 ).await {
                                     error!("handle_new_token failed for {}: {}", signature, e);
                                     return Err(e);
@@ -593,6 +601,13 @@ async fn handle_new_token_from_sig(
     settings: &Arc<Settings>,
     detect_time: chrono::DateTime<Utc>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+    holdings: Arc<Mutex<HashMap<String, Holding>>>,
+    is_real: bool,
+    keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
+    ws_control_tx: mpsc::Sender<WsRequest>,
+    trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
+    trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Phase 5: Use unified pipeline logic
     // Wrap the native solana_client RpcClient in our core-compatible NativeRpcClient
@@ -638,8 +653,115 @@ async fn handle_new_token_from_sig(
     }
 
     // Pass through pipeline decision
+    // Pass through pipeline decision
     if result.should_buy {
         info!("Pipeline approved buy for {} (Reason: {})", result.mint, result.evaluation_reason);
+        
+        // Execute the buy
+        let buy_cfg = sol_beast_core::buy_service::BuyConfig {
+            mint: result.mint.clone(),
+            sol_amount: settings.buy_amount,
+            current_price_sol: result.buy_price_sol,
+            bonding_curve_state: result.bonding_curve_state.clone(),
+        };
+
+        let signer = if is_real { 
+            keypair.map(|k| {
+                let owned_kp = Keypair::try_from(&k.to_bytes()[..]).unwrap();
+                sol_beast_core::native::transaction_signer::NativeTransactionSigner::new(owned_kp)
+            })
+        } else {
+            simulate_keypair.map(|k| {
+                let owned_kp = Keypair::try_from(&k.to_bytes()[..]).unwrap();
+                sol_beast_core::native::transaction_signer::NativeTransactionSigner::new(owned_kp)
+            })
+        };
+
+        if let Some(signer) = signer {
+            match sol_beast_core::buy_service::BuyService::execute_buy(
+                buy_cfg,
+                &native_rpc,
+                &signer,
+                settings,
+            ).await {
+                Ok(buy_res) => {
+                    let buy_time = chrono::DateTime::from_timestamp(buy_res.timestamp, 0).unwrap_or_else(Utc::now);
+                    
+                    // Create Holding and insert
+                    let holding = Holding {
+                        mint: result.mint.clone(),
+                        amount: buy_res.token_amount,
+                        buy_price: result.buy_price_sol,
+                        buy_time,
+                        creator: Some(result.creator.clone()),
+                        metadata: Some(crate::models::OffchainTokenMetadata {
+                            name: result.name.clone(),
+                            symbol: result.symbol.clone(),
+                            image: result.image_uri.clone(),
+                            description: result.description.clone(),
+                            extras: None,
+                        }),
+                        onchain_raw: None,
+                        onchain: None,
+                    };
+                    
+                    holdings.lock().await.insert(result.mint.clone(), holding.clone());
+                    
+                    // Add to trades_map for PNL tracking
+                    let buy_rec = BuyRecord {
+                        mint: result.mint.clone(),
+                        symbol: result.symbol.clone(),
+                        name: result.name.clone(),
+                        uri: None, // metadata uri not easily available from pipeline result
+                        image: result.image_uri.clone(),
+                        creator: result.creator.clone(),
+                        detect_time,
+                        buy_time,
+                        buy_amount_sol: buy_res.sol_spent,
+                        buy_amount_tokens: buy_res.token_amount,
+                        buy_price: result.buy_price_sol,
+                        buy_signature: Some(buy_res.transaction_signature.clone()),
+                    };
+                    trades_map.lock().await.insert(result.mint.clone(), buy_rec.clone());
+
+                    // Add buy trade record to API
+                    {
+                        let mut trades = trades_list.lock().await;
+                        trades.insert(0, TradeRecord {
+                            mint: result.mint.clone(),
+                            symbol: result.symbol.clone(),
+                            name: result.name.clone(),
+                            image: result.image_uri.clone(),
+                            trade_type: "buy".to_string(),
+                            timestamp: buy_time.to_rfc3339(),
+                            tx_signature: Some(buy_res.transaction_signature.clone()),
+                            amount_sol: buy_res.sol_spent,
+                            amount_tokens: buy_res.token_amount as f64 / 1_000_000.0,
+                            price_per_token: result.buy_price_sol,
+                            profit_loss: None,
+                            profit_loss_percent: None,
+                            reason: Some(result.evaluation_reason.clone()),
+                        });
+                    }
+
+                    // Log to file
+                    trade_logger::log_buy(&buy_rec);
+
+                    info!("Successfully bought token: {}", result.mint);
+                    bot_log!(
+                        "info",
+                        format!("Successfully bought token {}", result.mint),
+                        format!("Amount: {} tokens, Price: {:.18} SOL", buy_res.token_amount, result.buy_price_sol)
+                    );
+                }
+                Err(e) => {
+                    error!("Buy execution failed for {}: {}", result.mint, e);
+                    bot_log!("error", format!("Buy failed for {}", result.mint), format!("{}", e));
+                }
+            }
+        } else {
+            warn!("No keypair available for buy execution");
+        }
     } else {
         info!("Pipeline rejected {} (Reason: {})", result.mint, result.evaluation_reason);
     }

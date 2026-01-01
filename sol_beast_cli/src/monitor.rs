@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use solana_sdk::signature::Keypair;
 use log::{info, debug, error, warn};
 use chrono::Utc;
-use std::io::Write;
+use crate::trade_logger;
 
 pub async fn monitor_holdings(
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
@@ -61,7 +61,7 @@ pub async fn monitor_holdings(
     }
 
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         
         // Check if bot is still running before processing trades
         let running_state = bot_control.running_state.lock().await;
@@ -136,7 +136,7 @@ pub async fn monitor_holdings(
                     })
                 };
 
-                match sell_result
+                match &sell_result
                 {
                     Ok(_) => {
                         let _reason = if profit_percent >= settings.tp_percent {
@@ -196,60 +196,22 @@ pub async fn monitor_holdings(
                     }
                 }
                 
-                // Remove buy record and write CSV
+                // Remove buy record and log sell to file
                 if let Some(buy_rec) = trades_map.lock().await.remove(mint) {
-                    // Append CSV row
-                    let file_path = "trades.csv";
-                    // New clearer header (human-readable, consistent numeric formatting)
-                    let header = "mint,symbol,name,uri,image,creator,detect_time,buy_time,detect_to_buy_secs,buy_sol,buy_price_sol_per_token,buy_tokens,sell_time,stop_reason,sell_tokens,sell_sol,profit_percent,profit_sol\n";
-                    let needs_header = !std::path::Path::new(file_path).exists();
-                    if needs_header {
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
-                            let _ = f.write_all(header.as_bytes());
-                        }
-                    }
-
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
-                        let detect_to_buy = (buy_rec.buy_time - buy_rec.detect_time).num_seconds();
-                        // buy_rec.buy_price is SOL per token
-                        let buy_price_sol = buy_rec.buy_price;
-                        // Format numbers for readability: SOL amounts with 9 decimals, percents with 2 decimals
-                        let buy_sol_fmt = format!("{:.9}", buy_rec.buy_amount_sol);
-                        let buy_price_sol_fmt = format!("{:.9}", buy_price_sol);
-                        let sell_sol_fmt = format!("{:.9}", sell_sol);
-                        let profit_percent_fmt = format!("{:.2}", profit_percent);
-                        let profit_sol_fmt = format!("{:.9}", profit_sol);
-
-                        // CSV-quote text fields to avoid breaking on commas/newlines
-                        let q = |s: String| -> String {
-                            // Escape double-quotes by doubling them
-                            let escaped = s.replace('"', "\"\"");
-                            format!("\"{}\"", escaped)
-                        };
-
-                        let line = format!(
-                            "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol},{buy_price},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol},{profit_percent},{profit_sol}\n",
-                            mint = q(buy_rec.mint),
-                            symbol = q(buy_rec.symbol.unwrap_or_else(|| "".to_string())),
-                            name = q(buy_rec.name.unwrap_or_else(|| "".to_string())),
-                            uri = q(buy_rec.uri.unwrap_or_else(|| "".to_string())),
-                            image = q(buy_rec.image.unwrap_or_else(|| "".to_string())),
-                            creator = q(buy_rec.creator),
-                            detect_time = buy_rec.detect_time.format("%+"),
-                            buy_time = buy_rec.buy_time.format("%+"),
-                            detect_to_buy_secs = detect_to_buy,
-                            buy_sol = buy_sol_fmt,
-                            buy_price = buy_price_sol_fmt,
-                            buy_tokens = buy_rec.buy_amount_tokens,
-                            sell_time = sell_time.format("%+"),
-                            stop_reason = stop_reason,
-                            sell_tokens = format!("{:.6}", sell_tokens_amount),
-                            sell_sol = sell_sol_fmt,
-                            profit_percent = profit_percent_fmt,
-                            profit_sol = profit_sol_fmt
-                        );
-                        let _ = f.write_all(line.as_bytes());
-                    }
+                    let sell_sig = match &sell_result {
+                        Ok(res) => res.transaction_signature.clone(),
+                        Err(_) => "error".to_string(),
+                    };
+                    trade_logger::log_sell(
+                        &buy_rec,
+                        sell_time,
+                        stop_reason,
+                        sell_tokens_amount,
+                        sell_sol,
+                        profit_percent,
+                        profit_sol,
+                        sell_sig,
+                    );
                 }
                 to_remove.push(mint.clone());
             }

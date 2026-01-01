@@ -61,7 +61,13 @@ pub async fn run_ws(
             settings.max_create_to_buy_secs
         );
 
-        // pump.fun program logs
+        // Subscribe to pump.fun program logs with optimized filtering
+        // Use logsSubscribe which provides transaction signatures directly
+        // This is the most reliable method that all professional snipers use
+        info!(
+            "Subscribing to pump.fun program logs: {} for new token detection",
+            &settings.pump_fun_program
+        );
         write
             .send(Message::Text(
                 json!({
@@ -209,12 +215,14 @@ pub async fn run_ws(
                             Some(s) => s,
                             None => continue,
                         };
+                        
+                        // Check if this is a bonding curve account we're tracking
                         let (mint, last, _account_pubkey) = match subid_to_mint.get_mut(&sub_id) {
                             Some(v) => v,
-                            None => continue,
+                            None => continue, // Not a subscription we're tracking
                         };
                         *last = Instant::now();
-
+                        
                         let data_arr = match params
                             .get("result")
                             .and_then(|v| v.get("value"))

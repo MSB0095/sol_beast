@@ -1,4 +1,18 @@
 # ==================== RPC & WebSocket Configuration ====================
+# IMPORTANT: For fastest and most reliable token detection, configure MULTIPLE WebSocket URLs
+# The bot will connect to ALL URLs simultaneously for:
+# - Better reliability (no single point of failure)
+# - Faster detection (multiple sources, lower latency)
+# - Geographic redundancy (use endpoints from different regions)
+#
+# Recommended setup: Use 2-4 high-quality WSS endpoints from premium providers
+# Example premium providers: Helius, QuickNode, Alchemy, Triton
+#
+# solana_ws_urls = [
+#     "wss://your-helius-endpoint.helius-rpc.com/?api-key=YOUR_KEY",
+#     "wss://your-quicknode-endpoint.quiknode.pro/YOUR_KEY/",
+#     "wss://solana-mainnet.g.alchemy.com/v2/YOUR_KEY"
+# ]
 solana_ws_urls = ["wss://api.mainnet-beta.solana.com/"]
 solana_rpc_urls = ["https://api.mainnet-beta.solana.com/"]
 

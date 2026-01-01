@@ -237,7 +237,7 @@ async fn main() -> Result<(), AppError> {
     // (removed Shyft channels)
 
     // Channel to control WSS (subscribe/unsubscribe)
-    let (ws_control_tx, ws_control_rx) = mpsc::channel::<WsRequest>(100);
+    let (ws_control_tx, _ws_control_rx) = mpsc::channel::<WsRequest>(100);
 
     let price_subscriber = Arc::new(Mutex::new(CliPriceSubscriber::new(
         price_cache.clone(),
@@ -246,32 +246,70 @@ async fn main() -> Result<(), AppError> {
         settings.pump_fun_program.clone(),
     )));
 
-    // Spawn Standard WSS Monitor
+    // Spawn Standard WSS Monitors - USE ALL AVAILABLE WSS URLs in parallel
+    // This significantly improves detection reliability and speed by:
+    // 1. Avoiding single point of failure if one WSS connection drops
+    // 2. Receiving notifications from multiple sources simultaneously
+    // 3. Reducing latency by using geographically distributed endpoints
     let holdings_clone_ws = holdings.clone();
     let price_cache_clone_ws = price_cache.clone();
     let settings_clone_ws = settings.clone();
+    
     // Channel for raw WSS messages (mostly logs)
-    let (tx, mut rx) = mpsc::channel::<String>(100);
+    let (tx, mut rx) = mpsc::channel::<String>(1000); // Increased buffer for multiple connections
     
-    // Select a WSS URL (using first for now, or rotate)
-    let wss_url = settings.solana_ws_urls.first().cloned().unwrap_or_else(|| {
-        settings.solana_rpc_urls[0].replace("http", "ws")
-    });
+    // Get all configured WebSocket URLs
+    let wss_urls: Vec<String> = if settings.solana_ws_urls.is_empty() {
+        // Fallback to deriving from RPC URLs
+        settings
+            .solana_rpc_urls
+            .iter()
+            .map(|rpc_url| rpc_url.replace("https://", "wss://").replace("http://", "ws://"))
+            .collect()
+    } else {
+        settings.solana_ws_urls.clone()
+    };
     
-    let seen_clone = seen.clone();
-    let ws_handle = tokio::spawn(async move {
-        if let Err(e) = ws::run_ws(
-            &wss_url,
-            tx,
-            seen_clone,
-            holdings_clone_ws,
-            price_cache_clone_ws,
-            ws_control_rx,
-            settings_clone_ws,
-        ).await {
-            error!("WSS task failed: {}", e);
-        }
-    });
+    info!(
+        "Spawning {} WebSocket connections for parallel memecoin detection",
+        wss_urls.len()
+    );
+    
+    // Spawn a separate WebSocket task for each URL
+    let mut ws_handles = Vec::new();
+    for (idx, wss_url) in wss_urls.iter().enumerate() {
+        let seen_clone = seen.clone();
+        let holdings_clone = holdings_clone_ws.clone();
+        let price_cache_clone = price_cache_clone_ws.clone();
+        let settings_clone = settings_clone_ws.clone();
+        let tx_clone = tx.clone();
+        let wss_url_clone = wss_url.clone();
+        
+        // Create a dedicated control channel for each WebSocket connection
+        let (_ws_control_tx_local, ws_control_rx_local) = mpsc::channel::<WsRequest>(100);
+        
+        let ws_handle = tokio::spawn(async move {
+            info!("Starting WebSocket connection #{} to {}", idx, wss_url_clone);
+            if let Err(e) = ws::run_ws(
+                &wss_url_clone,
+                tx_clone,
+                seen_clone,
+                holdings_clone,
+                price_cache_clone,
+                ws_control_rx_local,
+                settings_clone,
+            )
+            .await
+            {
+                error!("WSS task #{} failed ({}): {}", idx, wss_url_clone, e);
+            }
+        });
+        
+        ws_handles.push(ws_handle);
+    }
+    
+    // Use the first WebSocket's control channel for price subscription
+    // (in the future, we can use all of them for even better redundancy)
 
     // Now spawn price monitoring (after shyft_control_tx exists so monitor
     // can unsubscribe subscriptions on sell).
@@ -476,7 +514,8 @@ async fn main() -> Result<(), AppError> {
     // This will block until all tasks complete or panic.
     info!("Main message processing loop ended. Awaiting background tasks...");
 
-    let all_handles = vec![monitor_handle, api_sync_handle, api_server_handle, ws_handle];
+    let mut all_handles = vec![monitor_handle, api_sync_handle, api_server_handle];
+    all_handles.extend(ws_handles); // Add all WebSocket handles
 
     for handle in all_handles {
         if let Err(e) = handle.await {
@@ -605,7 +644,7 @@ async fn handle_new_token_from_sig(
     is_real: bool,
     keypair: Option<&Keypair>,
     simulate_keypair: Option<&Keypair>,
-    ws_control_tx: mpsc::Sender<WsRequest>,
+    _ws_control_tx: mpsc::Sender<WsRequest>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

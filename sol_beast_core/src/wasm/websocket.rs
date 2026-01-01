@@ -96,8 +96,21 @@ impl WasmWebSocket {
             "jsonrpc": "2.0",
             "id": sub_id,
             "method": "logsSubscribe",
-            "params": [{
-                "mentions": mentions
+            "params": [
+                { "mentions": mentions },
+                { "commitment": "confirmed" }
+            ]
+        });
+
+        self.send(&request.to_string())?;
+        
+        self.subscriptions
+            .lock()
+            .map_err(|e| JsValue::from_str(&format!("Failed to lock subscriptions: {:?}", e)))?
+            .insert(sub_id, format!("logs:{:?}", mentions));
+
+        Ok(sub_id)
+    }
             }]
         });
 

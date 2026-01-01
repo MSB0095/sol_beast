@@ -9,6 +9,7 @@ use super::filters::{LogFilter, should_process_log_notification};
 use serde_json::Value;
 use log::{debug, info, warn};
 use std::sync::Arc;
+use rand::Rng;
 
 /// Configuration for new token detection
 #[derive(Debug, Clone)]
@@ -102,7 +103,8 @@ impl NewTokenDetector {
                 
                 // Experimental: fallback sampling
                 if self.config.enable_fallback_sampling {
-                    if rand::random::<f64>() < self.config.fallback_sample_rate {
+                    let mut rng = rand::thread_rng();
+                    if rng.gen::<f64>() < self.config.fallback_sample_rate {
                         // Sample this transaction as fallback
                         if let Ok(Some(sig)) = self.try_extract_signature(notification_json) {
                             debug!("Fallback sampling selected: {}", sig);

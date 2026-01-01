@@ -689,8 +689,7 @@ async fn handle_new_token_from_sig(
         }
     }
 
-    // Pass through pipeline decision
-    // Pass through pipeline decision
+    // Execute the buy if approved
     if result.should_buy {
         info!("Pipeline approved buy for {} (Reason: {})", result.mint, result.evaluation_reason);
         

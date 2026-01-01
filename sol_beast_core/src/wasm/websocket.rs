@@ -111,13 +111,6 @@ impl WasmWebSocket {
 
         Ok(sub_id)
     }
-            }]
-        });
-
-        self.send(&request.to_string())?;
-        
-        Ok(sub_id)
-    }
 
     pub fn unsubscribe(&self, sub_id: u64) -> Result<(), JsValue> {
         let request = serde_json::json!({

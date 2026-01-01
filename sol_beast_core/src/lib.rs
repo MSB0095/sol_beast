@@ -19,6 +19,7 @@ pub mod buy_service;
 pub mod strategy;
 pub mod pipeline;
 pub mod dev_fee;
+pub mod detection;
 
 #[cfg(feature = "native")]
 pub mod native;

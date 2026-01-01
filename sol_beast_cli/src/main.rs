@@ -13,7 +13,14 @@ mod price_subscriber;
 mod trade_logger;
 
 // Use core library modules
-use sol_beast_core::{error::CoreError, settings, native::http::NativeHttpClient, native::rpc_impl::NativeRpcClient, pipeline::process_new_token};
+use sol_beast_core::{
+    error::CoreError, 
+    settings, 
+    native::http::NativeHttpClient, 
+    native::rpc_impl::NativeRpcClient, 
+    pipeline::process_new_token,
+    detection::{NewTokenDetector, DetectionConfig},
+};
 type AppError = CoreError;
 use api::{create_router, ApiState, BotStats, TradeRecord};
 use ws::WsRequest;
@@ -232,6 +239,11 @@ async fn main() -> Result<(), AppError> {
     let keypair_clone_monitor = keypair.clone();
     let simulate_keypair_clone = simulate_keypair.clone();
     let trades_map_clone_monitor = trades_map.clone();
+    
+    // Create new token detector with metrics
+    let detection_config = DetectionConfig::from_settings(&settings);
+    let detector = Arc::new(NewTokenDetector::new(detection_config));
+    info!("Created new token detector with WebSocket-level filtering");
 
     // Channel for receiving WSS messages is created below
     // (removed Shyft channels)
@@ -480,7 +492,18 @@ async fn main() -> Result<(), AppError> {
         }
     });
 
+    // Spawn periodic detection metrics logging
+    let detector_for_metrics = detector.clone();
+    let metrics_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            detector_for_metrics.log_metrics();
+        }
+    });
+
     // Process messages
+    let detector_clone = detector.clone();
     while let Some(msg_json) = rx.recv().await {
         // Parse raw JSON from WSS
         if let Err(e) = process_wss_message(
@@ -498,6 +521,7 @@ async fn main() -> Result<(), AppError> {
             trades_map.clone(),
             detected_coins.clone(),
             trades_list.clone(),
+            &detector_clone,
         )
         .await
         {
@@ -514,7 +538,7 @@ async fn main() -> Result<(), AppError> {
     // This will block until all tasks complete or panic.
     info!("Main message processing loop ended. Awaiting background tasks...");
 
-    let mut all_handles = vec![monitor_handle, api_sync_handle, api_server_handle];
+    let mut all_handles = vec![monitor_handle, api_sync_handle, api_server_handle, metrics_handle];
     all_handles.extend(ws_handles); // Add all WebSocket handles
 
     for handle in all_handles {
@@ -541,95 +565,69 @@ async fn process_wss_message(
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+    detector: &NewTokenDetector,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let v: serde_json::Value = serde_json::from_str(msg_json)?;
     
-    // Check if this is a logsNotification
-    if let Some(method) = v.get("method").and_then(|m| m.as_str()) {
-        if method == "logsNotification" {
-            if let Some(params) = v.get("params") {
-                if let Some(result) = params.get("result") {
-                    if let Some(value) = result.get("value") {
-                        // Check for error
-                        if let Some(err) = value.get("err") { 
-                           if !err.is_null() { return Ok(()); }
-                        }
-                        
-                        let signature = match value.get("signature").and_then(|s| s.as_str()) {
-                            Some(s) => s.to_string(),
-                            None => return Ok(()),
-                        };
-                        
-                        // Check logs for "Instruction: Create"
-                        let mut is_create = false;
-                        if let Some(logs) = value.get("logs").and_then(|l| l.as_array()) {
-                            for log_val in logs {
-                                if let Some(log) = log_val.as_str() {
-                                    if log.contains("Program log: Instruction: Create") {
-                                        is_create = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        if is_create {
-                            if seen.lock().await.put(signature.clone(), ()).is_none() {
-                                if holdings.lock().await.len() >= settings.max_holded_coins {
-                                    // ... (max holdings logic similar to before)
-                                    let mut last_lock = LAST_MAX_HELD_LOG.lock().await;
-                                    let now = Instant::now();
-                                    let should_log = match *last_lock {
-                                        Some(ts) => now.duration_since(ts).as_secs() > MAX_HELD_LOG_DEBOUNCE_SECS,
-                                        None => true,
-                                    };
-                                    if should_log {
-                                        *last_lock = Some(now);
-                                        debug!(
-                                            "Max held coins reached ({}); skipping incoming message processing",
-                                            settings.max_holded_coins
-                                        );
-                                    }
-                                    return Ok(());
-                                }
-                
-                                let detect_time = Utc::now();
-                                // We need to fetch transaction details effectively since we only have signature from logs
-                                // The unified `pipeline` handles this fetching internally using `rpc_client`.
-                                
-                                // Synthesize a ShyftTransaction-like struct? No, `process_new_token` takes `signature` and `rpc_client`.
-                                // `handle_new_token` previously took `ShyftTransaction` mostly for the signature and instructions.
-                                // We can simplify `handle_new_token` to just take signature and do the work.
-                                // Actually `handle_new_token` in my previous refactor called `process_new_token`.
-                                // AND `handle_new_token` tried to peek at instructions.
-                                // I should refactor `handle_new_token` to accept just the signature or basic info.
-                                // Or, I can call `handle_new_token_from_sig`.
-                                
-                                if let Err(e) = handle_new_token_from_sig(
-                                    &signature,
-                                    rpc_client,
-                                    http_client,
-                                    settings,
-                                    detect_time,
-                                    detected_coins,
-                                    holdings.clone(),
-                                    is_real,
-                                    keypair,
-                                    simulate_keypair,
-                                    ws_control_tx.clone(),
-                                    trades_map.clone(),
-                                    trades_list.clone(),
-                                ).await {
-                                    error!("handle_new_token failed for {}: {}", signature, e);
-                                    return Err(e);
-                                }
-                            }
-                        }
-                    }
+    // Use the detector to check if this notification should be processed
+    match detector.should_process_notification(&v) {
+        Ok(Some(signature)) => {
+            // Check for duplicates
+            if seen.lock().await.put(signature.clone(), ()).is_some() {
+                // Already seen - record duplicate and skip
+                detector.metrics().record_duplicate();
+                return Ok(());
+            }
+            
+            // Check if we've reached max holdings
+            if holdings.lock().await.len() >= settings.max_holded_coins {
+                let mut last_lock = LAST_MAX_HELD_LOG.lock().await;
+                let now = Instant::now();
+                let should_log = match *last_lock {
+                    Some(ts) => now.duration_since(ts).as_secs() > MAX_HELD_LOG_DEBOUNCE_SECS,
+                    None => true,
+                };
+                if should_log {
+                    *last_lock = Some(now);
+                    debug!(
+                        "Max held coins reached ({}); skipping incoming message processing",
+                        settings.max_holded_coins
+                    );
                 }
+                return Ok(());
+            }
+
+            let detect_time = Utc::now();
+            
+            // Process the new token using the detector
+            if let Err(e) = handle_new_token_from_sig(
+                &signature,
+                rpc_client,
+                http_client,
+                settings,
+                detect_time,
+                detected_coins,
+                holdings.clone(),
+                is_real,
+                keypair,
+                simulate_keypair,
+                ws_control_tx.clone(),
+                trades_map.clone(),
+                trades_list.clone(),
+            ).await {
+                error!("handle_new_token failed for {}: {}", signature, e);
+                return Err(e);
             }
         }
+        Ok(None) => {
+            // Filtered out - nothing to do
+        }
+        Err(e) => {
+            // Parse error - log and skip
+            debug!("Error processing notification: {:?}", e);
+        }
     }
+    
     Ok(())
 }
 

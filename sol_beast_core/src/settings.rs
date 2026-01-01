@@ -18,10 +18,15 @@ pub struct Settings {
     pub wallet_private_key_string: Option<String>,
     #[serde(default)]
     pub simulate_wallet_private_key_string: Option<String>,
+    #[serde(default = "default_tp_percent")]
     pub tp_percent: f64,
+    #[serde(default = "default_sl_percent")]
     pub sl_percent: f64,
+    #[serde(default = "default_timeout_secs")]
     pub timeout_secs: i64,
+    #[serde(default = "default_cache_capacity")]
     pub cache_capacity: usize,
+    #[serde(default = "default_price_cache_ttl_secs")]
     pub price_cache_ttl_secs: u64,
     #[serde(default = "default_buy_amount")]
     pub buy_amount: f64,
@@ -318,8 +323,13 @@ pub fn parse_private_key_string(s: &str) -> Result<Vec<u8>, String> {
 
 fn default_bonding_curve_strict() -> bool { false }
 fn default_bonding_curve_log_debounce_secs() -> u64 { 300 }
+fn default_tp_percent() -> f64 { 100.0 }
+fn default_sl_percent() -> f64 { -50.0 }
+fn default_timeout_secs() -> i64 { 50 }
+fn default_cache_capacity() -> usize { 1024 }
 fn default_buy_amount() -> f64 { 0.1 }
 fn default_price_source() -> String { "wss".to_string() }
+fn default_price_cache_ttl_secs() -> u64 { 60 }
 fn default_rotate_rpc() -> bool { true }
 fn default_rpc_rotate_interval_secs() -> u64 { 60 }
 fn default_max_holded_coins() -> usize { 100 }
@@ -369,11 +379,11 @@ impl Default for Settings {
             wallet_keypair_json: None,
             wallet_private_key_string: None,
             simulate_wallet_private_key_string: None,
-            tp_percent: 0.0,
-            sl_percent: 0.0,
-            timeout_secs: 0,
-            cache_capacity: 1000,
-            price_cache_ttl_secs: 60,
+            tp_percent: default_tp_percent(),
+            sl_percent: default_sl_percent(),
+            timeout_secs: default_timeout_secs(),
+            cache_capacity: default_cache_capacity(),
+            price_cache_ttl_secs: default_price_cache_ttl_secs(),
             buy_amount: default_buy_amount(),
             price_source: default_price_source(),
             rotate_rpc: default_rotate_rpc(),

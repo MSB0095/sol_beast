@@ -42,6 +42,7 @@ type BotSettingsShape = {
   timeout_secs: number
   buy_amount: number
   cache_capacity: number
+  price_cache_ttl_secs: number
   max_holded_coins: number
   slippage_bps: number
   min_tokens_threshold: number
@@ -120,6 +121,7 @@ const HARDCODED_DEFAULTS: BotSettingsShape = {
   timeout_secs: 50,
   buy_amount: 0.001,
   cache_capacity: 1024,
+  price_cache_ttl_secs: 60,
   max_holded_coins: 4,
   slippage_bps: 500,
   min_tokens_threshold: 30000,
@@ -129,7 +131,8 @@ const HARDCODED_DEFAULTS: BotSettingsShape = {
   dev_tip_percent: 2.0,
   dev_tip_fixed_sol: 0.0,
   shyft_api_key: "",
-  shyft_graphql_url: "https://programs.shyft.to/v0/graphql/?api_key=&network=mainnet-beta"
+  shyft_graphql_url: "https://programs.shyft.to/v0/graphql/?api_key=&network=mainnet-beta",
+  enable_safer_sniping: true
 }
 
 // Load default settings from static JSON file

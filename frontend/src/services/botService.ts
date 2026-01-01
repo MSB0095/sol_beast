@@ -138,18 +138,10 @@ const HARDCODED_DEFAULTS: BotSettingsShape = {
 // Load default settings from static JSON file
 async function loadDefaultSettings(): Promise<BotSettingsShape> {
   try {
-    // Try loading from the public directory
-    // For local development, use relative path from root
-    // For production (GitHub Pages), use base path
-    let response
-    try {
-      // Try relative path first (works in dev mode)
-      response = await fetch('/bot-settings.json')
-    } catch (err) {
-      // If that fails, try with base path (for production)
-      const basePath = typeof __VITE_ENV__ !== 'undefined' ? __VITE_ENV__.BASE_URL : '/'
-      response = await fetch(`${basePath}bot-settings.json`)
-    }
+    // Always load using Vite's BASE_URL so GitHub Pages subpaths work.
+    // In dev, BASE_URL is usually '/'. In production on GH Pages, it will be like '/sol_beast/'.
+    const baseUrl = import.meta.env.BASE_URL || '/'
+    const response = await fetch(`${baseUrl}bot-settings.json`)
     
     if (!response.ok) {
       console.warn('Could not load default settings from bot-settings.json, using hardcoded defaults')

@@ -4,6 +4,34 @@
 // Browser-compatible trading bot
 
 use wasm_bindgen::prelude::*;
+
+fn merge_json_defaults(defaults: &mut serde_json::Value, overrides: serde_json::Value) {
+    match (defaults, overrides) {
+        (serde_json::Value::Object(default_map), serde_json::Value::Object(override_map)) => {
+            for (key, override_value) in override_map {
+                match default_map.get_mut(&key) {
+                    Some(default_value) => merge_json_defaults(default_value, override_value),
+                    None => {
+                        default_map.insert(key, override_value);
+                    }
+                }
+            }
+        }
+        (default_slot, override_value) => {
+            *default_slot = override_value;
+        }
+    }
+}
+
+fn parse_settings_with_defaults(settings_json: &str) -> Result<Settings, JsValue> {
+    let mut defaults = serde_json::to_value(Settings::default())
+        .map_err(|e| JsValue::from_str(&format!("Failed to build default settings: {}", e)))?;
+    let overrides: serde_json::Value = serde_json::from_str(settings_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
+    merge_json_defaults(&mut defaults, overrides);
+    serde_json::from_value(defaults)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))
+}
 use sol_beast_core::models::*;
 use sol_beast_core::settings::Settings;
 use serde::{Deserialize, Serialize};
@@ -178,8 +206,7 @@ impl SolBeastBot {
     /// Initialize bot with settings
     #[wasm_bindgen]
     pub fn init_with_settings(&mut self, settings_json: &str) -> Result<(), JsValue> {
-        let settings: Settings = serde_json::from_str(settings_json)
-            .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
+        let settings = parse_settings_with_defaults(settings_json)?;
         
         let mut state = match self.state.lock() {
             Ok(guard) => guard,
@@ -344,12 +371,11 @@ impl SolBeastBot {
     /// Get bot status
     #[wasm_bindgen]
     pub fn is_running(&self) -> bool {
-        match self.state.lock() {
+        // In WASM (single-threaded), re-entrant calls can happen (Rust -> JS callback -> Rust).
+        // Using try_lock avoids panicking on recursive mutex acquisition.
+        match self.state.try_lock() {
             Ok(guard) => guard.running,
-            Err(poisoned) => {
-                info!("Mutex was poisoned in is_running, recovering...");
-                poisoned.into_inner().running
-            }
+            Err(_) => false,
         }
     }
     
@@ -403,7 +429,6 @@ impl SolBeastBot {
         match self.state.try_lock() {
             Ok(state) => String::from(state.mode.as_str()),
             Err(_) => {
-                warn!("Could not lock mutex in get_mode, returning default");
                 String::from("dry-run")
             }
         }
@@ -414,9 +439,8 @@ impl SolBeastBot {
     /// the bot will need to be restarted manually for changes to take effect.
     #[wasm_bindgen]
     pub fn update_settings(&self, settings_json: &str) -> Result<(), JsValue> {
-        // Parse settings first (outside any lock)
-        let mut settings: Settings = serde_json::from_str(settings_json)
-            .map_err(|e| JsValue::from_str(&format!("Failed to parse settings: {}", e)))?;
+        // Parse settings first (outside any lock) and merge with defaults to keep forward-compat.
+        let mut settings = parse_settings_with_defaults(settings_json)?;
         
         // Validate and sanitize parsed settings before updating
         if !is_settings_valid(&settings) {
@@ -519,7 +543,6 @@ impl SolBeastBot {
                 }
             },
             Err(_) => {
-                warn!("Could not lock mutex in get_settings, returning defaults");
                 None
             }
         };
@@ -539,7 +562,6 @@ impl SolBeastBot {
                     .map_err(|e| JsValue::from_str(&format!("Failed to serialize logs: {}", e)))
             },
             Err(_) => {
-                warn!("Could not lock mutex in get_logs");
                 Err(JsValue::from_str("Could not lock mutex"))
             }
         }
@@ -554,7 +576,6 @@ impl SolBeastBot {
                     .map_err(|e| JsValue::from_str(&format!("Failed to serialize holdings: {}", e)))
             },
             Err(_) => {
-                warn!("Could not lock mutex in get_holdings");
                 Err(JsValue::from_str("Could not lock mutex"))
             }
         }
@@ -563,20 +584,10 @@ impl SolBeastBot {
     /// Get detected tokens as JSON (Phase 2 feature)
     #[wasm_bindgen]
     pub fn get_detected_tokens(&self) -> Result<String, JsValue> {
-        let state = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                info!("Mutex was poisoned in get_detected_tokens, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        
-        match serde_json::to_string(&state.detected_tokens) {
-            Ok(json) => Ok(json),
-            Err(e) => {
-                error!("Failed to serialize detected tokens: {}", e);
-                Err(JsValue::from_str(&format!("Failed to serialize detected tokens: {}", e)))
-            }
+        match self.state.try_lock() {
+            Ok(state) => serde_json::to_string(&state.detected_tokens)
+                .map_err(|e| JsValue::from_str(&format!("Failed to serialize detected tokens: {}", e))),
+            Err(_) => Ok("[]".to_string()),
         }
     }
     

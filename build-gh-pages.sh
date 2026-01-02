@@ -27,9 +27,10 @@ if [ ! -d "node_modules" ]; then
     npm ci
 fi
 
-# Set base path for GitHub Pages
-# Default is / for custom domain deployment
-export BASE_PATH=${BASE_PATH:-"/"}
+# Set base path for GitHub Pages.
+# - Repo pages:   https://<user>.github.io/<repo>/  -> BASE_PATH should be "/<repo>/" (default below)
+# - Custom domain: https://example.com/             -> override with BASE_PATH="/"
+export BASE_PATH=${BASE_PATH:-"/sol_beast/"}
 echo "Building frontend with BASE_PATH=$BASE_PATH"
 
 # Run build

@@ -138,9 +138,9 @@ const HARDCODED_DEFAULTS: BotSettingsShape = {
 // Load default settings from static JSON file
 async function loadDefaultSettings(): Promise<BotSettingsShape> {
   try {
-    // Always load using Vite's BASE_URL so GitHub Pages subpaths work.
+    // Always load using the configured base URL so GitHub Pages subpaths work.
     // In dev, BASE_URL is usually '/'. In production on GH Pages, it will be like '/sol_beast/'.
-    const baseUrl = import.meta.env.BASE_URL || '/'
+    const baseUrl = typeof __VITE_ENV__ !== 'undefined' ? __VITE_ENV__.BASE_URL : '/'
     const response = await fetch(`${baseUrl}bot-settings.json`)
     
     if (!response.ok) {

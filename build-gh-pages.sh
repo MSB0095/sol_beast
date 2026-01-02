@@ -28,8 +28,8 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # Set base path for GitHub Pages
-# Default is /sol_beast/ assuming the repo name is sol_beast
-export BASE_PATH=${BASE_PATH:-"/sol_beast/"}
+# Default is / for custom domain deployment
+export BASE_PATH=${BASE_PATH:-"/"}
 echo "Building frontend with BASE_PATH=$BASE_PATH"
 
 # Run build

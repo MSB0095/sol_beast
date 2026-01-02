@@ -16,7 +16,7 @@ function createNoJekyllPlugin() {
 }
 
 // Allow base path to be configured via environment variable for easy deployment to different repositories
-const BASE_PATH = process.env.BASE_PATH || '/sol_beast/'
+const BASE_PATH = process.env.BASE_PATH || '/'
 
 // https://vitejs.dev/config/
 export default defineConfig({

@@ -14,7 +14,8 @@ function createNoJekyllPlugin() {
     };
 }
 // Allow base path to be configured via environment variable for easy deployment to different repositories
-var BASE_PATH = process.env.BASE_PATH || '/sol_beast/';
+// Default is '/' for custom domains. For repo pages, set BASE_PATH="/repo_name/" (e.g., BASE_PATH="/sol_beast/")
+var BASE_PATH = process.env.BASE_PATH || '/';
 // https://vitejs.dev/config/
 export default defineConfig({
     plugins: [

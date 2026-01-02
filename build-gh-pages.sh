@@ -3,6 +3,14 @@ set -e
 
 # Build script for GitHub Pages deployment
 # This script builds the WASM module and the frontend, then populates the docs/ directory.
+#
+# Usage:
+#   ./build-gh-pages.sh                    # Build for custom domain (default, uses BASE_PATH="/")
+#   BASE_PATH="/sol_beast/" ./build-gh-pages.sh  # Build for repo GitHub Pages
+#
+# The BASE_PATH determines where assets are served from:
+#   - Custom domain (e.g., https://solbeast.me/): Use BASE_PATH="/" (default)
+#   - Repo Pages (e.g., https://username.github.io/repo/): Use BASE_PATH="/repo/"
 
 echo "Building project for GitHub Pages..."
 
@@ -28,9 +36,10 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # Set base path for GitHub Pages.
-# - Repo pages:   https://<user>.github.io/<repo>/  -> BASE_PATH should be "/<repo>/" (default below)
-# - Custom domain: https://example.com/             -> override with BASE_PATH="/"
-export BASE_PATH=${BASE_PATH:-"/sol_beast/"}
+# - Custom domain: https://example.com/             -> BASE_PATH="/" (default below)
+# - Repo pages:   https://<user>.github.io/<repo>/  -> override with BASE_PATH="/<repo>/"
+#   Example: BASE_PATH="/sol_beast/" ./build-gh-pages.sh
+export BASE_PATH=${BASE_PATH:-"/"}
 echo "Building frontend with BASE_PATH=$BASE_PATH"
 
 # Run build

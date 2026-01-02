@@ -42,6 +42,10 @@ fi
 export BASE_PATH=${BASE_PATH:-"/"}
 echo "Building frontend with BASE_PATH=$BASE_PATH"
 
+# GitHub Pages deployment must always use WASM mode
+export VITE_USE_WASM=true
+echo "Building in WASM-only mode (VITE_USE_WASM=true)"
+
 # Run build
 npm run build
 

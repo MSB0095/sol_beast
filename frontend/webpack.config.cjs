@@ -6,7 +6,8 @@ const CopyPlugin = require('copy-webpack-plugin');
 
 const isProduction = process.env.NODE_ENV === 'production';
 // Allow base path to be configured via environment variable for easy deployment to different repositories
-const BASE_PATH = process.env.BASE_PATH || '/sol_beast/';
+// Default is '/' for custom domains. For repo pages, set BASE_PATH="/repo_name/" (e.g., BASE_PATH="/sol_beast/")
+const BASE_PATH = process.env.BASE_PATH || '/';
 
 module.exports = {
   mode: isProduction ? 'production' : 'development',

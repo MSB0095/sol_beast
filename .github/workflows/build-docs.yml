@@ -10,35 +10,35 @@ on:
 jobs:
   build-and-deploy-docs:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
-          
+
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           target: wasm32-unknown-unknown
           cache: true
-          
+
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
-        
+
       - name: Build GitHub Pages
         run: |
           chmod +x build-gh-pages.sh
           ./build-gh-pages.sh
-          
+
       - name: Check for changes
         id: check_changes
         run: |
@@ -52,7 +52,7 @@ jobs:
             echo "changes=true" >> $GITHUB_OUTPUT
             echo "Changes detected"
           fi
-          
+
       - name: Commit and push changes
         if: steps.check_changes.outputs.changes == 'true'
         run: |

@@ -9,7 +9,7 @@ pub type PriceSubscriberResult<T> = Result<T, CoreError>;
 
 /// Platform-agnostic price subscription trait
 /// Implementations exist for:
-/// - Native: WebSocket-based subscriptions (Helius, Shyft)
+/// - Native: WebSocket-based subscriptions
 /// - WASM: Browser-based price updates from browser state
 #[async_trait(?Send)]
 pub trait PriceSubscriber {

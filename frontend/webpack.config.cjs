@@ -86,8 +86,6 @@ module.exports = {
         BASE_URL: isProduction ? BASE_PATH : '/',
         VITE_API_BASE_URL: process.env.VITE_API_BASE_URL || 'http://localhost:8080',
         VITE_WS_URL: process.env.VITE_WS_URL || 'ws://localhost:8080/ws',
-        VITE_SHYFT_API_KEY: process.env.VITE_SHYFT_API_KEY || undefined,
-        VITE_SHYFT_GRAPHQL_URL: process.env.VITE_SHYFT_GRAPHQL_URL || undefined,
       }),
       'global': 'globalThis',
     }),

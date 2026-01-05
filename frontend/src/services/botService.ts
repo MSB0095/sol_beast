@@ -51,8 +51,6 @@ type BotSettingsShape = {
   max_liquidity_sol: number
   dev_tip_percent: number
   dev_tip_fixed_sol: number
-  shyft_api_key: string
-  shyft_graphql_url: string
   enable_safer_sniping?: boolean
 }
 

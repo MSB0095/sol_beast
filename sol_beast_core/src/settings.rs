@@ -91,11 +91,6 @@ pub struct Settings {
     pub dev_tip_percent: f64,
     #[serde(default = "default_dev_tip_fixed_sol")]
     pub dev_tip_fixed_sol: f64,
-    // Shyft configuration
-    #[serde(default)]
-    pub shyft_api_key: Option<String>,
-    #[serde(default = "default_shyft_graphql_url")]
-    pub shyft_graphql_url: String,
 }
 
 impl Settings {
@@ -227,12 +222,6 @@ impl Settings {
         if other.dev_tip_fixed_sol != self.dev_tip_fixed_sol {
             self.dev_tip_fixed_sol = other.dev_tip_fixed_sol;
         }
-        if other.shyft_api_key != self.shyft_api_key {
-            self.shyft_api_key = other.shyft_api_key.clone();
-        }
-        if other.shyft_graphql_url != self.shyft_graphql_url {
-            self.shyft_graphql_url = other.shyft_graphql_url.clone();
-        }
     }
 
     /// Validate settings ranges and constraints
@@ -351,7 +340,6 @@ fn default_helius_confirm_timeout_secs() -> u64 { 15 }
 fn default_dev_fee_enabled() -> bool { true }
 fn default_dev_tip_percent() -> f64 { 2.0 }
 fn default_dev_tip_fixed_sol() -> f64 { 0.0 }
-fn default_shyft_graphql_url() -> String { "https://programs.shyft.to/v0/graphql".to_string() }
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode
@@ -414,8 +402,6 @@ impl Default for Settings {
             dev_wallet_address: None,
             dev_tip_percent: default_dev_tip_percent(),
             dev_tip_fixed_sol: default_dev_tip_fixed_sol(),
-            shyft_api_key: None,
-            shyft_graphql_url: default_shyft_graphql_url(),
         }
     }
 }

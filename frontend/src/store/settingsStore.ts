@@ -1,10 +1,7 @@
 import { create } from 'zustand'
 import { botService } from '../services/botService'
 
-// Optional environment overrides for Shyft
 const env: Partial<typeof __VITE_ENV__> = typeof __VITE_ENV__ !== 'undefined' ? __VITE_ENV__ : {}
-const envShyftApiKey = env.VITE_SHYFT_API_KEY
-const envShyftGraphqlUrl = env.VITE_SHYFT_GRAPHQL_URL
 
 export interface Settings {
   // RPC & WebSocket
@@ -70,10 +67,6 @@ export interface Settings {
   // Dev Tip
   dev_tip_percent: number
   dev_tip_fixed_sol: number
-  
-  // Shyft
-  shyft_api_key?: string
-  shyft_graphql_url: string
 }
 
 type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
@@ -129,8 +122,6 @@ const defaultSettings: Settings = {
   helius_confirm_timeout_secs: 1,
   dev_tip_percent: 2.0,
   dev_tip_fixed_sol: 0.0,
-  shyft_api_key: envShyftApiKey,
-  shyft_graphql_url: envShyftGraphqlUrl || 'https://programs.shyft.to/v0/graphql/?network=mainnet-beta',
 }
 
 export const useSettingsStore = create<SettingsStore>((set) => ({

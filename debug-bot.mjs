@@ -2,7 +2,7 @@
 
 /**
  * Debug bot functionality with Playwright
- * This script connects to the app, captures console logs, and tests the Shyft integration
+ * This script connects to the app, captures console logs, and tests the integration
  */
 
 import { chromium } from 'playwright';
@@ -109,19 +109,15 @@ async function debugBot() {
     console.log(JSON.stringify(settings, null, 2));
     console.log('\n');
     
-    // Try to update settings with Shyft API key
-    console.log('Updating settings with Shyft API key...\n');
+    // Try to update settings
+    console.log('Updating settings...\n');
     await page.evaluate(() => {
-      const shyftApiKey = 'ULYlbsBOcBGDjY-a';
-      const shyftGraphqlUrl = 'https://programs.shyft.to/v0/graphql/?network=mainnet-beta';
-      const shyftWsUrl = 'wss://rpc.shyft.to';
+      const defaultWsUrl = 'wss://api.mainnet-beta.solana.com';
       
       // Try to update via window API if available
       if (window.updateBotSettings) {
         window.updateBotSettings({
-          shyft_api_key: shyftApiKey,
-          shyft_graphql_url: shyftGraphqlUrl,
-          solana_ws_urls: [shyftWsUrl]
+          solana_ws_urls: [defaultWsUrl]
         });
       }
     });

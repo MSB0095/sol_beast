@@ -67,23 +67,6 @@ export default function ConfigurationPanel() {
       ]
     },
     {
-      title: 'Shyft Configuration',
-      settings: [
-        {
-          key: 'shyft_api_key' as const,
-          label: 'Shyft API Key',
-          type: 'password',
-          help: 'Required for GraphQL monitoring'
-        },
-        {
-          key: 'shyft_graphql_url' as const,
-          label: 'Shyft GraphQL URL',
-          type: 'text',
-          help: 'Shyft GraphQL endpoint URL'
-        },
-      ]
-    },
-    {
       title: 'Trading Strategy',
       settings: [
         { key: 'tp_percent' as const, label: 'Take Profit %', type: 'number', help: 'Sell when profit reaches this %' },

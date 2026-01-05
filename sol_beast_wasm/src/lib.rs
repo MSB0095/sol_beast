@@ -239,17 +239,17 @@ impl SolBeastBot {
         // Use constants directly instead of trusting settings to avoid memory corruption
         let (ws_url, pump_fun_program) = if !is_settings_valid(&state.settings) {
             warn!("Settings invalid, using hardcoded defaults");
-            // Always use standard Solana WebSocket endpoint - Shyft doesn't provide WebSocket at their RPC URL
+            // Always use standard Solana WebSocket endpoint
             (DEFAULT_SOLANA_WS_URL.to_string(), DEFAULT_PUMP_FUN_PROGRAM.to_string())
         } else {
-            // Use configured WebSocket URL (should be standard Solana endpoint, not Shyft RPC)
+            // Use configured WebSocket URL (should be standard Solana endpoint)
             let ws = state.settings.solana_ws_urls.first()
                 .ok_or_else(|| JsValue::from_str("No WebSocket URL configured"))?
                 .clone();
             (ws, state.settings.pump_fun_program.clone())
         };
         
-        // Always use standard Solana WebSocket protocol (logsSubscribe), not Shyft GraphQL
+        // Always use standard Solana WebSocket protocol (logsSubscribe)
 
         
         // Validate strings are ASCII (which is valid UTF-8) before using

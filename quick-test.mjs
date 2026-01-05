@@ -68,7 +68,7 @@ async function quickTest() {
   await browser.close();
   
   if (testPassed) {
-    console.log('\n🎉 Test PASSED! The bot is working in WASM mode with Shyft.');
+    console.log('\n🎉 Test PASSED! The bot is working in WASM mode.');
     process.exit(0);
   } else {
     console.log('\n❌ Test FAILED');

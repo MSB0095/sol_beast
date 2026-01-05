@@ -6,7 +6,6 @@ mod monitor;
 mod rpc;
 mod state;
 mod ws;
-// mod shyft_monitor; (Removed)
 mod models;
 mod buy_wrapper;
 mod price_subscriber;
@@ -246,7 +245,7 @@ async fn main() -> Result<(), AppError> {
     info!("Created new token detector with WebSocket-level filtering");
 
     // Channel for receiving WSS messages is created below
-    // (removed Shyft channels)
+    // (removed monitoring channels)
 
     // Channel to control WSS (subscribe/unsubscribe)
     let (ws_control_tx, _ws_control_rx) = mpsc::channel::<WsRequest>(100);
@@ -323,7 +322,7 @@ async fn main() -> Result<(), AppError> {
     // Use the first WebSocket's control channel for price subscription
     // (in the future, we can use all of them for even better redundancy)
 
-    // Now spawn price monitoring (after shyft_control_tx exists so monitor
+    // Now spawn price monitoring (after control tx exists so monitor
     // can unsubscribe subscriptions on sell).
     let rpc_client_clone = rpc_client.clone();
     let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();

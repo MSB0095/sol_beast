@@ -73,7 +73,7 @@ pub async fn execute_buy(
   - `is_running()` → bool
   - `subscribed_mints()` → HashSet<String>
 - `sol_beast_core/src/native/price_subscriber.rs` - NativeWebSocketSubscriber
-  - WebSocket connection to Shyft API
+  - WebSocket connection to price monitoring API
   - In-memory LRU price cache with TTL
 - `sol_beast_core/src/wasm/price_subscriber.rs` - WasmPriceSubscriber
   - Delegates to browser-side price state management
@@ -143,7 +143,7 @@ if let Some(price) = native_subscriber.get_price(mint) { ... }
 **Queued Actions**:
 1. Extract `monitor::monitor_holdings()` price-checking logic
 2. Replace inline cache with `price_subscriber.get_price()`
-3. Replace `shyft_control_tx` subscriptions with `price_subscriber.subscribe()`
+3. Replace control subscriptions with `price_subscriber.subscribe()`
 4. Remove WebSocket boilerplate; delegate to Core implementation
 
 **Estimated Reduction**: 150-200 lines of code → 40-50 lines
@@ -161,7 +161,7 @@ if let Some(price) = native_subscriber.get_price(mint) { ... }
 - ✅ `fetch_bonding_curve_state()` - in sol_beast_core/src/models.rs
 
 **CLI-Specific Functions to Keep**:
-- `fetch_transaction_details()` - Shyft API integration
+- `fetch_transaction_details()` - External API integration
 - `detect_idl_for_mint()` - IDL-specific logic
 - `build_missing_ata_preinstructions()` - ATA creation helpers
 - `fetch_token_metadata()` - Metadata parsing

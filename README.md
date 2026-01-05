@@ -111,8 +111,7 @@ This architecture ensures:
 ### Quick Setup (5 minutes)
 Configure three repository secrets and get automatic testing on every push:
 - `SOLANA_RPC_URL` - Solana RPC endpoint
-- `SOLANA_WS_URL` - WebSocket endpoint  
-- `SHYFT_API_KEY` - Shyft GraphQL API key (optional but recommended)
+- `SOLANA_WS_URL` - WebSocket endpoint
 
 **📱 [Quick Start Guide](./QUICK_START_CI.md)** - Get started in 5 minutes from mobile
 

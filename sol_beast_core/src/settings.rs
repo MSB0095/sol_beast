@@ -8,6 +8,12 @@ use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 pub struct Settings {
     pub solana_ws_urls: Vec<String>,
     pub solana_rpc_urls: Vec<String>,
+    /// PumpPortal WebSocket URL for new token detection (default: wss://pumpportal.fun/api/data)
+    #[serde(default = "default_pumpportal_ws_url")]
+    pub pumpportal_ws_url: String,
+    /// Enable PumpPortal for new token detection (if false, use Solana WSS)
+    #[serde(default = "default_use_pumpportal_for_new_tokens")]
+    pub use_pumpportal_for_new_tokens: bool,
     pub pump_fun_program: String,
     pub metadata_program: String,
     #[serde(default)]
@@ -122,6 +128,12 @@ impl Settings {
         }
         if other.solana_ws_urls != self.solana_ws_urls {
             self.solana_ws_urls = other.solana_ws_urls.clone();
+        }
+        if other.pumpportal_ws_url != self.pumpportal_ws_url {
+            self.pumpportal_ws_url = other.pumpportal_ws_url.clone();
+        }
+        if other.use_pumpportal_for_new_tokens != self.use_pumpportal_for_new_tokens {
+            self.use_pumpportal_for_new_tokens = other.use_pumpportal_for_new_tokens;
         }
         if other.pump_fun_program != self.pump_fun_program {
             self.pump_fun_program = other.pump_fun_program.clone();
@@ -312,6 +324,8 @@ pub fn parse_private_key_string(s: &str) -> Result<Vec<u8>, String> {
 
 fn default_bonding_curve_strict() -> bool { false }
 fn default_bonding_curve_log_debounce_secs() -> u64 { 300 }
+fn default_pumpportal_ws_url() -> String { "wss://pumpportal.fun/api/data".to_string() }
+fn default_use_pumpportal_for_new_tokens() -> bool { true }
 fn default_tp_percent() -> f64 { 100.0 }
 fn default_sl_percent() -> f64 { -50.0 }
 fn default_timeout_secs() -> i64 { 50 }
@@ -361,6 +375,8 @@ impl Default for Settings {
         Self {
             solana_ws_urls: vec![],
             solana_rpc_urls: vec![],
+            pumpportal_ws_url: default_pumpportal_ws_url(),
+            use_pumpportal_for_new_tokens: default_use_pumpportal_for_new_tokens(),
             pump_fun_program: "".to_string(),
             metadata_program: "".to_string(),
             wallet_keypair_path: None,

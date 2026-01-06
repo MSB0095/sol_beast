@@ -10,6 +10,7 @@ mod models;
 mod buy_wrapper;
 mod price_subscriber;
 mod trade_logger;
+mod pumpportal_ws;
 
 // Use core library modules
 use sol_beast_core::{
@@ -23,6 +24,7 @@ use sol_beast_core::{
 type AppError = CoreError;
 use api::{create_router, ApiState, BotStats, TradeRecord};
 use ws::WsRequest;
+use pumpportal_ws::PumpPortalDetectedToken;
 
 // Global bot control for logging
 static BOT_CONTROL: once_cell::sync::OnceCell<std::sync::Arc<api::BotControl>> =
@@ -257,17 +259,43 @@ async fn main() -> Result<(), AppError> {
         settings.pump_fun_program.clone(),
     )));
 
-    // Spawn Standard WSS Monitors - USE ALL AVAILABLE WSS URLs in parallel
-    // This significantly improves detection reliability and speed by:
-    // 1. Avoiding single point of failure if one WSS connection drops
-    // 2. Receiving notifications from multiple sources simultaneously
-    // 3. Reducing latency by using geographically distributed endpoints
+    // Channel for PumpPortal new token events
+    let (pumpportal_tx, mut pumpportal_rx) = mpsc::channel::<PumpPortalDetectedToken>(1000);
+    
+    // Spawn PumpPortal WebSocket for new token detection (if enabled)
+    let mut pumpportal_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if settings.use_pumpportal_for_new_tokens {
+        let pumpportal_url = settings.pumpportal_ws_url.clone();
+        let pumpportal_tx_clone = pumpportal_tx.clone();
+        
+        info!(
+            "Using PumpPortal WebSocket for new token detection: {}",
+            pumpportal_url
+        );
+        
+        pumpportal_handle = Some(tokio::spawn(async move {
+            if let Err(e) = pumpportal_ws::run_pumpportal_ws(
+                &pumpportal_url,
+                pumpportal_tx_clone,
+            )
+            .await
+            {
+                error!("PumpPortal WebSocket task failed: {}", e);
+            }
+        }));
+    } else {
+        info!("PumpPortal disabled; using Solana WSS for new token detection");
+    }
+
+    // Spawn Standard Solana WSS Monitors - for price updates (bonding curve monitoring)
+    // When PumpPortal is enabled, these primarily handle price monitoring
+    // When PumpPortal is disabled, these also handle new token detection
     let holdings_clone_ws = holdings.clone();
     let price_cache_clone_ws = price_cache.clone();
     let settings_clone_ws = settings.clone();
     
-    // Channel for raw WSS messages (mostly logs)
-    let (tx, mut rx) = mpsc::channel::<String>(1000); // Increased buffer for multiple connections
+    // Channel for raw WSS messages (logs for new token detection when PumpPortal is disabled)
+    let (tx, mut rx) = mpsc::channel::<String>(1000);
     
     // Get all configured WebSocket URLs
     let wss_urls: Vec<String> = if settings.solana_ws_urls.is_empty() {
@@ -281,9 +309,16 @@ async fn main() -> Result<(), AppError> {
         settings.solana_ws_urls.clone()
     };
     
+    let ws_purpose = if settings.use_pumpportal_for_new_tokens {
+        "price monitoring"
+    } else {
+        "token detection and price monitoring"
+    };
+    
     info!(
-        "Spawning {} WebSocket connections for parallel memecoin detection",
-        wss_urls.len()
+        "Spawning {} Solana WebSocket connections for {}",
+        wss_urls.len(),
+        ws_purpose
     );
     
     // Spawn a separate WebSocket task for each URL
@@ -300,7 +335,7 @@ async fn main() -> Result<(), AppError> {
         let (_ws_control_tx_local, ws_control_rx_local) = mpsc::channel::<WsRequest>(100);
         
         let ws_handle = tokio::spawn(async move {
-            info!("Starting WebSocket connection #{} to {}", idx, wss_url_clone);
+            info!("Starting Solana WebSocket connection #{} to {}", idx, wss_url_clone);
             if let Err(e) = ws::run_ws(
                 &wss_url_clone,
                 tx_clone,
@@ -312,7 +347,7 @@ async fn main() -> Result<(), AppError> {
             )
             .await
             {
-                error!("WSS task #{} failed ({}): {}", idx, wss_url_clone, e);
+                error!("Solana WSS task #{} failed ({}): {}", idx, wss_url_clone, e);
             }
         });
         
@@ -320,7 +355,6 @@ async fn main() -> Result<(), AppError> {
     }
     
     // Use the first WebSocket's control channel for price subscription
-    // (in the future, we can use all of them for even better redundancy)
 
     // Now spawn price monitoring (after control tx exists so monitor
     // can unsubscribe subscriptions on sell).
@@ -501,35 +535,105 @@ async fn main() -> Result<(), AppError> {
         }
     });
 
-    // Process messages
+    // Process messages from both PumpPortal and Solana WSS
+    // - PumpPortal messages: New token creation events (when enabled)
+    // - Solana WSS messages: Fallback new token detection (when PumpPortal disabled) + price monitoring
     let detector_clone = detector.clone();
-    while let Some(msg_json) = rx.recv().await {
-        // Parse raw JSON from WSS
-        if let Err(e) = process_wss_message(
-            &msg_json,
-            &seen,
-            &holdings,
-            &rpc_client,
-            &http_client,
-            is_real,
-            keypair.as_deref(),
-            simulate_keypair.as_deref(),
-
-            &settings,
-            ws_control_tx.clone(),
-            trades_map.clone(),
-            detected_coins.clone(),
-            trades_list.clone(),
-            &detector_clone,
-        )
-        .await
-        {
-            error!("process_wss_message failed: {}", e);
-            bot_log!(
-                "error",
-                "Failed to process WSS message",
-                format!("{}", e)
-            );
+    let use_pumpportal = settings.use_pumpportal_for_new_tokens;
+    
+    loop {
+        tokio::select! {
+            // Handle PumpPortal new token events (primary detection when enabled)
+            Some(detected_token) = pumpportal_rx.recv(), if use_pumpportal => {
+                // Check for duplicates
+                if seen.lock().await.put(detected_token.signature.clone(), ()).is_some() {
+                    debug!("Duplicate token from PumpPortal: {}", detected_token.mint);
+                    continue;
+                }
+                
+                // Check if we've reached max holdings
+                if holdings.lock().await.len() >= settings.max_holded_coins {
+                    let mut last_lock = LAST_MAX_HELD_LOG.lock().await;
+                    let now = Instant::now();
+                    let should_log = match *last_lock {
+                        Some(ts) => now.duration_since(ts).as_secs() > MAX_HELD_LOG_DEBOUNCE_SECS,
+                        None => true,
+                    };
+                    if should_log {
+                        *last_lock = Some(now);
+                        debug!(
+                            "Max held coins reached ({}); skipping PumpPortal token",
+                            settings.max_holded_coins
+                        );
+                    }
+                    continue;
+                }
+                
+                let detect_time = Utc::now();
+                
+                // Process the PumpPortal detected token
+                if let Err(e) = handle_pumpportal_token(
+                    detected_token,
+                    &rpc_client,
+                    &http_client,
+                    &settings,
+                    detect_time,
+                    detected_coins.clone(),
+                    holdings.clone(),
+                    is_real,
+                    keypair.as_deref(),
+                    simulate_keypair.as_deref(),
+                    ws_control_tx.clone(),
+                    trades_map.clone(),
+                    trades_list.clone(),
+                ).await {
+                    error!("handle_pumpportal_token failed: {}", e);
+                    bot_log!(
+                        "error",
+                        "Failed to process PumpPortal token",
+                        format!("{}", e)
+                    );
+                }
+            }
+            
+            // Handle Solana WSS messages (new token detection when PumpPortal disabled, always for price monitoring)
+            Some(msg_json) = rx.recv() => {
+                // Only process for new token detection if PumpPortal is disabled
+                // Price monitoring is handled internally by ws.rs
+                if !use_pumpportal {
+                    if let Err(e) = process_wss_message(
+                        &msg_json,
+                        &seen,
+                        &holdings,
+                        &rpc_client,
+                        &http_client,
+                        is_real,
+                        keypair.as_deref(),
+                        simulate_keypair.as_deref(),
+                        &settings,
+                        ws_control_tx.clone(),
+                        trades_map.clone(),
+                        detected_coins.clone(),
+                        trades_list.clone(),
+                        &detector_clone,
+                    )
+                    .await
+                    {
+                        error!("process_wss_message failed: {}", e);
+                        bot_log!(
+                            "error",
+                            "Failed to process WSS message",
+                            format!("{}", e)
+                        );
+                    }
+                }
+            }
+            
+            // Exit if all channels are closed
+            else => {
+                info!("All message channels closed, exiting main loop");
+                break;
+            }
         }
     }
 
@@ -539,6 +643,9 @@ async fn main() -> Result<(), AppError> {
 
     let mut all_handles = vec![monitor_handle, api_sync_handle, api_server_handle, metrics_handle];
     all_handles.extend(ws_handles); // Add all WebSocket handles
+    if let Some(pp_handle) = pumpportal_handle {
+        all_handles.push(pp_handle);
+    }
 
     for handle in all_handles {
         if let Err(e) = handle.await {
@@ -799,6 +906,191 @@ async fn handle_new_token_from_sig(
         }
     } else {
         info!("Pipeline rejected {} (Reason: {})", result.mint, result.evaluation_reason);
+    }
+    
+    Ok(())
+}
+
+/// Handle a new token detected via PumpPortal WebSocket
+/// 
+/// This function processes tokens detected through PumpPortal's subscribeNewToken stream.
+/// PumpPortal provides some metadata directly, but we still use the pipeline for full
+/// validation and buy decision logic.
+async fn handle_pumpportal_token(
+    detected_token: PumpPortalDetectedToken,
+    rpc_client: &Arc<RpcClient>,
+    http_client: &Arc<NativeHttpClient>,
+    settings: &Arc<Settings>,
+    detect_time: chrono::DateTime<Utc>,
+    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+    holdings: Arc<Mutex<HashMap<String, Holding>>>,
+    is_real: bool,
+    keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
+    _ws_control_tx: mpsc::Sender<WsRequest>,
+    trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
+    trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!(
+        "Processing PumpPortal token: {} ({}) - mint: {}",
+        detected_token.name.as_deref().unwrap_or("Unknown"),
+        detected_token.symbol.as_deref().unwrap_or("???"),
+        detected_token.mint
+    );
+    
+    // Use the signature to go through the full pipeline for validation
+    // This ensures we get the same validation logic regardless of detection source
+    let native_rpc = NativeRpcClient::from_arc(rpc_client.clone());
+    
+    let result = process_new_token(
+        detected_token.signature.clone(),
+        &native_rpc,
+        http_client.as_ref(),
+        settings,
+    ).await?;
+
+    // Log token detection to API
+    bot_log!(
+        "info",
+        format!("PumpPortal detected: {}", result.name.as_deref().unwrap_or("Unknown")),
+        format!("Mint: {}, Creator: {}", result.mint, result.creator)
+    );
+
+    // Add to detected coins list
+    {
+        let mut coins = detected_coins.lock().await;
+        coins.insert(
+            0,
+            api::DetectedCoin {
+                mint: result.mint.clone(),
+                name: result.name.clone(),
+                symbol: result.symbol.clone(),
+                image: result.image_uri.clone(),
+                creator: result.creator.clone(),
+                bonding_curve: result.bonding_curve.clone(),
+                detected_at: detect_time.to_rfc3339(),
+                metadata_uri: detected_token.metadata_uri.clone(),
+                buy_price: Some(result.buy_price_sol),
+                status: if result.should_buy { "buy_candidate" } else { "rejected" }.to_string(),
+            },
+        );
+        // Keep only last 100 detected coins
+        if coins.len() > 100 {
+            coins.truncate(100);
+        }
+    }
+
+    // Execute the buy if approved
+    if result.should_buy {
+        info!("Pipeline approved buy for {} (PumpPortal source, Reason: {})", result.mint, result.evaluation_reason);
+        
+        // Execute the buy
+        let buy_cfg = sol_beast_core::buy_service::BuyConfig {
+            mint: result.mint.clone(),
+            sol_amount: settings.buy_amount,
+            current_price_sol: result.buy_price_sol,
+            bonding_curve_state: result.bonding_curve_state.clone(),
+        };
+
+        let signer = if is_real { 
+            keypair.map(|k| {
+                let owned_kp = Keypair::try_from(&k.to_bytes()[..]).unwrap();
+                sol_beast_core::native::transaction_signer::NativeTransactionSigner::new(owned_kp)
+            })
+        } else {
+            simulate_keypair.map(|k| {
+                let owned_kp = Keypair::try_from(&k.to_bytes()[..]).unwrap();
+                sol_beast_core::native::transaction_signer::NativeTransactionSigner::new(owned_kp)
+            })
+        };
+
+        if let Some(signer) = signer {
+            match sol_beast_core::buy_service::BuyService::execute_buy(
+                buy_cfg,
+                &native_rpc,
+                &signer,
+                settings,
+            ).await {
+                Ok(buy_res) => {
+                    let buy_time = chrono::DateTime::from_timestamp(buy_res.timestamp, 0).unwrap_or_else(Utc::now);
+                    
+                    // Create Holding and insert
+                    let holding = Holding {
+                        mint: result.mint.clone(),
+                        amount: buy_res.token_amount,
+                        buy_price: result.buy_price_sol,
+                        buy_time,
+                        creator: Some(result.creator.clone()),
+                        metadata: Some(crate::models::OffchainTokenMetadata {
+                            name: result.name.clone(),
+                            symbol: result.symbol.clone(),
+                            image: result.image_uri.clone(),
+                            description: result.description.clone(),
+                            extras: None,
+                        }),
+                        onchain_raw: None,
+                        onchain: None,
+                    };
+                    
+                    holdings.lock().await.insert(result.mint.clone(), holding.clone());
+                    
+                    // Add to trades_map for PNL tracking
+                    let buy_rec = BuyRecord {
+                        mint: result.mint.clone(),
+                        symbol: result.symbol.clone(),
+                        name: result.name.clone(),
+                        uri: detected_token.metadata_uri.clone(),
+                        image: result.image_uri.clone(),
+                        creator: result.creator.clone(),
+                        detect_time,
+                        buy_time,
+                        buy_amount_sol: buy_res.sol_spent,
+                        buy_amount_tokens: buy_res.token_amount,
+                        buy_price: result.buy_price_sol,
+                        buy_signature: Some(buy_res.transaction_signature.clone()),
+                    };
+                    trades_map.lock().await.insert(result.mint.clone(), buy_rec.clone());
+
+                    // Add buy trade record to API
+                    {
+                        let mut trades = trades_list.lock().await;
+                        trades.insert(0, TradeRecord {
+                            mint: result.mint.clone(),
+                            symbol: result.symbol.clone(),
+                            name: result.name.clone(),
+                            image: result.image_uri.clone(),
+                            trade_type: "buy".to_string(),
+                            timestamp: buy_time.to_rfc3339(),
+                            tx_signature: Some(buy_res.transaction_signature.clone()),
+                            amount_sol: buy_res.sol_spent,
+                            amount_tokens: buy_res.token_amount as f64 / 1_000_000.0,
+                            price_per_token: result.buy_price_sol,
+                            profit_loss: None,
+                            profit_loss_percent: None,
+                            reason: Some(format!("PumpPortal: {}", result.evaluation_reason)),
+                        });
+                    }
+
+                    // Log to file
+                    trade_logger::log_buy(&buy_rec);
+
+                    info!("Successfully bought token (PumpPortal): {}", result.mint);
+                    bot_log!(
+                        "info",
+                        format!("Successfully bought token {} (PumpPortal)", result.mint),
+                        format!("Amount: {} tokens, Price: {:.18} SOL", buy_res.token_amount, result.buy_price_sol)
+                    );
+                }
+                Err(e) => {
+                    error!("Buy execution failed for {} (PumpPortal): {}", result.mint, e);
+                    bot_log!("error", format!("Buy failed for {} (PumpPortal)", result.mint), format!("{}", e));
+                }
+            }
+        } else {
+            warn!("No keypair available for buy execution (PumpPortal token)");
+        }
+    } else {
+        info!("Pipeline rejected {} (PumpPortal source, Reason: {})", result.mint, result.evaluation_reason);
     }
     
     Ok(())

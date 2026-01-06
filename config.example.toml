@@ -16,6 +16,24 @@
 solana_ws_urls = ["wss://api.mainnet-beta.solana.com/"]
 solana_rpc_urls = ["https://api.mainnet-beta.solana.com/"]
 
+# ==================== PumpPortal WebSocket Configuration ====================
+# PumpPortal provides a dedicated WebSocket feed for pump.fun token events
+# This is the RECOMMENDED method for detecting new tokens (faster than Solana logsSubscribe)
+#
+# When enabled (use_pumpportal_for_new_tokens = true):
+# - PumpPortal WebSocket handles NEW TOKEN DETECTION (subscribeNewToken)
+# - Solana WebSocket handles PRICE MONITORING (bonding curve subscriptions)
+#
+# When disabled (use_pumpportal_for_new_tokens = false):
+# - Solana WebSocket handles BOTH new token detection AND price monitoring
+# - Uses logsSubscribe to watch for pump.fun program events
+
+# PumpPortal WebSocket URL (default: wss://pumpportal.fun/api/data)
+pumpportal_ws_url = "wss://pumpportal.fun/api/data"
+
+# Enable PumpPortal for new token detection (RECOMMENDED: true)
+use_pumpportal_for_new_tokens = true
+
 # Program addresses (don't change unless pump.fun migrates)
 pump_fun_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 metadata_program = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"

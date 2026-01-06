@@ -3,7 +3,7 @@ use crate::ws::WsRequest;
 use sol_beast_core::error::CoreError;
 use sol_beast_core::price_subscriber::PriceSubscriber;
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, Mutex, oneshot};
 use std::time::Instant;

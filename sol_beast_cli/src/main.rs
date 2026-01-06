@@ -583,7 +583,6 @@ async fn main() -> Result<(), AppError> {
                     is_real,
                     keypair.as_deref(),
                     simulate_keypair.as_deref(),
-                    ws_control_tx.clone(),
                     trades_map.clone(),
                     trades_list.clone(),
                 ).await {
@@ -596,10 +595,12 @@ async fn main() -> Result<(), AppError> {
                 }
             }
             
-            // Handle Solana WSS messages (new token detection when PumpPortal disabled, always for price monitoring)
+            // Handle Solana WSS messages (new token detection when PumpPortal disabled)
+            // Note: Price monitoring (bonding curve subscriptions) is handled internally by ws.rs
+            // regardless of PumpPortal settings. This select branch only processes log notifications
+            // for new token detection when PumpPortal is disabled.
             Some(msg_json) = rx.recv() => {
                 // Only process for new token detection if PumpPortal is disabled
-                // Price monitoring is handled internally by ws.rs
                 if !use_pumpportal {
                     if let Err(e) = process_wss_message(
                         &msg_json,
@@ -927,7 +928,6 @@ async fn handle_pumpportal_token(
     is_real: bool,
     keypair: Option<&Keypair>,
     simulate_keypair: Option<&Keypair>,
-    _ws_control_tx: mpsc::Sender<WsRequest>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

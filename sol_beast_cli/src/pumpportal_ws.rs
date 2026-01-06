@@ -84,8 +84,8 @@ pub struct TokenTradeEvent {
     pub mint: String,
     #[serde(default)]
     pub trader_public_key: Option<String>,
-    #[serde(rename = "txType")]
-    pub tx_type: String,
+    #[serde(default, rename = "txType")]
+    pub tx_type: Option<String>,
     #[serde(default)]
     pub token_amount: Option<f64>,
     #[serde(default)]

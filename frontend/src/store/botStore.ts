@@ -80,6 +80,7 @@ interface BotStore {
   addLog: (log: LogEntry) => void
   clearLogs: () => void
   cleanup: () => void
+  fetchStats: () => Promise<void>
 }
 
 export const useBotStore = create<BotStore>((set, get) => ({
@@ -345,6 +346,18 @@ export const useBotStore = create<BotStore>((set, get) => ({
       historicalData: [],
       lastStatUpdate: 0
     })
+  },
+  
+  fetchStats: async () => {
+    try {
+      const res = await fetch(API_STATS_URL)
+      if (res.ok) {
+        const stats = await res.json()
+        set({ stats })
+      }
+    } catch (err) {
+      console.error('Failed to fetch stats:', err)
+    }
   },
   
   updateStatus: (status) => set({ status }),

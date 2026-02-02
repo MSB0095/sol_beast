@@ -1,5 +1,6 @@
 use axum::{
     extract::{State, Json},
+    extract::ws::{WebSocket, WebSocketUpgrade, Message},
     routing::{get, post},
     Router,
     response::IntoResponse,
@@ -11,6 +12,8 @@ use log::{info, warn};
 use chrono::Utc;
 use axum::http::StatusCode;
 use tower_http::cors::CorsLayer;
+use tokio::sync::broadcast;
+use futures_util::{SinkExt, StreamExt};
 
 use crate::{
     models::Holding,
@@ -109,6 +112,17 @@ pub struct TradeRecord {
     pub reason: Option<String>, // "TP", "SL", "TIMEOUT", "MANUAL"
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum WsMessage {
+    #[serde(rename = "detected-coin")]
+    DetectedCoin { coin: DetectedCoin },
+    #[serde(rename = "price-update")]
+    PriceUpdate { mint: String, price: f64, profit_percent: Option<f64> },
+    #[serde(rename = "holding-update")]
+    HoldingUpdate { holdings: Vec<HoldingWithMint> },
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     pub settings: Arc<Mutex<Settings>>,
@@ -116,6 +130,7 @@ pub struct ApiState {
     pub bot_control: Arc<BotControl>,
     pub detected_coins: Arc<Mutex<Vec<DetectedCoin>>>,
     pub trades: Arc<Mutex<Vec<TradeRecord>>>,
+    pub ws_tx: broadcast::Sender<String>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -150,6 +165,7 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/logs", get(get_logs_handler))
         .route("/detected-coins", get(get_detected_coins_handler))
         .route("/trades", get(get_trades_handler))
+        .route("/ws", get(ws_handler))
         .with_state(state)
         .layer(CorsLayer::permissive())
 }
@@ -473,5 +489,62 @@ async fn get_trades_handler(
 ) -> impl IntoResponse {
     let trades = state.trades.lock().await;
     Json(trades.clone())
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<ApiState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(socket: WebSocket, state: ApiState) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = state.ws_tx.subscribe();
+    
+    // Send initial data
+    let initial_data = {
+        let coins = state.detected_coins.lock().await;
+        let holdings = state.stats.lock().await.current_holdings.clone();
+        json!({
+            "type": "initial",
+            "detected_coins": coins.clone(),
+            "holdings": holdings,
+        }).to_string()
+    };
+    
+    if let Err(e) = sender.send(Message::Text(initial_data)).await {
+        warn!("WebSocket send error: {}", e);
+        return;
+    }
+    
+    // Spawn task to handle incoming messages (ping/pong)
+    let mut send_task = tokio::spawn(async move {
+        while let Ok(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg)).await.is_err() {
+                break;
+            }
+        }
+    });
+    
+    // Handle incoming messages
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            match msg {
+                Message::Close(_) => break,
+                Message::Ping(data) => {
+                    // Respond to ping (handled automatically by axum)
+                    info!("Received ping: {} bytes", data.len());
+                }
+                _ => {}
+            }
+        }
+    });
+    
+    // Wait for either task to finish
+    tokio::select! {
+        _ = (&mut send_task) => recv_task.abort(),
+        _ = (&mut recv_task) => send_task.abort(),
+    }
 }
 

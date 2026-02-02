@@ -1,10 +1,10 @@
 import { useEffect } from 'react';
-import { useSettingsStore } from "../store/settingsStore";
+import { useBotStore } from "../store/botStore";
 import { WS_URL } from "../config";
 import { FEATURES } from "../config";
 
 const useWebSocket = () => {
-  const { updateDetectedCoins } = useSettingsStore();
+  const { fetchStats } = useBotStore();
 
   useEffect(() => {
     if (!WS_URL || !FEATURES.WEBSOCKET) return;
@@ -20,9 +20,19 @@ const useWebSocket = () => {
         const data = JSON.parse(event.data);
         console.log('Received WebSocket message:', data);
 
-        // Update detected coins in the store
-        if (data && data.type === 'new-coin') {
-          updateDetectedCoins(data.coin);
+        // Handle different message types
+        if (data.type === 'detected-coin') {
+          console.log('New coin detected:', data.coin);
+          // Refresh stats to get updated detected coins list
+          fetchStats();
+        } else if (data.type === 'price-update') {
+          console.log('Price update:', data);
+          // Refresh stats to get updated holdings with new prices
+          fetchStats();
+        } else if (data.type === 'holding-update') {
+          console.log('Holdings updated:', data);
+          // Refresh stats
+          fetchStats();
         }
       } catch (error) {
         console.error('Error parsing WebSocket message:', error);
@@ -40,7 +50,7 @@ const useWebSocket = () => {
     return () => {
       ws.close();
     };
-  }, [updateDetectedCoins]);
+  }, [fetchStats]);
 };
 
 export default useWebSocket;

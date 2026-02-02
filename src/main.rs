@@ -299,6 +299,10 @@ async fn main() -> Result<(), AppError> {
 
     // Now spawn price monitoring (after ws_control_senders exists so monitor
     // can unsubscribe subscriptions on sell).
+    
+    // Create broadcast channel for WebSocket updates (before spawning monitor)
+    let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel::<String>(100);
+    
     let rpc_client_clone = rpc_client.clone();
     let ws_control_senders_clone_for_monitor = ws_control_senders.clone();
     let sub_map_clone_for_monitor = sub_map.clone();
@@ -306,6 +310,7 @@ async fn main() -> Result<(), AppError> {
     let simulate_keypair_clone_for_monitor = simulate_keypair_clone.clone();
     let trades_list_clone_for_monitor = trades_list.clone();
     let bot_control_for_monitor = bot_control.clone();
+    let ws_tx_for_monitor = ws_tx.clone();
     
     let monitor_handle = tokio::spawn(async move {
         monitor::monitor_holdings(
@@ -322,6 +327,7 @@ async fn main() -> Result<(), AppError> {
             next_wss_sender_clone_for_monitor,
             trades_list_clone_for_monitor,
             bot_control_for_monitor,
+            ws_tx_for_monitor,
         )
         .await
     });
@@ -345,6 +351,7 @@ async fn main() -> Result<(), AppError> {
         bot_control: bot_control.clone(),
         detected_coins: detected_coins.clone(),
         trades: trades_list.clone(),
+        ws_tx: ws_tx.clone(),
     };
 
     // Add initial startup log
@@ -490,6 +497,7 @@ async fn main() -> Result<(), AppError> {
             sub_map.clone(),
             detected_coins.clone(),
             trades_list.clone(),
+            ws_tx.clone(),
         )
         .await
         {
@@ -546,6 +554,7 @@ async fn process_message(
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+    ws_tx: tokio::sync::broadcast::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // NOTE: don't short-circuit all incoming messages when max held coins is
     // reached — that would also skip websocket account notifications which we
@@ -606,6 +615,7 @@ async fn process_message(
                     sub_map.clone(),
                     detected_coins.clone(),
                     trades_list.clone(),
+                    ws_tx.clone(),
                 )
                 .await
                 {
@@ -682,6 +692,7 @@ async fn process_message(
                     sub_map.clone(),
                     detected_coins.clone(),
                     trades_list.clone(),
+                    ws_tx.clone(),
                 )
                 .await
                 {
@@ -712,6 +723,7 @@ async fn handle_new_token(
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+    ws_tx: tokio::sync::broadcast::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::sync::oneshot;
     let (creator, mint, curve_pda, holder_addr, is_initialization) =
@@ -787,21 +799,26 @@ async fn handle_new_token(
                 existing.buy_price = None;
                 existing.status = "detected".to_string();
             } else {
-                coins.insert(
-                    0,
-                    api::DetectedCoin {
-                        mint: mint.clone(),
-                        name: Some(token_name.clone()),
-                        symbol: token_symbol.clone(),
-                        image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
-                        creator: creator.clone(),
-                        bonding_curve: curve_pda.clone(),
-                        detected_at: detect_time.to_rfc3339(),
-                        metadata_uri: metadata_uri_opt.clone(),
-                        buy_price: None,
-                        status: "detected".to_string(),
-                    },
-                );
+                let new_coin = api::DetectedCoin {
+                    mint: mint.clone(),
+                    name: Some(token_name.clone()),
+                    symbol: token_symbol.clone(),
+                    image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                    creator: creator.clone(),
+                    bonding_curve: curve_pda.clone(),
+                    detected_at: detect_time.to_rfc3339(),
+                    metadata_uri: metadata_uri_opt.clone(),
+                    buy_price: None,
+                    status: "detected".to_string(),
+                };
+                coins.insert(0, new_coin.clone());
+                
+                // Broadcast to WebSocket clients
+                let ws_message = serde_json::json!({
+                    "type": "detected-coin",
+                    "coin": new_coin
+                });
+                let _ = ws_tx.send(ws_message.to_string());
             }
             // Keep only last `detected_coins_max` detected coins (configurable)
             if coins.len() > settings.detected_coins_max {
@@ -1210,6 +1227,7 @@ async fn process_detected_token(
     onchain_meta_opt: Option<mpl_token_metadata::accounts::Metadata>,
     offchain_meta_opt: Option<crate::models::OffchainTokenMetadata>,
     onchain_raw_opt: Option<Vec<u8>>,
+    ws_tx: tokio::sync::broadcast::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Attempt to fetch bonding curve creator for additional verification
     let bonding_creator_opt = rpc::fetch_bonding_curve_creator(&mint.to_string(), rpc_client, settings).await.ok().flatten();
@@ -1329,21 +1347,27 @@ async fn process_detected_token(
             existing.buy_price = None;
             existing.status = "detected".to_string();
         } else {
-            coins.insert(
-                0,
-                api::DetectedCoin {
-                    mint: mint.to_string(),
-                    name: Some(token_name.clone()),
-                    symbol: token_symbol.clone(),
-                    image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
-                    creator: creator.to_string(),
-                    bonding_curve: curve_pda.to_string(),
-                    detected_at: detect_time.to_rfc3339(),
-                    metadata_uri: metadata_uri_opt.clone(),
-                    buy_price: None,
-                    status: "detected".to_string(),
-                },
-            );
+            let new_coin = api::DetectedCoin {
+                mint: mint.to_string(),
+                name: Some(token_name.clone()),
+                symbol: token_symbol.clone(),
+                image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                creator: creator.to_string(),
+                bonding_curve: curve_pda.to_string(),
+                detected_at: detect_time.to_rfc3339(),
+                metadata_uri: metadata_uri_opt.clone(),
+                buy_price: None,
+                status: "detected".to_string(),
+            };
+            coins.insert(0, new_coin.clone());
+            
+            // Broadcast to WebSocket clients
+            let ws_message = serde_json::json!({
+                "type": "detected-coin",
+                "coin": new_coin
+            });
+            let _ = ws_tx.send(ws_message.to_string());
+            
             // Keep only last `detected_coins_max` detected coins (configurable)
             if coins.len() > settings.detected_coins_max {
                 coins.truncate(settings.detected_coins_max);
@@ -1377,6 +1401,7 @@ async fn handle_new_token_from_pumpportal(
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
     detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
     trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+    ws_tx: tokio::sync::broadcast::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Parse metadata_value into OffchainTokenMetadata if present
     let offchain_meta_opt: Option<crate::models::OffchainTokenMetadata> = if let Some(val) = metadata_value {
@@ -1457,6 +1482,7 @@ async fn handle_new_token_from_pumpportal(
         None,
         offchain_meta_opt.clone(),
         None,
+        ws_tx.clone(),
     )
     .await?;
 

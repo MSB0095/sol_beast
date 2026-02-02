@@ -35,6 +35,7 @@ pub async fn monitor_holdings(
     _next_wss_sender: Arc<AtomicUsize>,
     trades_list: Arc<tokio::sync::Mutex<Vec<TradeRecord>>>,
     bot_control: Arc<BotControl>,
+    ws_tx: tokio::sync::broadcast::Sender<String>,
 ) {
     // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
     static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
@@ -189,6 +190,15 @@ pub async fn monitor_holdings(
                 ((current_price - holding.buy_price) / holding.buy_price) * 100.0
             } else { 0.0 };
             let elapsed = Utc::now().signed_duration_since(holding.buy_time).num_seconds();
+
+            // Broadcast price update to WebSocket clients
+            let ws_message = serde_json::json!({
+                "type": "price-update",
+                "mint": mint,
+                "price": current_price,
+                "profit_percent": profit_percent
+            });
+            let _ = ws_tx.send(ws_message.to_string());
 
             let should_sell = if profit_percent >= settings.tp_percent {
                 info!("TP hit for {}: +{:.6}% ({:.18} SOL/token)", mint, profit_percent, current_price);

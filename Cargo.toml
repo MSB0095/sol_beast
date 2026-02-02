@@ -30,7 +30,7 @@ spl-associated-token-account = "4.0.0"
 spl-token = "6.0.0"
 once_cell = "1.18"
 bincode = "1.3"
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 tracing = "0.1"

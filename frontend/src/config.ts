@@ -24,7 +24,7 @@ export const APP_VERSION = '1.0.0'
 
 // Feature flags
 export const FEATURES = {
-  WEBSOCKET: false, // Enable when WS is fully implemented
+  WEBSOCKET: true, // Enable WebSocket functionality
   ADVANCED_CHARTS: true,
   EXPORT_REPORTS: false, // Enable in future
   MULTI_WALLET: false, // Enable in future

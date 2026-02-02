@@ -11,6 +11,7 @@ mod settings;
 mod state;
 mod tx_builder;
 mod ws;
+mod pumpportal;
 use crate::error::AppError;
 use api::{create_router, ApiState, BotStats};
 use ws::WsRequest;
@@ -69,6 +70,7 @@ use mpl_token_metadata::accounts::Metadata as OnchainMetadataRaw;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signature::Signer;
+use solana_sdk::pubkey::Pubkey;
 use std::sync::atomic::AtomicUsize;
 use std::{collections::HashMap, fs, sync::Arc, time::Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -233,41 +235,63 @@ async fn main() -> Result<(), AppError> {
     let simulate_keypair_clone = simulate_keypair.clone();
     let trades_map_clone_monitor = trades_map.clone();
 
-    // Spawn WSS tasks and keep control senders so we can request subscriptions
-    let mut ws_control_senders: Vec<mpsc::Sender<WsRequest>> = Vec::new();
-    let mut ws_handles = Vec::new(); // New vector to store JoinHandles
-    for wss_url in settings.solana_ws_urls.iter() {
-        let tx = tx.clone();
-        let seen = seen.clone();
-        let holdings_clone = holdings.clone();
-        let price_cache_clone = price_cache.clone();
-        let settings_clone = settings.clone();
-        let wss_url = wss_url.clone();
-        let (ctrl_tx, ctrl_rx) = mpsc::channel(256);
-        ws_control_senders.push(ctrl_tx.clone());
-        // Spawn a single task that owns the control receiver. `ws::run_ws` will
-        // manage its own internal state and reconnect logic where appropriate.
-        let handle = tokio::spawn(async move {
-            if let Err(e) = ws::run_ws(
-                &wss_url,
-                tx.clone(),
-                seen.clone(),
-                holdings_clone.clone(),
-                price_cache_clone.clone(),
-                ctrl_rx,
-                settings_clone.clone(),
-            )
-            .await
-            {
-                error!("WSS connection to {} failed: {}.", wss_url, e);
-                bot_log!(
-                    "error",
-                    "WSS connection failed",
-                    format!("WSS: {}, Error: {}", wss_url, e)
-                );
+        // Spawn WSS tasks and keep control senders so we can request subscriptions
+        let mut ws_control_senders: Vec<mpsc::Sender<WsRequest>> = Vec::new();
+        let mut ws_handles = Vec::new(); // New vector to store JoinHandles
+        // If PumpPortal is enabled we avoid opening Solana WSS log subscriptions
+        // (PumpPortal will provide new-token events). This prevents opening
+        // duplicate connections when PumpPortal is preferred.
+        if !settings.pumpportal_enabled {
+            for wss_url in settings.solana_ws_urls.iter() {
+                let tx = tx.clone();
+                let seen = seen.clone();
+                let holdings_clone = holdings.clone();
+                let price_cache_clone = price_cache.clone();
+                let settings_clone = settings.clone();
+                let rpc_clone = rpc_client.clone();
+                let wss_url = wss_url.clone();
+                let (ctrl_tx, ctrl_rx) = mpsc::channel(256);
+                ws_control_senders.push(ctrl_tx.clone());
+                // Spawn a single task that owns the control receiver. `ws::run_ws` will
+                // manage its own internal state and reconnect logic where appropriate.
+                let handle = tokio::spawn(async move {
+                    if let Err(e) = ws::run_ws(
+                        &wss_url,
+                        tx.clone(),
+                        seen.clone(),
+                        holdings_clone.clone(),
+                        price_cache_clone.clone(),
+                        ctrl_rx,
+                        settings_clone.clone(),
+                        rpc_clone.clone(),
+                    )
+                    .await
+                    {
+                        error!("WSS connection to {} failed: {}.", wss_url, e);
+                        bot_log!(
+                            "error",
+                            "WSS connection failed",
+                            format!("WSS: {}, Error: {}", wss_url, e)
+                        );
+                    }
+                });
+                ws_handles.push(handle);
             }
-        });
-        ws_handles.push(handle);
+        }
+    // Spawn PumpPortal websocket workers if enabled
+    let mut pumpportal_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    if settings.pumpportal_enabled {
+        for pp_url in settings.pumpportal_wss.iter() {
+            let tx_clone = tx.clone();
+            let settings_clone = settings.clone();
+            let pp_url = pp_url.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = pumpportal::run_pumpportal_ws(&pp_url, tx_clone, settings_clone).await {
+                    error!("PumpPortal connection {} failed: {}", pp_url, e);
+                }
+            });
+            pumpportal_handles.push(handle);
+        }
     }
     let ws_control_senders = Arc::new(ws_control_senders);
     // Round-robin index for WSS sender selection (true round-robin)
@@ -544,6 +568,54 @@ async fn process_message(
         .and_then(|p| p.get("result"))
         .and_then(|r| r.get("value"))
     {
+        // If this message is a normalized PumpPortal payload, handle it using
+        // a fast path that avoids RPC `getTransaction` when PumpPortal provided
+        // the mint/creator/curve and optional metadata.
+        if let Some(pp) = params.get("pumpportal") {
+            // Extract fields
+            let signature = params.get("signature").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let mint = pp.get("mint").and_then(|m| m.as_str()).map(|s| s.to_string());
+            let creator = pp.get("creator").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let curve = pp.get("bonding_curve").and_then(|c| c.as_str()).map(|s| s.to_string());
+            let metadata_value = pp.get("metadata").cloned();
+            let bonding_state = pp.get("bonding_state").cloned();
+
+            if let Some(mint) = mint {
+                // We require creator and curve for a confident detection; otherwise fall back to RPC flow
+                let creator = creator.unwrap_or_else(|| "".to_string());
+                let curve = curve.unwrap_or_else(|| "".to_string());
+                let detect_time = chrono::Utc::now();
+                if let Err(e) = handle_new_token_from_pumpportal(
+                    &signature,
+                    &mint,
+                    &creator,
+                    &curve,
+                    metadata_value,
+                    bonding_state,
+                    holdings,
+                    rpc_client,
+                    is_real,
+                    keypair,
+                    simulate_keypair,
+                    price_cache,
+                    settings,
+                    ws_control_senders.clone(),
+                    next_wss_sender.clone(),
+                    detect_time,
+                    trades_map.clone(),
+                    sub_map.clone(),
+                    detected_coins.clone(),
+                    trades_list.clone(),
+                )
+                .await
+                {
+                    error!("handle_new_token_from_pumpportal failed for {}: {}", mint, e);
+                    return Err(e);
+                }
+                // Skip the rest of standard processing for this message
+                return Ok(());
+            }
+        }
         let logs_opt = params.get("logs").and_then(|l| l.as_array());
         let sig_opt = params.get("signature").and_then(|s| s.as_str());
         if logs_opt.is_none() {
@@ -704,24 +776,36 @@ async fn handle_new_token(
         // parsed metadata; otherwise mark name as Unknown and symbol None.
         {
             let mut coins = detected_coins.lock().await;
-            coins.insert(
-                0,
-                api::DetectedCoin {
-                    mint: mint.clone(),
-                    name: Some(token_name.clone()),
-                    symbol: token_symbol.clone(),
-                    image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
-                    creator: creator.clone(),
-                    bonding_curve: curve_pda.clone(),
-                    detected_at: detect_time.to_rfc3339(),
-                    metadata_uri: metadata_uri_opt.clone(),
-                    buy_price: None,
-                    status: "detected".to_string(),
-                },
-            );
-            // Keep only last 100 detected coins
-            if coins.len() > 100 {
-                coins.truncate(100);
+            if let Some(existing) = coins.iter_mut().find(|c| c.mint == mint) {
+                existing.name = Some(token_name.clone());
+                existing.symbol = token_symbol.clone();
+                existing.image = offchain_meta.as_ref().and_then(|o| o.image.clone());
+                existing.creator = creator.clone();
+                existing.bonding_curve = curve_pda.clone();
+                existing.detected_at = detect_time.to_rfc3339();
+                existing.metadata_uri = metadata_uri_opt.clone();
+                existing.buy_price = None;
+                existing.status = "detected".to_string();
+            } else {
+                coins.insert(
+                    0,
+                    api::DetectedCoin {
+                        mint: mint.clone(),
+                        name: Some(token_name.clone()),
+                        symbol: token_symbol.clone(),
+                        image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                        creator: creator.clone(),
+                        bonding_curve: curve_pda.clone(),
+                        detected_at: detect_time.to_rfc3339(),
+                        metadata_uri: metadata_uri_opt.clone(),
+                        buy_price: None,
+                        status: "detected".to_string(),
+                    },
+                );
+            }
+            // Keep only last `detected_coins_max` detected coins (configurable)
+            if coins.len() > settings.detected_coins_max {
+                coins.truncate(settings.detected_coins_max);
             }
         }
 
@@ -1098,5 +1182,501 @@ async fn handle_new_token(
             // skip buying.
         }
     }
+    Ok(())
+}
+
+/// Process a detected token using provided details. If onchain/offchain metadata
+/// are None, this function will attempt RPC fetches as a fallback.
+#[allow(clippy::too_many_arguments)]
+async fn process_detected_token(
+    signature: &str,
+    mint: &str,
+    creator: &str,
+    curve_pda: &str,
+    holder_addr: &str,
+    detect_time: chrono::DateTime<Utc>,
+    rpc_client: &Arc<RpcClient>,
+    _is_real: bool,
+    _keypair: Option<&Keypair>,
+    _simulate_keypair: Option<&Keypair>,
+    _price_cache: &Arc<Mutex<PriceCache>>,
+    settings: &Arc<Settings>,
+    _ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
+    _next_wss_sender: Arc<AtomicUsize>,
+    _trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
+    _sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
+    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+    _trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+    onchain_meta_opt: Option<mpl_token_metadata::accounts::Metadata>,
+    offchain_meta_opt: Option<crate::models::OffchainTokenMetadata>,
+    onchain_raw_opt: Option<Vec<u8>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Attempt to fetch bonding curve creator for additional verification
+    let bonding_creator_opt = rpc::fetch_bonding_curve_creator(&mint.to_string(), rpc_client, settings).await.ok().flatten();
+    if bonding_creator_opt.is_none() {
+        debug!("Bonding curve creator not found for mint {} (sig={}) — continuing detection using provided values", mint, signature);
+    }
+
+    // Use provided metadata if present, otherwise fallback to RPC-fetched values
+    let (onchain_meta, offchain_meta, _onchain_raw) = if onchain_meta_opt.is_some() || offchain_meta_opt.is_some() || onchain_raw_opt.is_some() {
+        (onchain_meta_opt, offchain_meta_opt, onchain_raw_opt)
+    } else {
+        rpc::fetch_token_metadata(&mint.to_string(), rpc_client, settings).await?
+    };
+
+    // If we have offchain metadata but no `image`, try to extract it from `extras` or by
+    // fetching a metadata URI if provided (PumpPortal commonly supplies `uri` in extras).
+    let mut offchain_meta = offchain_meta;
+    if let Some(mut off) = offchain_meta.take() {
+        if off.image.is_none() {
+            // Try common image keys in extras
+            if let Some(ref extras) = off.extras {
+                if let Some(img) = extract_first_string(extras, &["image", "image_url", "imageUri", "imageUrl"]) {
+                    off.image = Some(img);
+                }
+            }
+            // If still none, try to find a metadata URI and fetch it
+            if off.image.is_none() {
+                // Look for uri variants in extras
+                if let Some(ref extras) = off.extras {
+                    if let Some(uri) = extract_first_string(extras, &["uri", "metadataUri", "tokenUri", "uriStr"]) {
+                        if uri.starts_with("http://") || uri.starts_with("https://") {
+                            let client = reqwest::Client::new();
+                            match client.get(&uri).send().await {
+                                Ok(resp) => match resp.text().await {
+                                    Ok(body) => if let Ok(body_val) = serde_json::from_str::<serde_json::Value>(&body) {
+                                        if let Some(img2) = extract_first_string(&body_val, &["image", "image_url", "imageUri", "imageUrl"]) {
+                                            off.image = Some(img2);
+                                        } else {
+                                            debug!("Fetched metadata {} but no image field found for mint {}", uri, mint);
+                                        }
+                                    } else { debug!("Failed to parse fetched metadata JSON {}", uri); },
+                                    Err(e) => debug!("Failed to read metadata body {}: {}", uri, e),
+                                },
+                                Err(e) => debug!("HTTP error fetching metadata {}: {}", uri, e),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // normalize back into option
+        offchain_meta = Some(off);
+    }
+
+    // Helper used above to extract common string fields from a JSON value
+    fn extract_first_string(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+        for key in keys {
+            if let Some(field) = v.get(*key) {
+                match field {
+                    serde_json::Value::String(s) => return Some(s.clone()),
+                    serde_json::Value::Object(map) => {
+                        if let Some(serde_json::Value::String(s2)) = map.get("en") { return Some(s2.clone()); }
+                        for (_k, val) in map.iter() {
+                            if let serde_json::Value::String(s3) = val { return Some(s3.clone()); }
+                        }
+                    }
+                    serde_json::Value::Array(arr) => {
+                        if let Some(serde_json::Value::String(s4)) = arr.get(0) { return Some(s4.clone()); }
+                    }
+                    other => return Some(other.to_string()),
+                }
+            }
+        }
+        None
+    }
+
+    // Prepare display fields using available on-chain or off-chain metadata
+    let token_name = offchain_meta
+        .as_ref()
+        .and_then(|off| off.name.clone())
+        .or_else(|| onchain_meta.as_ref().map(|m| m.name.trim_end_matches('\u{0}').to_string()))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let token_symbol = offchain_meta
+        .as_ref()
+        .and_then(|off| off.symbol.clone())
+        .or_else(|| onchain_meta.as_ref().map(|m| m.symbol.trim_end_matches('\u{0}').to_string()));
+    let metadata_uri_opt = if let Some(m) = onchain_meta.as_ref() {
+        Some(m.uri.trim_end_matches('\u{0}').to_string())
+    } else if let Some(off) = offchain_meta.as_ref() { off.image.clone() } else { None };
+
+    info!(
+        "New pump.fun token detected: mint={} signature={} creator={} curve={} holder={} URI={}",
+        mint,
+        signature,
+        creator,
+        curve_pda,
+        holder_addr,
+        metadata_uri_opt.clone().unwrap_or_else(|| "<none>".to_string())
+    );
+
+    bot_log!(
+        "info",
+        format!("New token detected: {}", token_name),
+        format!("Mint: {}, Creator: {}", mint, creator)
+    );
+
+    {
+        let mut coins = detected_coins.lock().await;
+        if let Some(existing) = coins.iter_mut().find(|c| c.mint == mint) {
+            existing.name = Some(token_name.clone());
+            existing.symbol = token_symbol.clone();
+            existing.image = offchain_meta.as_ref().and_then(|o| o.image.clone());
+            existing.creator = creator.to_string();
+            existing.bonding_curve = curve_pda.to_string();
+            existing.detected_at = detect_time.to_rfc3339();
+            existing.metadata_uri = metadata_uri_opt.clone();
+            existing.buy_price = None;
+            existing.status = "detected".to_string();
+        } else {
+            coins.insert(
+                0,
+                api::DetectedCoin {
+                    mint: mint.to_string(),
+                    name: Some(token_name.clone()),
+                    symbol: token_symbol.clone(),
+                    image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                    creator: creator.to_string(),
+                    bonding_curve: curve_pda.to_string(),
+                    detected_at: detect_time.to_rfc3339(),
+                    metadata_uri: metadata_uri_opt.clone(),
+                    buy_price: None,
+                    status: "detected".to_string(),
+                },
+            );
+            // Keep only last `detected_coins_max` detected coins (configurable)
+            if coins.len() > settings.detected_coins_max {
+                coins.truncate(settings.detected_coins_max);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle enriched PumpPortal event without doing full RPC `getTransaction` when possible
+#[allow(clippy::too_many_arguments)]
+async fn handle_new_token_from_pumpportal(
+    signature: &str,
+    mint: &str,
+    creator: &str,
+    curve_pda: &str,
+    metadata_value: Option<serde_json::Value>,
+    bonding_state: Option<serde_json::Value>,
+    _holdings: &Arc<Mutex<HashMap<String, Holding>>>,
+    rpc_client: &Arc<RpcClient>,
+    is_real: bool,
+    keypair: Option<&Keypair>,
+    simulate_keypair: Option<&Keypair>,
+    price_cache: &Arc<Mutex<PriceCache>>,
+    settings: &Arc<Settings>,
+    ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
+    next_wss_sender: Arc<AtomicUsize>,
+    detect_time: chrono::DateTime<Utc>,
+    trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
+    sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
+    detected_coins: Arc<tokio::sync::Mutex<Vec<api::DetectedCoin>>>,
+    trades_list: Arc<tokio::sync::Mutex<Vec<api::TradeRecord>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Parse metadata_value into OffchainTokenMetadata if present
+    let offchain_meta_opt: Option<crate::models::OffchainTokenMetadata> = if let Some(val) = metadata_value {
+        match serde_json::from_value(val) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                debug!("Failed to parse PumpPortal metadata into OffchainTokenMetadata: {}", e);
+                None
+            }
+        }
+    } else { None };
+
+    // If PumpPortal provided bonding_state/reserves, compute price and update price_cache
+    if let Some(bstate) = bonding_state {
+        // Try to extract common numeric fields used by bonding curve
+        let get_u64 = |obj: &serde_json::Value, key: &str| -> Option<u64> {
+            match obj.get(key) {
+                Some(v) => {
+                    if let Some(n) = v.as_u64() { Some(n) }
+                    else if let Some(s) = v.as_str() { s.parse::<u64>().ok() }
+                    else { None }
+                }
+                None => None,
+            }
+        };
+
+        let vtok_opt = get_u64(&bstate, "virtual_token_reserves");
+        let vsol_opt = get_u64(&bstate, "virtual_sol_reserves");
+        let complete_flag = bstate.get("complete").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if complete_flag {
+            debug!("Bonding state from PumpPortal reports migrated/completed for mint {}", mint);
+        } else if let (Some(_vtok), Some(_vsol)) = (vtok_opt, vsol_opt) {
+            // PumpPortal reserve data is for reference only
+            // Price updates will come from WSS subscriptions on bonding curve reserves
+            debug!("PumpPortal provided reserve data for {}: will wait for WSS price updates", mint);
+        }
+    }
+    // No onchain_raw or onchain_meta provided; process_detected_token will fallback to RPC if needed
+    // If PumpPortal did not provide a bonding_curve PDA string, compute the canonical
+    // pump.fun bonding-curve PDA here and pass it through so downstream code and the
+    // API always see a populated `bonding_curve` field.
+    let curve_string = if curve_pda.trim().is_empty() {
+        match Pubkey::from_str(&settings.pump_fun_program) {
+            Ok(pump_program) => match Pubkey::from_str(mint) {
+                Ok(mint_pk) => {
+                    let (pda, _b) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
+                    pda.to_string()
+                }
+                Err(_) => "".to_string(),
+            },
+            Err(_) => "".to_string(),
+        }
+    } else {
+        curve_pda.to_string()
+    };
+
+    // First, perform the usual detected-token processing which will populate the API list
+    process_detected_token(
+        signature,
+        mint,
+        creator,
+        &curve_string,
+        "",
+        detect_time,
+        rpc_client,
+        is_real,
+        keypair,
+        simulate_keypair,
+        price_cache,
+        settings,
+        ws_control_senders.clone(),
+        next_wss_sender.clone(),
+        trades_map.clone(),
+        sub_map.clone(),
+        detected_coins.clone(),
+        trades_list.clone(),
+        None,
+        offchain_meta_opt.clone(),
+        None,
+    )
+    .await?;
+
+    // Attempt a buy on PumpPortal detections when a price is available.
+    // Prefer WSS live price for the buy decision by subscribing just before buy
+    // (latency-sensitive). If WSS subscription or price retrieval fails, fall
+    // back to cached or RPC price as before.
+    let mut price_opt: Option<f64> = None;
+    let mut subscribed_idx: Option<usize> = None;
+    let mut subscribed_sub_id: Option<u64> = None;
+    let mut sub_was_created = false;
+
+    // Try to create a short-lived WSS subscription to get a live price update
+    if !ws_control_senders.is_empty() {
+        if let Some(idx) = select_healthy_wss(&ws_control_senders, settings).await {
+            let sender = &ws_control_senders[idx];
+            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
+            let pump_prog = Pubkey::from_str(&settings.pump_fun_program)?;
+            if let Ok(mint_pk) = Pubkey::from_str(mint) {
+                let (curve_pda, _b) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
+                let subscribe_req = WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.to_string(), resp: resp_tx };
+                if let Err(e) = sender.send(subscribe_req).await {
+                    log::warn!("Failed to send subscribe request for {}: {}", mint, e);
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await {
+                        Ok(Ok(Ok(sub_id))) => {
+                            debug!("Subscribed to {} on sub {} (pre-buy)", mint, sub_id);
+                            sub_was_created = true;
+                            subscribed_idx = Some(idx);
+                            subscribed_sub_id = Some(sub_id);
+                        }
+                        Ok(Ok(Err(err_msg))) => {
+                            if err_msg.contains("max subscriptions") {
+                                debug!("Subscribe rejected for {} (WSS idx={} full)", mint, idx);
+                            } else if err_msg.contains("degraded") {
+                                debug!("WSS idx={} degraded, skipped {}", idx, mint);
+                            } else {
+                                log::warn!("Subscribe request rejected for {}: {}", mint, err_msg);
+                            }
+                        }
+                        Ok(Err(_)) => log::warn!("Subscribe channel closed for {} (WSS idx={})", mint, idx),
+                        Err(_) => warn!("Subscribe timed out for {} (WSS idx={}, 5s)", mint, idx),
+                    }
+                }
+            }
+        } else {
+            debug!("No healthy WSS available for {} (all degraded/full)", mint);
+        }
+    }
+
+    // If subscription was established, wait briefly for a price to appear in the cache
+    if sub_was_created {
+        // First check quickly
+        if let Some((_, price)) = price_cache.lock().await.get(mint).cloned() {
+            price_opt = Some(price);
+        } else {
+            // Wait up to settings.wss_subscribe_timeout_secs for WSS to push initial price
+            let start = Instant::now();
+            while start.elapsed().as_secs() < settings.wss_subscribe_timeout_secs {
+                if let Some((_, price)) = price_cache.lock().await.get(mint).cloned() {
+                    price_opt = Some(price);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+
+    // If we still don't have a WSS price, fall back to cached price then RPC as before
+    if price_opt.is_none() {
+        if let Some((_, price)) = price_cache.lock().await.get(mint).cloned() {
+            price_opt = Some(price);
+        }
+    }
+    if price_opt.is_none() {
+        if let Ok(p) = rpc::fetch_current_price(&mint.to_string(), price_cache, rpc_client, settings).await {
+            price_opt = Some(p);
+        }
+    }
+
+    if let Some(_price) = price_opt {
+        // Check holdings cap
+        let mut holdings_guard = _holdings.lock().await;
+        if holdings_guard.len() >= settings.max_holded_coins {
+            info!("Max held coins reached ({}); skipping buy for {}", settings.max_holded_coins, mint);
+            // Unsubscribe if we created a subscription and we are not buying
+            if sub_was_created && subscribed_idx.is_some() && subscribed_sub_id.is_some() {
+                let sender = &ws_control_senders[subscribed_idx.unwrap()];
+                let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+                let _ = sender.send(WsRequest::Unsubscribe { sub_id: subscribed_sub_id.unwrap(), resp: u_tx }).await;
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
+            }
+            return Ok(());
+        }
+
+        match buyer::buy_token(
+            &mint,
+            settings.buy_amount,
+            is_real,
+            keypair,
+            simulate_keypair,
+            price_cache.clone(),
+            rpc_client,
+            settings,
+        )
+        .await
+        {
+            Ok(mut holding) => {
+                // Persist metadata into the created holding
+                holding.metadata = offchain_meta_opt.clone();
+                // Update holdings and trades similar to RPC path
+                let buy_record = BuyRecord {
+                    mint: mint.to_string(),
+                    symbol: offchain_meta_opt.as_ref().and_then(|o| o.symbol.clone()),
+                    name: offchain_meta_opt.as_ref().and_then(|o| o.name.clone()),
+                    uri: offchain_meta_opt.as_ref().and_then(|o| o.image.clone()),
+                    image: offchain_meta_opt.as_ref().and_then(|o| o.image.clone()),
+                    creator: creator.to_string(),
+                    detect_time,
+                    buy_time: holding.buy_time,
+                    buy_amount_sol: settings.buy_amount,
+                    buy_amount_tokens: holding.amount,
+                    buy_price: holding.buy_price,
+                };
+
+                // Update detected coin status
+                {
+                    let mut coins = detected_coins.lock().await;
+                    if let Some(coin) = coins.iter_mut().find(|c| c.mint == mint) {
+                        coin.status = "bought".to_string();
+                        coin.buy_price = Some(holding.buy_price);
+                    }
+                }
+
+                // Emit trade record
+                {
+                    let mut trades = trades_list.lock().await;
+                    let amount_tokens = holding.amount as f64 / 1_000_000.0;
+                    trades.insert(
+                        0,
+                        api::TradeRecord {
+                            mint: mint.to_string(),
+                            symbol: offchain_meta_opt.as_ref().and_then(|o| o.symbol.clone()),
+                            name: offchain_meta_opt.as_ref().and_then(|o| o.name.clone()),
+                            image: offchain_meta_opt.as_ref().and_then(|o| o.image.clone()),
+                            trade_type: "buy".to_string(),
+                            timestamp: holding.buy_time.to_rfc3339(),
+                            tx_signature: None,
+                            amount_sol: settings.buy_amount,
+                            amount_tokens,
+                            price_per_token: holding.buy_price,
+                            profit_loss: None,
+                            profit_loss_percent: None,
+                            reason: None,
+                        },
+                    );
+                    if trades.len() > 200 { trades.truncate(200); }
+                }
+
+                trades_map.lock().await.insert(mint.to_string(), buy_record);
+                holdings_guard.insert(mint.to_string(), holding);
+
+                // If we created a subscription pre-buy, keep it active and persist mapping
+                if sub_was_created && subscribed_idx.is_some() && subscribed_sub_id.is_some() {
+                    let mut map = sub_map.lock().await;
+                    map.insert(mint.to_string(), (subscribed_idx.unwrap(), subscribed_sub_id.unwrap()));
+                } else {
+                    // Otherwise, try to subscribe now (best effort) to keep monitoring
+                    if !ws_control_senders.is_empty() {
+                        if let Some(idx) = select_healthy_wss(&ws_control_senders, settings).await {
+                            let sender = &ws_control_senders[idx];
+                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
+                            let pump_prog = Pubkey::from_str(&settings.pump_fun_program)?;
+                            if let Ok(mint_pk) = Pubkey::from_str(mint) {
+                                let (curve_pda, _) = Pubkey::find_program_address(
+                                    &[b"bonding-curve", mint_pk.as_ref()],
+                                    &pump_prog,
+                                );
+                                let subscribe_req = WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.to_string(), resp: resp_tx };
+                                if let Err(e) = sender.send(subscribe_req).await {
+                                    log::warn!("Failed to send subscribe request for {}: {}", mint, e);
+                                } else {
+                                    match tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await {
+                                        Ok(Ok(Ok(sub_id))) => {
+                                            debug!("Subscribed to {} on sub {}", mint, sub_id);
+                                            let mut map = sub_map.lock().await;
+                                            map.insert(mint.to_string(), (idx, sub_id));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                info!("PumpPortal fast-path buy succeeded for {}", mint);
+            }
+            Err(e) => {
+                log::warn!("Failed to buy {} (pumpportal fast-path): {}", mint, e);
+                bot_log!("warn", format!("Failed to buy token {}", mint), format!("{}", e));
+                // If we created a subscription and didn't buy, unsubscribe to free slot
+                if sub_was_created && subscribed_idx.is_some() && subscribed_sub_id.is_some() {
+                    let sender = &ws_control_senders[subscribed_idx.unwrap()];
+                    let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+                    let _ = sender.send(WsRequest::Unsubscribe { sub_id: subscribed_sub_id.unwrap(), resp: u_tx }).await;
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
+                }
+            }
+        }
+    } else {
+        debug!("No price available for {} yet; skipping pumpportal fast-path buy", mint);
+        // Unsubscribe if we created a subscription but got no price and won't buy
+        if sub_was_created && subscribed_idx.is_some() && subscribed_sub_id.is_some() {
+            let sender = &ws_control_senders[subscribed_idx.unwrap()];
+            let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+            let _ = sender.send(WsRequest::Unsubscribe { sub_id: subscribed_sub_id.unwrap(), resp: u_tx }).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
+        }
+    }
+
     Ok(())
 }

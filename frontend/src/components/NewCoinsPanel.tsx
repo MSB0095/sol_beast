@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Coins, ExternalLink, TrendingUp, Clock, User } from 'lucide-react'
+import { Coins, ExternalLink, TrendingUp, Clock, User, DollarSign } from 'lucide-react'
 import { API_DETECTED_COINS_URL } from '../config'
 
 interface DetectedCoin {
@@ -161,6 +161,14 @@ export default function NewCoinsPanel() {
                     >
                       <ExternalLink size={14} />
                     </a>
+                  </div>
+
+                  {/* Buy Price */}
+                  <div className="flex items-center gap-2">
+                    <DollarSign size={14} className="text-gray-400" />
+                    <span className="text-xs font-mono text-gray-400 truncate">
+                      Buy Price: {coin.buy_price !== null ? `${coin.buy_price.toFixed(6)} SOL` : 'N/A'}
+                    </span>
                   </div>
 
                   {coin.buy_price && (

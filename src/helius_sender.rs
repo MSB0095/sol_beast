@@ -328,6 +328,29 @@ pub async fn send_transaction_via_helius(
     Err("Invalid response from Helius Sender".into())
 }
 
+/// Simulate a base64-encoded serialized transaction via Helius RPC endpoint.
+/// Uses JSON-RPC method `simulateTransaction` against `settings.helius_sender_endpoint`.
+pub async fn simulate_transaction_via_helius(
+    tx_base64: &str,
+    settings: &Settings,
+) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    let client = reqwest::Client::new();
+    let endpoint = &settings.helius_sender_endpoint;
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": chrono::Utc::now().timestamp_millis().to_string(),
+        "method": "simulateTransaction",
+        "params": [ tx_base64, { "encoding": "base64", "sigVerify": false, "commitment": "confirmed" } ]
+    });
+
+    let resp = client.post(endpoint).json(&payload).send().await?;
+    let json: Value = resp.json().await?;
+    if let Some(err) = json.get("error") {
+        return Err(format!("Helius simulate error: {}", err).into());
+    }
+    Ok(json)
+}
+
 /// Check if blockhash is still valid
 async fn is_blockhash_valid(
     rpc_client: &RpcClient,

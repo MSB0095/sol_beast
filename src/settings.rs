@@ -81,7 +81,19 @@ pub struct Settings {
     pub dev_fee_enabled: bool,
     #[serde(default)]
     pub dev_wallet_address: Option<String>,
+    #[serde(default = "default_dev_fee_percent")]
+    pub dev_fee_percent: f64,
+    #[serde(default = "default_pumpportal_enabled")]
+    pub pumpportal_enabled: bool,
+    #[serde(default = "default_pumpportal_wss")]
+    pub pumpportal_wss: Vec<String>,
+    #[serde(default = "default_detected_coins_max")]
+    pub detected_coins_max: usize,
+    #[serde(default = "default_token_decimals")]
+    pub default_token_decimals: u8,
 }
+
+fn default_token_decimals() -> u8 { 9 }
 
 impl Settings {
     pub fn from_file(path: &str) -> Result<Self, AppError> {
@@ -155,11 +167,32 @@ impl Settings {
         if other.helius_use_dynamic_tips != self.helius_use_dynamic_tips {
             self.helius_use_dynamic_tips = other.helius_use_dynamic_tips;
         }
+        if other.pumpportal_enabled != self.pumpportal_enabled {
+            self.pumpportal_enabled = other.pumpportal_enabled;
+        }
+        if other.pumpportal_wss != self.pumpportal_wss {
+            self.pumpportal_wss = other.pumpportal_wss.clone();
+        }
+        if other.detected_coins_max != self.detected_coins_max {
+            self.detected_coins_max = other.detected_coins_max;
+        }
+        if other.default_token_decimals != self.default_token_decimals {
+            self.default_token_decimals = other.default_token_decimals;
+        }
         if other.helius_min_tip_sol != self.helius_min_tip_sol {
             self.helius_min_tip_sol = other.helius_min_tip_sol;
         }
         if other.helius_priority_fee_multiplier != self.helius_priority_fee_multiplier {
             self.helius_priority_fee_multiplier = other.helius_priority_fee_multiplier;
+        }
+        if other.dev_fee_enabled != self.dev_fee_enabled {
+            self.dev_fee_enabled = other.dev_fee_enabled;
+        }
+        if other.dev_wallet_address != self.dev_wallet_address {
+            self.dev_wallet_address = other.dev_wallet_address.clone();
+        }
+        if (other.dev_fee_percent - self.dev_fee_percent).abs() > std::f64::EPSILON {
+            self.dev_fee_percent = other.dev_fee_percent;
         }
         if other.enable_safer_sniping != self.enable_safer_sniping {
             self.enable_safer_sniping = other.enable_safer_sniping;
@@ -224,6 +257,9 @@ impl Settings {
         }
         if self.max_liquidity_sol < self.min_liquidity_sol {
             return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
+        }
+        if self.dev_fee_percent < 0.0 || self.dev_fee_percent > 100.0 {
+            return Err(AppError::Validation("dev_fee_percent must be between 0 and 100".to_string()));
         }
         Ok(())
     }
@@ -300,6 +336,11 @@ fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
 fn default_helius_use_dynamic_tips() -> bool { true }
 fn default_helius_confirm_timeout_secs() -> u64 { 15 }
 fn default_dev_fee_enabled() -> bool { true }
+fn default_dev_fee_percent() -> f64 { 2.0 }
+fn default_pumpportal_enabled() -> bool { false }
+fn default_pumpportal_wss() -> Vec<String> { vec!["wss://pumpportal.fun/api/data".to_string()] }
+
+fn default_detected_coins_max() -> usize { 300 }
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode

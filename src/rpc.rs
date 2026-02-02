@@ -10,6 +10,7 @@ use crate::{
     settings::Settings,
 };
 use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
+use solana_program::program_pack::Pack;
 
 /// Pump.fun `create` instruction discriminator: [24, 30, 200, 40, 5, 28, 7, 119]
 /// This is the 8-byte Anchor discriminator for the `create` instruction that creates new tokens.
@@ -755,7 +756,15 @@ pub async fn fetch_current_price(
         let token_reserves = state.virtual_token_reserves as f64;
         let lamports_reserves = state.virtual_sol_reserves as f64; // lamports
         if token_reserves > 0.0 {
-            price = (lamports_reserves / 1_000_000_000.0) / (token_reserves / 1_000_000.0);
+            // Fetch mint decimals for correct token units
+            let decimals = match fetch_mint_decimals(mint, rpc_client, settings).await {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!("Failed to fetch mint decimals for {}: {} -- falling back to {}", mint, e, settings.default_token_decimals);
+                    settings.default_token_decimals
+                }
+            };
+            price = (lamports_reserves / 1_000_000_000.0) / (token_reserves / 10f64.powi(decimals as i32));
         } else {
             error!("Invalid reserves for {}: zero tokens (state: {:?})", mint, state);
             return Err(format!("Invalid reserves for {}: zero tokens", mint).into());
@@ -768,6 +777,100 @@ pub async fn fetch_current_price(
 
     // `price` is SOL per token already. Cache and return.
     cache.put(mint.to_string(), (Instant::now(), price));
+    Ok(price)
+}
+
+/// Fetch mint decimals by reading the SPL Mint account and parsing the Mint state.
+pub async fn fetch_mint_decimals(
+    mint: &str,
+    rpc_client: &Arc<RpcClient>,
+    settings: &Arc<Settings>,
+) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+    // Try multiple commitments and retries (similar to fetch_current_price) to
+    // robustly fetch mint account data and parse the `decimals` field.
+    let mint_pk = Pubkey::from_str(mint)?;
+    let commitments = ["finalized", "confirmed", "processed"];
+    for c in &commitments {
+        for attempt in 0..3 {
+            let request = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [ mint_pk.to_string(), { "encoding": "base64", "commitment": c } ]
+            });
+            match fetch_with_fallback::<Value>(request, "getAccountInfo", rpc_client, settings).await {
+                Ok(v) => {
+                    if let Some(result_val) = v.result {
+                        let account_obj = if let Some(x) = result_val.get("value") { x.clone() } else { result_val.clone() };
+                        if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
+                            match Base64Engine.decode(base64_str) {
+                                Ok(decoded) => {
+                                    if let Ok(mint_state) = spl_token::state::Mint::unpack(&decoded) {
+                                        debug!("Fetched mint decimals for {} at commitment {}: {}", mint, c, mint_state.decimals);
+                                        return Ok(mint_state.decimals);
+                                    } else {
+                                        debug!("Failed to parse Mint state for {} (attempt {}, commitment {})", mint, attempt, c);
+                                        // continue retries
+                                    }
+                                }
+                                Err(e) => {
+                                    debug!("Failed to base64-decode mint account for {}: {}", mint, e);
+                                }
+                            }
+                        } else {
+                            debug!("No account data for mint {} (commitment={}, attempt={})", mint, c, attempt);
+                        }
+                    }
+                }
+                Err(e) => debug!("RPC error fetching mint {} at commitment {} (attempt {}): {}", mint, c, attempt, e),
+            }
+            // slight backoff
+            tokio::time::sleep(std::time::Duration::from_millis(150 * (attempt as u64 + 1))).await;
+        }
+    }
+
+    // Fallback: try `getTokenSupply` which some RPCs expose and that returns `decimals`
+    let commitments = ["finalized", "confirmed", "processed"];
+    for c in &commitments {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenSupply",
+            "params": [ mint_pk.to_string(), { "commitment": c } ]
+        });
+        if let Ok(resp) = fetch_with_fallback::<Value>(request, "getTokenSupply", rpc_client, settings).await {
+            if let Some(result_val) = resp.result {
+                let value = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
+                if let Some(dec) = value.get("decimals").and_then(|d| d.as_u64()) {
+                    debug!("Fetched decimals for {} via getTokenSupply (commitment={}): {}", mint, c, dec);
+                    return Ok(dec as u8);
+                }
+            }
+        }
+    }
+
+    Err(format!("Failed to fetch mint decimals for {} after retries", mint).into())
+}
+
+/// Compute price from raw reserves using the mint decimals (fallback to 6 decimals if
+/// fetching decimals fails). Price = (vsol_lamports / 1e9) / (vtok / 10^decimals)
+pub async fn price_from_reserves(
+    mint: &str,
+    vtok: u64,
+    vsol: u64,
+    rpc_client: &Arc<RpcClient>,
+    settings: &Arc<Settings>,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    // Try to fetch decimals, but fall back to 9 (more common) if we can't (and warn once)
+    let decimals = match fetch_mint_decimals(mint, rpc_client, settings).await {
+        Ok(d) => d,
+        Err(e) => {
+            // Log at warn for visibility so ops can adjust if RPC indexing is slow
+            warn!("Failed to fetch mint decimals for {}: {} -- falling back to {}", mint, e, settings.default_token_decimals);
+            settings.default_token_decimals
+        }
+    }; 
+    let price = (vsol as f64 / 1_000_000_000.0) / (vtok as f64 / 10f64.powi(decimals as i32));
     Ok(price)
 }
 
@@ -941,7 +1044,7 @@ pub async fn fetch_bonding_curve_creator(mint: &str, rpc_client: &Arc<RpcClient>
 /// SPL Token program with `getProgramAccounts` and memcmp filters on the mint and owner
 /// fields of the token account layout. Returns the first matching token account pubkey
 /// if found.
-async fn find_token_account_owned_by_owner(
+pub async fn find_token_account_owned_by_owner(
     mint: &str,
     owner_pubkey: &str,
     rpc_client: &Arc<RpcClient>,
@@ -1203,14 +1306,26 @@ pub async fn sell_token(
         if settings.dev_fee_enabled {
             // Calculate expected SOL received from sell (in lamports)
             let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, 1)?;
-            info!("Added 2% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, 1, settings)?;
+            info!("Added {}% dev fee to sell transaction (expected: {:.9} SOL)", settings.dev_fee_percent, sol_received);
         }
         
-        // Choose transaction submission method
+        // Before sending: record pre-send SOL and token balances so we can compute exact deltas
+        let pre_sol_lamports = client.get_balance(&user_pubkey)?;
+        let mut pre_token_amount: u64 = 0;
+        if let Ok(Some(acc)) = find_token_account_owned_by_owner(mint, &user_pubkey.to_string(), rpc_client, settings).await {
+            if let Ok(pk) = Pubkey::from_str(&acc) {
+                if let Ok(bal) = client.get_token_account_balance(&pk) {
+                    if let Ok(v) = bal.amount.parse::<u64>() { pre_token_amount = v; }
+                }
+            }
+        }
+
+        // Choose transaction submission method and capture signature
+        let signature: String;
         if settings.helius_sender_enabled {
             info!("Using Helius Sender for sell transaction of mint {}", mint);
-            let signature = crate::helius_sender::send_transaction_with_retry(
+            signature = crate::helius_sender::send_transaction_with_retry(
                 all_instrs,
                 payer,
                 settings,
@@ -1222,8 +1337,58 @@ pub async fn sell_token(
             let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
             let blockhash = client.get_latest_blockhash()?;
             tx.sign(&[payer], blockhash);
-            client.send_and_confirm_transaction(&tx)?;
+            let sig = client.send_and_confirm_transaction(&tx)?;
+            signature = sig.to_string();
         }
+
+        // After send: fetch post-send balances and transaction fee via getTransaction
+        // Give RPC a short moment to index the tx
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let post_sol_lamports = client.get_balance(&user_pubkey)?;
+        let mut post_token_amount: u64 = 0;
+        if let Ok(Some(acc)) = find_token_account_owned_by_owner(mint, &user_pubkey.to_string(), rpc_client, settings).await {
+            if let Ok(pk) = Pubkey::from_str(&acc) {
+                if let Ok(bal) = client.get_token_account_balance(&pk) {
+                    if let Ok(v) = bal.amount.parse::<u64>() { post_token_amount = v; }
+                }
+            }
+        }
+
+        // Compute deltas
+        let sol_delta_lamports: i128 = post_sol_lamports as i128 - pre_sol_lamports as i128;
+        let tokens_delta: i128 = pre_token_amount as i128 - post_token_amount as i128; // tokens sold
+
+        // Fetch transaction meta to get exact fee if available
+        let mut tx_fee_lamports: u64 = 0;
+        for _ in 0..4 {
+            let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "getTransaction", "params": [ signature, { "encoding": "jsonParsed", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 } ] });
+            match fetch_with_fallback::<Value>(req, "getTransaction", rpc_client, settings).await {
+                Ok(resp) => {
+                    if let Some(r) = resp.result {
+                        if let Some(meta) = r.get("meta") {
+                            if let Some(fee) = meta.get("fee").and_then(|v| v.as_u64()) {
+                                tx_fee_lamports = fee;
+                            }
+                        }
+                        break;
+                    }
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+            }
+        }
+
+        // Expected dev fee (approx) from configured percent on sol_received
+        let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
+        let expected_dev_fee = crate::dev_fee::calculate_dev_fee(sol_received_lamports, settings.dev_fee_percent);
+
+        // Log exact accounting
+        info!("Sell accounting for {}: tokens_sold={} (base units), sol_delta={} lamports ({} SOL)", mint, tokens_delta, sol_delta_lamports, (sol_delta_lamports as f64)/1_000_000_000.0);
+        info!("Transaction fee: {} lamports ({} SOL), expected dev fee: {} lamports ({} SOL)", tx_fee_lamports, (tx_fee_lamports as f64)/1_000_000_000.0, expected_dev_fee, (expected_dev_fee as f64)/1_000_000_000.0);
+        let net_lamports = sol_delta_lamports - tx_fee_lamports as i128 - expected_dev_fee as i128;
+        info!("Net PnL (approx) for {}: {} lamports ({} SOL)", mint, net_lamports, (net_lamports as f64)/1_000_000_000.0);
     } else {
         // Dry-run simulation: construct same instruction and simulate it using
         // either the provided simulate_keypair or an ephemeral Keypair fallback.
@@ -1269,33 +1434,23 @@ pub async fn sell_token(
                 // the ephemeral keypair has no SOL and its ATAs don't exist on-chain.
                 // This is expected - the transaction building itself validates the logic.
                 tx.message.recent_blockhash = blockhash;
-                let config = solana_client::rpc_config::RpcSimulateTransactionConfig {
-                    sig_verify: false,
-                    replace_recent_blockhash: true,
-                    commitment: Some(solana_sdk::commitment_config::CommitmentConfig::confirmed()),
-                    encoding: None,
-                    accounts: None,
-                    min_context_slot: None,
-                    inner_instructions: false,
-                };
-                match client.simulate_transaction_with_config(&tx, config) {
-                    Ok(sim) => {
-                        if let Some(ref err) = sim.value.err {
-                            let err_str = format!("{:?}", err);
-                            if err_str.contains("AccountNotFound") {
-                                info!("DRY RUN sell: tx built correctly for {} (simulation AccountNotFound is expected - ephemeral keypair has no SOL/accounts)", mint);
-                            } else if err_str.contains("Custom(3012)") {
-                                info!("DRY RUN sell: tx built correctly for {} (Custom(3012) is expected - no tokens to sell in ephemeral wallet)", mint);
-                            } else if err_str.contains("IncorrectProgramId") {
-                                warn!("DRY RUN sell simulation: IncorrectProgramId for {}", mint);
-                            } else {
-                                warn!("DRY RUN sell simulation error for {}: {:?}", mint, err);
+                // Sign the transaction with the simulate payer to produce a signed tx for remote simulation
+                tx.sign(&[sim_payer_ref], blockhash);
+                match bincode::serialize(&tx) {
+                    Ok(serialized) => {
+                        let tx_base64 = base64::engine::general_purpose::STANDARD.encode(&serialized);
+                        match crate::helius_sender::simulate_transaction_via_helius(&tx_base64, settings).await {
+                            Ok(json) => {
+                                if let Some(err) = json.get("error") {
+                                    warn!("DRY RUN sell simulation error for {}: {}", mint, err);
+                                } else {
+                                    info!("DRY RUN sell simulation completed for {} (helius)", mint);
+                                }
                             }
-                        } else {
-                            info!("DRY RUN sell simulation SUCCESS for {}: compute_units={:?}", mint, sim.value.units_consumed);
+                            Err(e) => warn!("DRY RUN sell simulation (helius) failed for {}: {}", mint, e),
                         }
                     }
-                    Err(e) => warn!("DRY RUN sell simulation RPC failed for {}: {}", mint, e),
+                    Err(e) => warn!("Failed to serialize TX for dry-run sell simulate: {}", e),
                 }
             }
             Err(e) => warn!("DRY RUN cannot get latest blockhash for sell {}: {}", mint, e),

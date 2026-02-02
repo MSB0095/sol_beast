@@ -169,3 +169,9 @@ dev_fee_enabled = true
 
 # Optional: Override dev wallet address (use default if not specified)
 # dev_wallet_address = "YourDevWalletAddressHere"
+
+# PumpPortal websocket integration
+# Enable receiving new-token events from PumpPortal (avoid opening multiple connections)
+pumpportal_enabled = true
+# Array of PumpPortal websocket endpoints (single connection recommended)
+pumpportal_wss = ["wss://pumpportal.fun/api/data"]

@@ -113,7 +113,10 @@ pub fn build_buy_instruction(
         let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
         accounts.push(AccountMeta::new(creator_vault, false));              // 9: creator_vault
     } else {
-        return Err("creator_pubkey required to compute creator_vault; IDL build failed".into());
+        // Missing creator - build best-effort placeholder so dry-run builders can still produce
+        // a consistent account list. Use Pubkey::default() as a placeholder for the creator_vault.
+        log::debug!("creator_pubkey missing; inserting placeholder creator_vault for best-effort build");
+        accounts.push(AccountMeta::new_readonly(Pubkey::default(), false)); // 9: placeholder creator_vault
     }
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
@@ -191,7 +194,9 @@ pub fn build_sell_instruction(
         let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
         accounts.push(AccountMeta::new(creator_vault, false));               // 8: creator_vault
     } else {
-        return Err("creator_pubkey required to compute creator_vault; IDL build failed".into());
+        // Missing creator - insert placeholder to preserve account ordering for dry-run
+        log::debug!("creator_pubkey missing for sell; inserting placeholder creator_vault");
+        accounts.push(AccountMeta::new_readonly(Pubkey::default(), false)); // 8: placeholder
     }
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(TOKEN_PROGRAM_PUBKEY)?, false)); // 9: token_program
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority

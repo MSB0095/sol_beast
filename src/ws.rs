@@ -4,6 +4,7 @@ use futures_util::{stream::StreamExt, SinkExt};
 use log::{debug, error, info, warn};
 use lru::LruCache;
 use serde_json::{json, Value};
+use solana_client::rpc_client::RpcClient;
 use solana_program::pubkey::Pubkey;
 use std::{
     collections::HashMap,
@@ -46,6 +47,7 @@ pub async fn run_ws(
     price_cache: Arc<Mutex<PriceCache>>,
     mut control_rx: mpsc::Receiver<WsRequest>,
     settings: Arc<Settings>,
+    rpc_client: Arc<RpcClient>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---------- outer re-connect loop ----------
     loop {
@@ -261,12 +263,14 @@ pub async fn run_ws(
                                 continue;
                             }
 
-                            // Compute price in SOL per token using the virtual reserves
-                            let virtual_sol_lamports = vsol as f64;
-                            let virtual_token_base_units = vtok as f64;
-                            // SOL = lamports / 1e9; tokens = base_units / 1e6
-                            let price_in_sol_per_token = (virtual_sol_lamports / 1_000_000_000.0)
-                                / (virtual_token_base_units / 1_000_000.0);
+                            // Compute price in SOL per token using the virtual reserves.
+                            // Prefer using mint decimals from RPC to avoid 1000x discrepancies.
+                            let denom = 10f64.powi(settings.default_token_decimals as i32);
+                            let mut price_in_sol_per_token = (vsol as f64 / 1_000_000_000.0) / (vtok as f64 / denom);
+                            match crate::rpc::price_from_reserves(&mint.clone(), vtok, vsol, &rpc_client, &settings).await {
+                                Ok(p) => price_in_sol_per_token = p,
+                                Err(e) => debug!("Failed to compute price_from_reserves for {}: {} -- using fallback", mint, e),
+                            }
 
                             let mut cache = price_cache.lock().await;
                             if let Some((_, prev)) = cache.get(mint).map(|e| (e.0, e.1)) {

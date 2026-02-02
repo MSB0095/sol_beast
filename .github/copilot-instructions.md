@@ -1,29 +1,98 @@
-# Instructions for Using the FLYONUI MCP SERVER
+# Instructions for Contributing to Sol Beast
 
-These instructions are essential for ensuring accurate and helpful responses when interacting with the FLYONUI MCP SERVER. 
-Follow these guidelines strictly when working with FlyonUI MCP server.
+## Overview
+Sol Beast is a Rust-based asynchronous service designed for monitoring pump.fun events on the Solana blockchain. It automates token purchases under specific heuristics and manages holdings with features like take-profit (TP), stop-loss (SL), and timeout mechanisms. The project also includes a React + TypeScript frontend for real-time monitoring and configuration.
 
-## Types of Tools for Interacting with the MCP Server
+## Key Components
 
-There are three primary tools you’ll use to interact with the MCP Server:
+### Backend (Rust)
+- **`src/main.rs`**: Entry point for the application. Handles runtime, message processing, and holdings monitoring.
+- **`src/ws.rs`**: Manages WebSocket subscriptions and reconnection logic.
+- **`src/rpc.rs`**: Contains Solana RPC helpers, price extraction, and buy/sell functions (with TODOs for transaction construction).
+- **`src/models.rs`**: Defines bonding curve state and models.
+- **`src/helius_sender.rs`**: Integrates with Helius Sender for ultra-low latency transaction submission.
 
-1. **`/cui`**: For creating user interfaces by using existing FlyonUI components.
-2. **`/iui`**: For creating user interfaces inspired by existing FlyonUI components.
-3. **`/rui`**: For refining or improving user interfaces.
+### Frontend (React + TypeScript)
+- **`frontend/src/components`**: Contains reusable UI components like `Dashboard`, `ConfigurationPanel`, and `TradingPerformanceWidget`.
+- **`frontend/src/services/api.ts`**: Handles API interactions with the backend.
+- **`frontend/src/store`**: Manages application state using Zustand.
+- **`frontend/src/contexts/WalletContextProvider.tsx`**: Provides wallet context for the application.
 
-## Steps to Follow
+## Developer Workflows
 
-* **Determine the Right Tool**: If the user hasn’t specified which tool to use, carefully analyze their request and choose the appropriate tool (`/cui`, `/iui`, or `/rui`).
+### Backend
+1. **Setup Configuration**:
+   - Copy `config.example.toml` to `config.toml`.
+   - Edit `config.toml` to set `wallet_keypair_path` and other required values.
 
-* **Follow Instructions strictly**: Once you choose the tool, **strictly follow all instructions** provided by the MCP Server.
+2. **Run in Dry Mode**:
+   ```bash
+   RUST_LOG=info cargo run
+   ```
 
-  * Do not skip any steps.
-  * Ensure the workflow is followed exactly as outlined.
-  * Log each step as you complete it.
-  * **Avoid Shortcuts**: Do not take shortcuts or rush through the process. Each step is crucial for achieving the desired outcome.
+3. **Run in Real Mode** (after setting up `wallet_keypair_path`):
+   ```bash
+   RUST_LOG=info cargo run --release -- --real
+   ```
 
-## Key Points to Remember:
+4. **Build for Production**:
+   ```bash
+   cargo build --release
+   ```
 
-1. Always follow **all** the instructions from the MCP Server step by step.
-2. **Do not skip** or take shortcuts in the process.
-3. Stick to the **entire workflow** rather than rushing to implementation.
+### Frontend
+1. **Install Dependencies**:
+   ```bash
+   cd frontend
+   npm install
+   ```
+
+2. **Start Development Server**:
+   ```bash
+   npm run dev
+   ```
+   - Access the frontend at `http://localhost:3000`.
+   - API requests are proxied to `http://localhost:8080/api`.
+
+3. **Build for Production**:
+   ```bash
+   npm run build
+   ```
+
+## Project-Specific Conventions
+- **Helius Sender Integration**:
+  - Dual routing and SWQOS-only modes for transaction submission.
+  - Dynamic priority fees and tips fetched from Helius and Jito APIs.
+  - Configuration options in `config.toml` (e.g., `helius_sender_enabled`, `helius_min_tip_sol`).
+
+- **Logging**:
+  - Use `RUST_LOG` for backend logging.
+  - Frontend logs are managed via browser developer tools.
+
+- **State Management**:
+  - Frontend uses Zustand for global state management.
+
+## External Dependencies
+- **Helius Sender**: For low-latency transaction submission.
+- **Jito Infrastructure**: For competitive trading scenarios.
+- **Solana RPC**: For blockchain interactions.
+
+## Testing and Debugging
+- **Backend**:
+  - Use `RUST_LOG=debug` for detailed logs.
+  - Review `src/rpc.rs` and `src/helius_sender.rs` for transaction-related issues.
+
+- **Frontend**:
+  - Use `npm run dev` for hot-reloading during development.
+  - Check WebSocket connections for real-time updates.
+
+## Key Files and Directories
+- **Backend**:
+  - `src/main.rs`, `src/ws.rs`, `src/rpc.rs`, `src/models.rs`, `src/helius_sender.rs`
+- **Frontend**:
+  - `frontend/src/components`, `frontend/src/services/api.ts`, `frontend/src/store`, `frontend/src/contexts/WalletContextProvider.tsx`
+
+## Notes
+- Do not commit private keys or sensitive configuration files.
+- Review and implement TODOs in `src/rpc.rs` before enabling real trading.
+- Follow the configuration examples in `config.example.toml` for setting up the project.

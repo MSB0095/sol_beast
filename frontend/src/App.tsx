@@ -12,10 +12,14 @@ import TradingHistory from './components/TradingHistory'
 import ProfilePanel from './components/ProfilePanel'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import './App.css'
+import useWebSocket from './utils/useWebSocket';
 
 function App() {
   const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
+
+  // Initialize WebSocket connection
+  useWebSocket();
 
   useEffect(() => {
     initializeConnection()

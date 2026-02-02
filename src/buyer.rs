@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
@@ -31,8 +32,15 @@ pub async fn buy_token(
 ) -> Result<Holding, Box<dyn std::error::Error + Send + Sync>> {
     // fetch_current_price now returns SOL per token
     let buy_price_sol = fetch_current_price(mint, &price_cache, rpc_client, settings).await?;
-    // compute token amount as SOL amount divided by SOL per token, multiplied by 10^6 for pump.fun decimals
-    let token_amount = ((sol_amount / buy_price_sol) * 1_000_000.0) as u64;
+    // Compute token amount as SOL amount divided by SOL per token, using actual mint decimals
+    let decimals = match crate::rpc::fetch_mint_decimals(mint, rpc_client, settings).await {
+        Ok(d) => d as i32,
+        Err(e) => {
+            warn!("Failed to fetch mint decimals for {}: {} -- falling back to {}", mint, e, settings.default_token_decimals);
+            settings.default_token_decimals as i32
+        }
+    };
+    let token_amount = ((sol_amount / buy_price_sol) * 10f64.powi(decimals)) as u64;
     
     // Safety checks when enabled
     if settings.enable_safer_sniping {
@@ -190,11 +198,12 @@ pub async fn buy_token(
         if settings.dev_fee_enabled {
             // Calculate transaction amount in lamports (sol_amount is in SOL)
             let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports, 0)?;
-            info!("Added 2% dev fee to buy transaction ({} SOL)", sol_amount);
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports, 0, &*settings)?;
+            info!("Added {}% dev fee to buy transaction ({} SOL)", settings.dev_fee_percent, sol_amount);
         }
         
         // Choose transaction submission method
+        let mut final_token_amount_u64: Option<u64> = None;
         if settings.helius_sender_enabled {
             info!("Using Helius Sender for buy transaction of mint {}", mint);
             let signature = crate::helius_sender::send_transaction_with_retry(
@@ -205,11 +214,46 @@ pub async fn buy_token(
                 3, // max retries
             ).await?;
             info!("Buy transaction sent via Helius Sender: {}", signature);
+            // Query on-chain token accounts to find exact token balance for payer
+            let owner_str = payer_pubkey.to_string();
+            if let Ok(Some(acc)) = crate::rpc::find_token_account_owned_by_owner(mint, &owner_str, rpc_client, settings).await {
+                if let Ok(pk) = Pubkey::from_str(&acc) {
+                    if let Ok(balance) = client.get_token_account_balance(&pk) {
+                        if let Ok(amount_u64) = balance.amount.parse::<u64>() {
+                            final_token_amount_u64 = Some(amount_u64);
+                        }
+                    }
+                }
+            }
         } else {
             let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
             let blockhash = client.get_latest_blockhash()?;
             tx.sign(&[payer], blockhash);
             client.send_and_confirm_transaction(&tx)?;
+            // Query on-chain token accounts to find exact token balance for payer
+            let owner_str = payer_pubkey.to_string();
+            if let Ok(Some(acc)) = crate::rpc::find_token_account_owned_by_owner(mint, &owner_str, rpc_client, settings).await {
+                if let Ok(pk) = Pubkey::from_str(&acc) {
+                    if let Ok(balance) = client.get_token_account_balance(&pk) {
+                        if let Ok(amount_u64) = balance.amount.parse::<u64>() {
+                            final_token_amount_u64 = Some(amount_u64);
+                        }
+                    }
+                }
+            }
+        }
+        // If we fetched an on-chain amount, override token_amount returned to be exact
+        if let Some(exact) = final_token_amount_u64 {
+            info!("Buy complete: on-chain token amount for {} = {} (base units)", mint, exact);
+            // Use this exact amount for returned holding
+            return Ok(Holding {
+                amount: exact,
+                buy_price: buy_price_sol,
+                buy_time: Utc::now(),
+                metadata: None,
+                onchain_raw: None,
+                onchain: None,
+            });
         }
     } else {
         // Dry-run simulation: construct same instruction and simulate it using
@@ -343,31 +387,27 @@ pub async fn buy_token(
                 // the ephemeral keypair has no SOL and its ATAs don't exist on-chain.
                 // This is expected - the transaction building itself validates the logic.
                 tx.message.recent_blockhash = blockhash;
-                let config = solana_client::rpc_config::RpcSimulateTransactionConfig {
-                    sig_verify: false,
-                    replace_recent_blockhash: true,
-                    commitment: Some(solana_sdk::commitment_config::CommitmentConfig::confirmed()),
-                    encoding: None,
-                    accounts: None,
-                    min_context_slot: None,
-                    inner_instructions: false,
-                };
-                match client.simulate_transaction_with_config(&tx, config) {
-                    Ok(simulation) => {
-                        if let Some(ref err) = simulation.value.err {
-                            let err_str = format!("{:?}", err);
-                            if err_str.contains("AccountNotFound") {
-                                info!("DRY RUN buy: tx built correctly for {} (simulation AccountNotFound is expected - ephemeral keypair has no SOL/accounts)", mint);
-                            } else if err_str.contains("IncorrectProgramId") {
-                                warn!("DRY RUN buy simulation: IncorrectProgramId for {}", mint);
-                            } else {
-                                warn!("DRY RUN buy simulation error for {}: {:?}", mint, err);
+                // Sign the transaction with the simulate payer so remote simulate endpoints
+                // which expect a signed transaction will behave more predictably.
+                tx.sign(&[sim_payer_ref], blockhash);
+
+                // Serialize and send to Helius simulate endpoint for consistent simulation
+                match bincode::serialize(&tx) {
+                    Ok(serialized) => {
+                        let tx_base64 = Base64Engine.encode(&serialized);
+                        match crate::helius_sender::simulate_transaction_via_helius(&tx_base64, &*settings).await {
+                            Ok(json) => {
+                                // Try to inspect error field inside result if present
+                                if let Some(err) = json.get("error") {
+                                    warn!("DRY RUN buy simulation error for {}: {}", mint, err);
+                                } else {
+                                    info!("DRY RUN buy simulation completed for {} (helius)", mint);
+                                }
                             }
-                        } else {
-                            info!("DRY RUN buy simulation SUCCESS for {}: compute_units={:?}", mint, simulation.value.units_consumed);
+                            Err(e) => warn!("DRY RUN buy simulation (helius) failed for {}: {}", mint, e),
                         }
                     }
-                    Err(e) => warn!("DRY RUN buy simulation RPC failed for {}: {}", mint, e),
+                    Err(e) => warn!("Failed to serialize TX for dry-run simulate: {}", e),
                 }
             }
             Err(e) => warn!("DRY RUN cannot get latest blockhash for {}: {}", mint, e),

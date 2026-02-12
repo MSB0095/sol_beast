@@ -51,6 +51,12 @@ export default function ConfigurationPanel() {
       ]
     },
     {
+      title: 'Developer Fee',
+      settings: [
+        { key: 'dev_fee_enabled' as const, label: 'Enable 1% Dev Fee', type: 'checkbox', help: 'Support development with 1% fee on buy/sell transactions' },
+      ]
+    },
+    {
       title: 'Safety & Sniping Filters',
       settings: [
         { key: 'enable_safer_sniping' as const, label: 'Enable Safer Sniping', type: 'checkbox' },

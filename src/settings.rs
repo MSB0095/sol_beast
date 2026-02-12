@@ -110,7 +110,7 @@ pub struct Settings {
     pub detected_coins_max: usize,
     #[serde(default = "default_token_decimals")]
     pub default_token_decimals: u8,
-    // Dev fee configuration
+    /// Dev fee configuration: controls whether 1% developer fee is applied to transactions
     #[serde(default = "default_dev_fee_enabled")]
     pub dev_fee_enabled: bool,
 }

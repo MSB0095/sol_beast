@@ -1,0 +1,14 @@
+{
+  "name": "sol_beast_docs",
+  "version": "1.0.0",
+  "description": "SOL BEAST Documentation",
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.0.0"
+  }
+}

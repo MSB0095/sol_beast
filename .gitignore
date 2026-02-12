@@ -1,4 +1,4 @@
 /target
 config.toml
 trades.csv
-secrets
+secretsconfig.test.toml

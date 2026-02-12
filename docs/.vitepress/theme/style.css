@@ -1,0 +1,331 @@
+/**
+ * SOL BEAST - Custom Theme Styles
+ * Matching frontend cyberpunk aesthetic with 7 color themes
+ */
+
+/* Custom color themes - CSS variables - ELECTRIC CYBER THEME */
+:root {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #0a0a0a;
+  --theme-bg-card: #0f0f0f;
+  --theme-bg-input: #0d0d0d;
+  --theme-accent: #00ff41;
+  --theme-accent-hover: #00cc33;
+  --theme-accent-glow: #00ff41;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #b8ffcf;
+  --theme-text-muted: #5a7a66;
+  --theme-input-text: #ffffff;
+  --theme-input-border: #00ff41;
+  --theme-button-bg: #001a0a;
+  --theme-button-text: #00ff41;
+  --theme-success: #00ff41;
+  --theme-warning: #ffff00;
+  --theme-error: #ff0062;
+  --theme-info: #00d9ff;
+  --glow-color: rgba(0, 255, 65, 0.6);
+  --glow-color-strong: rgba(0, 255, 65, 0.9);
+  --border-glow: rgba(0, 255, 65, 0.3);
+  --glass-bg: rgba(0, 26, 10, 0.5);
+  --glass-border: rgba(0, 255, 65, 0.2);
+  
+  /* VitePress theme override */
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+  --vp-c-bg: var(--theme-bg-primary);
+  --vp-c-bg-alt: var(--theme-bg-secondary);
+  --vp-c-bg-elv: var(--theme-bg-card);
+  --vp-c-text-1: var(--theme-text-primary);
+  --vp-c-text-2: var(--theme-text-secondary);
+  --vp-c-text-3: var(--theme-text-muted);
+}
+
+[data-color-theme="emerald"] {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #001a0f;
+  --theme-bg-card: #001f12;
+  --theme-bg-input: #001a0f;
+  --theme-accent: #10ffb0;
+  --theme-accent-hover: #00e69c;
+  --theme-accent-glow: #10ffb0;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #7ee8c0;
+  --theme-text-muted: #1a4d3a;
+  --glow-color: rgba(16, 255, 176, 0.6);
+  --glow-color-strong: rgba(16, 255, 176, 0.9);
+  --border-glow: rgba(16, 255, 176, 0.3);
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+}
+
+[data-color-theme="blue"] {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #000d1a;
+  --theme-bg-card: #00111f;
+  --theme-bg-input: #001a29;
+  --theme-accent: #00d9ff;
+  --theme-accent-hover: #00b8e6;
+  --theme-accent-glow: #00d9ff;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #7dd3fc;
+  --theme-text-muted: #1a4d66;
+  --glow-color: rgba(0, 217, 255, 0.6);
+  --glow-color-strong: rgba(0, 217, 255, 0.9);
+  --border-glow: rgba(0, 217, 255, 0.3);
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+}
+
+[data-color-theme="purple"] {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #0f001a;
+  --theme-bg-card: #14001f;
+  --theme-bg-input: #1a001a;
+  --theme-accent: #d946ef;
+  --theme-accent-hover: #c026d3;
+  --theme-accent-glow: #e879f9;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #d8b4fe;
+  --theme-text-muted: #4d1a66;
+  --glow-color: rgba(217, 70, 239, 0.6);
+  --glow-color-strong: rgba(217, 70, 239, 0.9);
+  --border-glow: rgba(217, 70, 239, 0.3);
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+}
+
+[data-color-theme="rose"] {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #1a0008;
+  --theme-bg-card: #1f000f;
+  --theme-bg-input: #1a0010;
+  --theme-accent: #ff0062;
+  --theme-accent-hover: #e6005a;
+  --theme-accent-glow: #ff3d8a;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #ffb3d1;
+  --theme-text-muted: #661a3d;
+  --glow-color: rgba(255, 0, 98, 0.6);
+  --glow-color-strong: rgba(255, 0, 98, 0.9);
+  --border-glow: rgba(255, 0, 98, 0.3);
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+}
+
+[data-color-theme="amber"] {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #1a1000;
+  --theme-bg-card: #1f1400;
+  --theme-bg-input: #1a1200;
+  --theme-accent: #ffb000;
+  --theme-accent-hover: #e69d00;
+  --theme-accent-glow: #ffc933;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #ffd699;
+  --theme-text-muted: #664d1a;
+  --glow-color: rgba(255, 176, 0, 0.6);
+  --glow-color-strong: rgba(255, 176, 0, 0.9);
+  --border-glow: rgba(255, 176, 0, 0.3);
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+}
+
+[data-color-theme="cyan"] {
+  --theme-bg-primary: #000000;
+  --theme-bg-secondary: #001a1a;
+  --theme-bg-card: #001f1f;
+  --theme-bg-input: #002929;
+  --theme-accent: #00ffff;
+  --theme-accent-hover: #00e6e6;
+  --theme-accent-glow: #33ffff;
+  --theme-text-primary: #ffffff;
+  --theme-text-secondary: #99ffff;
+  --theme-text-muted: #1a6666;
+  --glow-color: rgba(0, 255, 255, 0.6);
+  --glow-color-strong: rgba(0, 255, 255, 0.9);
+  --border-glow: rgba(0, 255, 255, 0.3);
+  --vp-c-brand-1: var(--theme-accent);
+  --vp-c-brand-2: var(--theme-accent-hover);
+  --vp-c-brand-3: var(--theme-accent-glow);
+}
+
+/* Custom styling for cyberpunk aesthetic */
+.VPNav {
+  background: var(--theme-bg-primary) !important;
+  border-bottom: 2px solid var(--theme-accent);
+  box-shadow: 0 0 20px var(--glow-color);
+}
+
+.VPSidebar {
+  background: var(--theme-bg-secondary) !important;
+  border-right: 1px solid var(--theme-accent);
+}
+
+.VPContent {
+  background: var(--theme-bg-primary) !important;
+}
+
+.vp-doc {
+  background: transparent !important;
+}
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4 {
+  color: var(--theme-accent) !important;
+  text-shadow: 0 0 10px var(--glow-color);
+}
+
+.vp-doc a {
+  color: var(--theme-accent) !important;
+  text-decoration: none;
+  transition: all 0.3s ease;
+}
+
+.vp-doc a:hover {
+  color: var(--theme-accent-hover) !important;
+  text-shadow: 0 0 10px var(--glow-color-strong);
+}
+
+.vp-doc code {
+  background: var(--theme-bg-card) !important;
+  border: 1px solid var(--theme-accent);
+  color: var(--theme-accent) !important;
+  box-shadow: 0 0 5px var(--border-glow);
+}
+
+.vp-doc pre {
+  background: var(--theme-bg-card) !important;
+  border: 2px solid var(--theme-accent);
+  box-shadow: 0 0 15px var(--border-glow);
+}
+
+.vp-doc blockquote {
+  border-left: 4px solid var(--theme-accent);
+  background: var(--theme-bg-card);
+  box-shadow: 0 0 10px var(--border-glow);
+}
+
+.vp-doc table {
+  border: 1px solid var(--theme-accent);
+}
+
+.vp-doc th {
+  background: var(--theme-bg-card) !important;
+  color: var(--theme-accent) !important;
+  border: 1px solid var(--theme-accent);
+}
+
+.vp-doc td {
+  border: 1px solid var(--border-glow);
+}
+
+/* Custom button styles */
+.VPButton {
+  background: var(--theme-button-bg) !important;
+  border: 2px solid var(--theme-accent) !important;
+  color: var(--theme-accent) !important;
+  box-shadow: 0 0 15px var(--glow-color);
+  transition: all 0.3s ease;
+}
+
+.VPButton:hover {
+  background: var(--theme-accent) !important;
+  color: #000000 !important;
+  box-shadow: 0 0 25px var(--glow-color-strong);
+  transform: translateY(-2px);
+}
+
+/* Search bar styling */
+.VPLocalSearchBox {
+  background: var(--theme-bg-card) !important;
+  border: 2px solid var(--theme-accent) !important;
+  box-shadow: 0 0 20px var(--glow-color);
+}
+
+/* Custom animations */
+@keyframes electric-pulse {
+  0%, 100% {
+    box-shadow: 0 0 10px var(--glow-color);
+  }
+  50% {
+    box-shadow: 0 0 25px var(--glow-color-strong);
+  }
+}
+
+@keyframes glow-text {
+  0%, 100% {
+    text-shadow: 0 0 10px var(--glow-color);
+  }
+  50% {
+    text-shadow: 0 0 20px var(--glow-color-strong);
+  }
+}
+
+/* Hero section enhancement */
+.VPHero {
+  background: radial-gradient(circle at center, var(--theme-bg-secondary) 0%, var(--theme-bg-primary) 100%);
+}
+
+.VPHero .name {
+  color: var(--theme-accent) !important;
+  animation: glow-text 2s ease-in-out infinite;
+}
+
+.VPHero .tagline {
+  color: var(--theme-text-secondary) !important;
+}
+
+/* Feature card styling */
+.VPFeature {
+  background: var(--theme-bg-card) !important;
+  border: 2px solid var(--theme-accent) !important;
+  box-shadow: 0 0 15px var(--border-glow);
+  transition: all 0.3s ease;
+}
+
+.VPFeature:hover {
+  box-shadow: 0 0 30px var(--glow-color-strong);
+  transform: translateY(-5px);
+}
+
+.VPFeature .icon {
+  color: var(--theme-accent) !important;
+}
+
+/* Footer styling */
+.VPFooter {
+  background: var(--theme-bg-secondary) !important;
+  border-top: 2px solid var(--theme-accent);
+  box-shadow: 0 0 20px var(--glow-color);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 12px;
+  background: var(--theme-bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--theme-accent);
+  box-shadow: 0 0 10px var(--glow-color);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--theme-accent-hover);
+  box-shadow: 0 0 20px var(--glow-color-strong);
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .VPNav {
+    box-shadow: 0 0 10px var(--glow-color);
+  }
+}

@@ -1,0 +1,103 @@
+import { defineConfig } from 'vitepress'
+
+export default defineConfig({
+  title: "SOL BEAST",
+  description: "Ultra-Fast Solana Token Sniping Bot - Documentation",
+  base: '/sol_beast/',
+  
+  head: [
+    ['link', { rel: 'icon', href: '/sol_beast/favicon.ico' }],
+    ['meta', { name: 'theme-color', content: '#00ff41' }],
+    ['meta', { property: 'og:title', content: 'SOL BEAST Documentation' }],
+    ['meta', { property: 'og:description', content: 'Ultra-Fast Solana Token Sniping Bot' }],
+  ],
+
+  themeConfig: {
+    logo: '/logo.svg',
+    
+    nav: [
+      { text: 'Home', link: '/' },
+      { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'API', link: '/api/endpoints' },
+      { text: 'GitHub', link: 'https://github.com/MSB0095/sol_beast' }
+    ],
+
+    sidebar: [
+      {
+        text: 'Introduction',
+        items: [
+          { text: 'What is SOL BEAST?', link: '/guide/introduction' },
+          { text: 'Getting Started', link: '/guide/getting-started' },
+          { text: 'Installation', link: '/guide/installation' },
+        ]
+      },
+      {
+        text: 'Configuration',
+        items: [
+          { text: 'Basic Configuration', link: '/guide/configuration' },
+          { text: 'Trading Parameters', link: '/guide/trading-parameters' },
+          { text: 'Helius Sender', link: '/guide/helius-sender' },
+        ]
+      },
+      {
+        text: 'Features',
+        items: [
+          { text: 'Architecture', link: '/guide/architecture' },
+          { text: 'Frontend Dashboard', link: '/guide/dashboard' },
+          { text: 'Themes', link: '/guide/themes' },
+        ]
+      },
+      {
+        text: 'Advanced',
+        items: [
+          { text: 'Trading Strategies', link: '/advanced/strategies' },
+          { text: 'Risk Management', link: '/advanced/risk-management' },
+          { text: 'Performance Tuning', link: '/advanced/performance' },
+        ]
+      },
+      {
+        text: 'API Reference',
+        items: [
+          { text: 'REST Endpoints', link: '/api/endpoints' },
+          { text: 'WebSocket Events', link: '/api/websocket' },
+        ]
+      },
+      {
+        text: 'Help',
+        items: [
+          { text: 'Troubleshooting', link: '/guide/troubleshooting' },
+          { text: 'FAQ', link: '/guide/faq' },
+          { text: 'Contributing', link: '/guide/contributing' },
+        ]
+      }
+    ],
+
+    socialLinks: [
+      { icon: 'github', link: 'https://github.com/MSB0095/sol_beast' },
+      { icon: 'discord', link: 'https://discord.gg/solbeast' },
+      { icon: 'twitter', link: 'https://twitter.com/solbeast' }
+    ],
+
+    footer: {
+      message: 'Released under the MIT License.',
+      copyright: 'Copyright © 2024 SOL BEAST Team'
+    },
+
+    search: {
+      provider: 'local'
+    },
+
+    editLink: {
+      pattern: 'https://github.com/MSB0095/sol_beast/edit/main/docs/:path',
+      text: 'Edit this page on GitHub'
+    },
+
+    lastUpdated: {
+      text: 'Updated at',
+      formatOptions: {
+        dateStyle: 'full',
+        timeStyle: 'medium'
+      }
+    }
+  }
+})

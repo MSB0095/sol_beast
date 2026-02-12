@@ -51,8 +51,16 @@ impl BondingCurveState {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Holding {
     pub amount: u64,
+    /// The original token amount at buy time, used to compute sell fractions for multi-level TP/SL.
+    pub original_amount: u64,
     pub buy_price: f64,
     pub buy_time: DateTime<Utc>,
+    /// Indices of TP levels that have already been triggered/executed.
+    #[serde(default)]
+    pub triggered_tp_levels: Vec<usize>,
+    /// Indices of SL levels that have already been triggered/executed.
+    #[serde(default)]
+    pub triggered_sl_levels: Vec<usize>,
     // Optional off-chain metadata retrieved from the token's URI (name, symbol, image, etc.)
     pub metadata: Option<OffchainTokenMetadata>,
     // Optional on-chain metadata (trimmed fields) retrieved from the token's metadata account

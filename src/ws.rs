@@ -42,6 +42,7 @@ pub struct WsHealth {
 pub async fn run_ws(
     wss_url: &str,
     tx: mpsc::Sender<String>,
+    ws_tx: tokio::sync::broadcast::Sender<String>,
     _seen: Arc<Mutex<LruCache<String, ()>>>,
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
     price_cache: Arc<Mutex<PriceCache>>,
@@ -61,20 +62,23 @@ pub async fn run_ws(
         );
 
         // pump.fun program logs
-        write
-            .send(Message::Text(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "logsSubscribe",
-                    "params": [
-                        { "mentions": [ &settings.pump_fun_program ] },
-                        { "commitment": "confirmed" }
-                    ]
-                })
-                .to_string(),
-            ))
-            .await?;
+        // Only subscribe to logs if PumpPortal is NOT enabled (otherwise we get duplicate detections)
+        if !settings.pumpportal_enabled {
+            write
+                .send(Message::Text(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "logsSubscribe",
+                        "params": [
+                            { "mentions": [ &settings.pump_fun_program ] },
+                            { "commitment": "confirmed" }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .await?;
+        }
 
         // bonding-curve accounts for everything we already hold — subscribe to
         // the bonding_curve PDA (not the token vault). The BondingCurveState is
@@ -147,7 +151,15 @@ pub async fn run_ws(
                     // `id`/`result` are handled locally here and shouldn't be
                     // forwarded (they previously triggered "missing params" logs).
                     if value.get("params").is_some() {
-                        let _ = tx.send(text.clone()).await;
+                        // FILTER: Only forward "logsNotification" (new coins).
+                        // "accountNotification" (price updates) are high volume and handled
+                        // locally in this loop; forwarding them floods the `tx` channel
+                        // and blocks the bot from receiving new coin events from PumpPortal.
+                        if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+                            if method == "logsNotification" {
+                                let _ = tx.send(text.clone()).await;
+                            }
+                        }
                     }
 
                     // ---- subscription response ----
@@ -264,56 +276,63 @@ pub async fn run_ws(
                             }
 
                             // Compute price in SOL per token using the virtual reserves.
-                            // Prefer using mint decimals from RPC to avoid 1000x discrepancies.
-                            let denom = 10f64.powi(settings.default_token_decimals as i32);
-                            let mut price_in_sol_per_token = (vsol as f64 / 1_000_000_000.0) / (vtok as f64 / denom);
-                            match crate::rpc::price_from_reserves(&mint.clone(), vtok, vsol, &rpc_client, &settings).await {
-                                Ok(p) => price_in_sol_per_token = p,
-                                Err(e) => debug!("Failed to compute price_from_reserves for {}: {} -- using fallback", mint, e),
-                            }
+                            // pump.fun tokens always use 6 decimals — no RPC call needed.
+                            // Formula: price = (vsol/1e9) / (vtok/1e6)  ≡  (vsol/vtok) * 1e-3
+                            let price_in_sol_per_token = (vsol as f64 / vtok as f64) * 1e-3;
 
-                            let mut cache = price_cache.lock().await;
-                            if let Some((_, prev)) = cache.get(mint).map(|e| (e.0, e.1)) {
-                                // Compute percent change robustly. If the previous price is
-                                // extremely small or zero, clamp the denominator to avoid
-                                // producing misleading huge percentages.
-                                let denom = if prev.abs() < 1e-18 { 1e-18 } else { prev };
-                                let pct_last = (price_in_sol_per_token - prev) / denom * 100.0;
+                            // Update price cache immediately (before logging or broadcasting)
+                            {
+                                let mut cache = price_cache.lock().await;
+                                let prev_price = cache.get(mint).map(|(_, p)| *p);
+                                cache.put(mint.clone(), (Instant::now(), price_in_sol_per_token));
 
-                                // If we hold this mint, also compute change relative to the
-                                // buy price for operator convenience.
-                                let mut pct_from_buy: Option<f64> = None;
-                                if let Ok(holdings_guard) = holdings.try_lock() {
-                                    if let Some(h) = holdings_guard.get(mint) {
-                                        let buy = h.buy_price;
-                                        if buy.abs() >= 1e-18 {
-                                            pct_from_buy = Some((price_in_sol_per_token - buy) / buy * 100.0);
-                                        }
-                                    }
-                                }
-
-                                if pct_last.abs() > 0.0 {
-                                    if let Some(pbuy) = pct_from_buy {
-                                        info!(
-                                            "WSS price change for {}: {:.18} -> {:.18} SOL (delta_last={:.6}%, delta_from_buy={:+.6}%)",
-                                            mint, prev, price_in_sol_per_token, pct_last, pbuy
-                                        );
-                                    } else {
-                                        info!(
-                                            "WSS price change for {}: {:.18} -> {:.18} SOL (delta_last={:.6}%)",
+                                if let Some(prev) = prev_price {
+                                    let denom = if prev.abs() < 1e-18 { 1e-18 } else { prev };
+                                    let pct_last = (price_in_sol_per_token - prev) / denom * 100.0;
+                                    if pct_last.abs() > 0.01 {
+                                        debug!(
+                                            "WSS price for {}: {:.18} -> {:.18} SOL ({:+.4}%)",
                                             mint, prev, price_in_sol_per_token, pct_last
                                         );
                                     }
+                                } else {
+                                    info!(
+                                        "WSS initial price for {}: {:.18} SOL",
+                                        mint, price_in_sol_per_token
+                                    );
                                 }
-                            } else {
-                                info!(
-                                    "WSS initial price for {}: {:.18} SOL",
-                                    mint, price_in_sol_per_token
-                                );
                             }
-                            // Store price in SOL per token (consistent with monitor expectations)
-                            cache.put(mint.clone(), (Instant::now(), price_in_sol_per_token));
-                            debug!("WS updated curve price for {} sub {}", mint, sub_id);
+
+                            // Compute PnL from holdings — use lock() to guarantee we get
+                            // the data (try_lock can miss when holdings mutex is contended).
+                            let mut profit_percent: f64 = 0.0;
+                            let mut pnl_sol: f64 = 0.0;
+                            let mut buy_price: f64 = 0.0;
+                            let mut amount: u64 = 0;
+                            {
+                                let holdings_guard = holdings.lock().await;
+                                if let Some(h) = holdings_guard.get(mint) {
+                                    buy_price = h.buy_price;
+                                    amount = h.amount;
+                                    if buy_price.abs() >= 1e-18 {
+                                        profit_percent = (price_in_sol_per_token - buy_price) / buy_price * 100.0;
+                                        // PnL in SOL = (current_price - buy_price) * tokens
+                                        let tokens = amount as f64 / 1_000_000.0;
+                                        pnl_sol = (price_in_sol_per_token - buy_price) * tokens;
+                                    }
+                                }
+                            }
+
+                            // Broadcast price + PnL update to frontend immediately
+                            let _ = ws_tx.send(serde_json::json!({
+                                "type": "price-update",
+                                "mint": mint,
+                                "price": price_in_sol_per_token,
+                                "profit_percent": profit_percent,
+                                "pnl_sol": pnl_sol,
+                                "buy_price": buy_price,
+                                "amount": amount
+                            }).to_string());
 
                             continue;
                         }

@@ -5,7 +5,7 @@ import { TrendingUp, TrendingDown, Target, Loader, Wallet } from 'lucide-react'
 import TradingPerformanceWidget from './TradingPerformanceWidget'
 
 export default function Dashboard() {
-  const { stats, historicalData, detectedCoins } = useBotStore()
+  const { stats, historicalData, detectedCoins, totalDetectedCoins } = useBotStore()
 
   // Generate chart data from historical data
   const chartData = useMemo(() => {
@@ -155,7 +155,7 @@ export default function Dashboard() {
                 New Tokens Detected
               </p>
               <h3 className="text-3xl sm:text-4xl md:text-5xl font-display font-black glow-text">
-                {detectedCoins?.length || 0}
+                {totalDetectedCoins || detectedCoins?.length || 0}
               </h3>
               {detectedCoins && detectedCoins.length > 0 && (
                 <p className="text-sm mt-3 text-gray-400 truncate">Latest: {detectedCoins[0].name || detectedCoins[0].symbol || detectedCoins[0].mint}</p>

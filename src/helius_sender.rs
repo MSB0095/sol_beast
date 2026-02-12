@@ -328,14 +328,20 @@ pub async fn send_transaction_via_helius(
     Err("Invalid response from Helius Sender".into())
 }
 
-/// Simulate a base64-encoded serialized transaction via Helius RPC endpoint.
-/// Uses JSON-RPC method `simulateTransaction` against `settings.helius_sender_endpoint`.
+/// Simulate a base64-encoded serialized transaction via standard RPC endpoint (not Sender).
+/// Uses JSON-RPC method `simulateTransaction` against `settings.solana_rpc_urls[0]`.
 pub async fn simulate_transaction_via_helius(
     tx_base64: &str,
     settings: &Settings,
 ) -> Result<Value, Box<dyn Error + Send + Sync>> {
     let client = reqwest::Client::new();
-    let endpoint = &settings.helius_sender_endpoint;
+    // Use standard RPC for simulation, as Sender endpoint usually doesn't support simulateTransaction
+    let endpoint = if !settings.solana_rpc_urls.is_empty() {
+        &settings.solana_rpc_urls[0]
+    } else {
+        return Err("No standard RPC URL configured for simulation".into());
+    };
+    
     let payload = json!({
         "jsonrpc": "2.0",
         "id": chrono::Utc::now().timestamp_millis().to_string(),

@@ -1,10 +1,9 @@
 import { useEffect } from 'react'
 import { useBotStore } from '../store/botStore'
 import { useSettingsStore } from '../store/settingsStore'
-import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft, User } from 'lucide-react'
+import { Activity, Settings, TrendingUp, FileText, Coins, ArrowRightLeft } from 'lucide-react'
 import { ThemeSwitcher } from './ThemeSwitcher'
 import BeastLogo from './BeastLogo'
-import WalletButton from './WalletButton'
 
 export default function Header() {
   const { status } = useBotStore()
@@ -38,7 +37,6 @@ export default function Header() {
     { id: 'trades', label: 'Trades', icon: ArrowRightLeft },
     { id: 'logs', label: 'Logs', icon: FileText },
     { id: 'configuration', label: 'Configuration', icon: Settings },
-    { id: 'profile', label: 'Profile', icon: User },
   ]
 
   return (
@@ -90,7 +88,6 @@ export default function Header() {
                 {status === 'connected' ? '[ONLINE]' : '[OFFLINE]'}
               </span>
             </div>
-            <WalletButton />
             <ThemeSwitcher />
           </div>
         </div>

@@ -4,6 +4,28 @@ use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
 use std::env;
 
+/// A single take-profit level: when profit reaches `trigger_percent`, sell `sell_percent`% of the original position.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct TpLevel {
+    pub trigger_percent: f64,
+    pub sell_percent: f64,
+}
+
+/// A single stop-loss level: when loss reaches `trigger_percent` (negative), sell `sell_percent`% of the original position.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct SlLevel {
+    pub trigger_percent: f64,
+    pub sell_percent: f64,
+}
+
+fn default_tp_levels() -> Vec<TpLevel> {
+    vec![TpLevel { trigger_percent: 30.0, sell_percent: 100.0 }]
+}
+
+fn default_sl_levels() -> Vec<SlLevel> {
+    vec![SlLevel { trigger_percent: -20.0, sell_percent: 100.0 }]
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
     pub solana_ws_urls: Vec<String>,
@@ -18,8 +40,12 @@ pub struct Settings {
     pub wallet_private_key_string: Option<String>,
     #[serde(default)]
     pub simulate_wallet_private_key_string: Option<String>,
-    pub tp_percent: f64,
-    pub sl_percent: f64,
+    /// Multi-level take-profit configuration (1-4 levels). Sum of sell_percent must be <= 100.
+    #[serde(default = "default_tp_levels")]
+    pub tp_levels: Vec<TpLevel>,
+    /// Multi-level stop-loss configuration (1-4 levels). Sum of sell_percent must be <= 100.
+    #[serde(default = "default_sl_levels")]
+    pub sl_levels: Vec<SlLevel>,
     pub timeout_secs: i64,
     pub cache_capacity: usize,
     pub price_cache_ttl_secs: u64,
@@ -76,13 +102,6 @@ pub struct Settings {
     pub helius_use_dynamic_tips: bool,
     #[serde(default = "default_helius_confirm_timeout_secs")]
     pub helius_confirm_timeout_secs: u64,
-    // Dev fee configuration
-    #[serde(default = "default_dev_fee_enabled")]
-    pub dev_fee_enabled: bool,
-    #[serde(default)]
-    pub dev_wallet_address: Option<String>,
-    #[serde(default = "default_dev_fee_percent")]
-    pub dev_fee_percent: f64,
     #[serde(default = "default_pumpportal_enabled")]
     pub pumpportal_enabled: bool,
     #[serde(default = "default_pumpportal_wss")]
@@ -93,7 +112,7 @@ pub struct Settings {
     pub default_token_decimals: u8,
 }
 
-fn default_token_decimals() -> u8 { 9 }
+fn default_token_decimals() -> u8 { 6 }
 
 impl Settings {
     pub fn from_file(path: &str) -> Result<Self, AppError> {
@@ -128,11 +147,11 @@ impl Settings {
         if other.buy_amount != self.buy_amount {
             self.buy_amount = other.buy_amount;
         }
-        if other.tp_percent != self.tp_percent {
-            self.tp_percent = other.tp_percent;
+        if other.tp_levels != self.tp_levels {
+            self.tp_levels = other.tp_levels.clone();
         }
-        if other.sl_percent != self.sl_percent {
-            self.sl_percent = other.sl_percent;
+        if other.sl_levels != self.sl_levels {
+            self.sl_levels = other.sl_levels.clone();
         }
         if other.timeout_secs != self.timeout_secs {
             self.timeout_secs = other.timeout_secs;
@@ -185,15 +204,7 @@ impl Settings {
         if other.helius_priority_fee_multiplier != self.helius_priority_fee_multiplier {
             self.helius_priority_fee_multiplier = other.helius_priority_fee_multiplier;
         }
-        if other.dev_fee_enabled != self.dev_fee_enabled {
-            self.dev_fee_enabled = other.dev_fee_enabled;
-        }
-        if other.dev_wallet_address != self.dev_wallet_address {
-            self.dev_wallet_address = other.dev_wallet_address.clone();
-        }
-        if (other.dev_fee_percent - self.dev_fee_percent).abs() > std::f64::EPSILON {
-            self.dev_fee_percent = other.dev_fee_percent;
-        }
+
         if other.enable_safer_sniping != self.enable_safer_sniping {
             self.enable_safer_sniping = other.enable_safer_sniping;
         }
@@ -237,12 +248,48 @@ impl Settings {
 
     /// Validate settings ranges and constraints
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.tp_percent <= 0.0 {
-            return Err(AppError::Validation("tp_percent must be > 0".to_string()));
+        // Validate TP levels
+        if self.tp_levels.is_empty() {
+            return Err(AppError::Validation("At least one TP level is required".to_string()));
         }
-        if self.sl_percent >= 0.0 {
-            return Err(AppError::Validation("sl_percent must be < 0".to_string()));
+        if self.tp_levels.len() > 4 {
+            return Err(AppError::Validation("Maximum 4 TP levels allowed".to_string()));
         }
+        let mut tp_sell_sum = 0.0;
+        for (i, level) in self.tp_levels.iter().enumerate() {
+            if level.trigger_percent <= 0.0 {
+                return Err(AppError::Validation(format!("TP level {} trigger_percent must be > 0", i + 1)));
+            }
+            if level.sell_percent <= 0.0 || level.sell_percent > 100.0 {
+                return Err(AppError::Validation(format!("TP level {} sell_percent must be between 0 and 100", i + 1)));
+            }
+            tp_sell_sum += level.sell_percent;
+        }
+        if tp_sell_sum > 100.0 + f64::EPSILON {
+            return Err(AppError::Validation(format!("TP levels sell_percent sum ({:.1}%) must be <= 100%", tp_sell_sum)));
+        }
+
+        // Validate SL levels
+        if self.sl_levels.is_empty() {
+            return Err(AppError::Validation("At least one SL level is required".to_string()));
+        }
+        if self.sl_levels.len() > 4 {
+            return Err(AppError::Validation("Maximum 4 SL levels allowed".to_string()));
+        }
+        let mut sl_sell_sum = 0.0;
+        for (i, level) in self.sl_levels.iter().enumerate() {
+            if level.trigger_percent >= 0.0 {
+                return Err(AppError::Validation(format!("SL level {} trigger_percent must be < 0", i + 1)));
+            }
+            if level.sell_percent <= 0.0 || level.sell_percent > 100.0 {
+                return Err(AppError::Validation(format!("SL level {} sell_percent must be between 0 and 100", i + 1)));
+            }
+            sl_sell_sum += level.sell_percent;
+        }
+        if sl_sell_sum > 100.0 + f64::EPSILON {
+            return Err(AppError::Validation(format!("SL levels sell_percent sum ({:.1}%) must be <= 100%", sl_sell_sum)));
+        }
+
         if self.buy_amount <= 0.0 {
             return Err(AppError::Validation("buy_amount must be > 0".to_string()));
         }
@@ -257,9 +304,6 @@ impl Settings {
         }
         if self.max_liquidity_sol < self.min_liquidity_sol {
             return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
-        }
-        if self.dev_fee_percent < 0.0 || self.dev_fee_percent > 100.0 {
-            return Err(AppError::Validation("dev_fee_percent must be between 0 and 100".to_string()));
         }
         Ok(())
     }
@@ -335,8 +379,6 @@ fn default_helius_min_tip_sol() -> f64 { 0.001 }
 fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
 fn default_helius_use_dynamic_tips() -> bool { true }
 fn default_helius_confirm_timeout_secs() -> u64 { 15 }
-fn default_dev_fee_enabled() -> bool { true }
-fn default_dev_fee_percent() -> f64 { 2.0 }
 fn default_pumpportal_enabled() -> bool { false }
 fn default_pumpportal_wss() -> Vec<String> { vec!["wss://pumpportal.fun/api/data".to_string()] }
 
@@ -367,8 +409,13 @@ mod tests {
         // config without panicking and that a couple of fields match expected
         // placeholder values from `config.example.toml`.
         let s = Settings::from_file("config.example.toml").unwrap();
-        assert_eq!(s.tp_percent, 30.0);
-        assert_eq!(s.sl_percent, -20.0);
+        assert_eq!(s.tp_levels.len(), 2);
+        assert_eq!(s.tp_levels[0].trigger_percent, 30.0);
+        assert_eq!(s.tp_levels[0].sell_percent, 50.0);
+        assert_eq!(s.tp_levels[1].trigger_percent, 100.0);
+        assert_eq!(s.tp_levels[1].sell_percent, 50.0);
+        assert_eq!(s.sl_levels.len(), 1);
+        assert_eq!(s.sl_levels[0].trigger_percent, -20.0);
         assert_eq!(s.cache_capacity, 1024);
     }
 }

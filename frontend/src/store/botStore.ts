@@ -59,6 +59,14 @@ export interface LogEntry {
   details?: string
 }
 
+export interface PriceUpdate {
+  price: number
+  profit_percent: number
+  pnl_sol: number
+  buy_price: number
+  amount: number
+}
+
 interface BotStore {
   status: BotStatus
   stats: BotStats | null
@@ -70,6 +78,9 @@ interface BotStore {
   historicalData: HistoricalDataPoint[]
   lastStatUpdate: number
   detectedCoins: any[]
+  totalDetectedCoins: number
+  prices: Record<string, PriceUpdate>
+  ws: WebSocket | null
   initializeConnection: () => Promise<void>
   updateStatus: (status: BotStatus) => void
   updateStats: (stats: BotStats) => void
@@ -94,6 +105,9 @@ export const useBotStore = create<BotStore>((set, get) => ({
   historicalData: [],
   lastStatUpdate: 0,
   detectedCoins: [],
+  totalDetectedCoins: 0,
+  prices: {},
+  ws: null,
   
   initializeConnection: async () => {
     try {
@@ -178,8 +192,14 @@ export const useBotStore = create<BotStore>((set, get) => ({
           try {
             const res = await fetch(API_DETECTED_COINS_URL)
             if (res.ok) {
-              const coins = await res.json()
-              set({ detectedCoins: coins })
+              const data = await res.json()
+              // New format: { coins: [...], total: N }
+              if (data && typeof data.total === 'number') {
+                set({ detectedCoins: data.coins || [], totalDetectedCoins: data.total })
+              } else if (Array.isArray(data)) {
+                // Legacy fallback
+                set({ detectedCoins: data })
+              }
             }
           } catch (err) {
             console.error('Failed to fetch detected coins:', err)
@@ -199,6 +219,71 @@ export const useBotStore = create<BotStore>((set, get) => ({
         }, 2000)
         
         set({ pollInterval: interval as unknown as number })
+
+        // Initialize WebSocket connection
+        try {
+          // Construct WS URL from API_HEALTH_URL (http://host:port/api/health -> ws://host:port/api/ws)
+          const wsUrl = API_HEALTH_URL.replace('http', 'ws').replace('/health', '/ws')
+          const ws = new WebSocket(wsUrl)
+          
+          ws.onopen = () => {
+             console.log('WebSocket connected')
+          }
+          
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data)
+              
+              if (msg.type === 'initial') {
+                 set({ 
+                   detectedCoins: msg.detected_coins || [],
+                   totalDetectedCoins: msg.total_detected_coins || (msg.detected_coins || []).length,
+                   stats: {
+                     ...get().stats!,
+                     current_holdings: msg.holdings || []
+                   }
+                  })
+              } else if (msg.type === 'detected-coin') {
+                 set(state => ({
+                   detectedCoins: [msg.coin, ...state.detectedCoins].slice(0, 300),
+                   totalDetectedCoins: msg.total_detected_coins || state.totalDetectedCoins + 1
+                 }))
+              } else if (msg.type === 'price-update') {
+                 set(state => ({
+                   prices: {
+                     ...state.prices,
+                     [msg.mint]: {
+                       price: msg.price,
+                       profit_percent: msg.profit_percent || 0,
+                       pnl_sol: msg.pnl_sol || 0,
+                       buy_price: msg.buy_price || 0,
+                       amount: msg.amount || 0
+                     }
+                   }
+                 }))
+              } else if (msg.type === 'holding-update') {
+                 set(state => ({
+                   stats: {
+                      ...state.stats!,
+                      current_holdings: msg.holdings
+                   }
+                 }))
+              }
+            } catch (e) {
+              console.error('Failed to parse WS message:', e)
+            }
+          }
+          
+          ws.onclose = () => {
+            console.log('WebSocket disconnected')
+            // Reconnection logic could go here if needed, but for now rely on re-init
+          }
+          
+          set({ ws })
+        } catch (e) {
+          console.error('WebSocket init failed:', e)
+        }
+
       } else {
         set({ status: 'disconnected', error: 'Backend not available' })
         // Stop polling if interval exists

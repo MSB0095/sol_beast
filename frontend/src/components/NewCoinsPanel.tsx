@@ -26,7 +26,12 @@ export default function NewCoinsPanel() {
         if (response.ok) {
           const data = await response.json()
           console.debug('Detected coins response:', data)
-          setCoins(data)
+          // API returns { coins: [...], total: N }
+          if (data && Array.isArray(data.coins)) {
+            setCoins(data.coins)
+          } else if (Array.isArray(data)) {
+            setCoins(data)
+          }
         }
       } catch (error) {
         console.error('Failed to fetch detected coins:', error)

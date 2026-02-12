@@ -1,177 +1,38 @@
-# ==================== RPC & WebSocket Configuration ====================
 solana_ws_urls = ["wss://api.mainnet-beta.solana.com/"]
 solana_rpc_urls = ["https://api.mainnet-beta.solana.com/"]
-
-# Program addresses (don't change unless pump.fun migrates)
 pump_fun_program = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 metadata_program = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
-
-# ==================== Wallet Configuration ====================
-# REAL TRADING WALLET (choose ONE of the following):
-# Option 1: File path to keypair.json
 wallet_keypair_path = "./keypair.json"
-
-# Option 2: Base58-encoded private key (RECOMMENDED for quick setup)
-# wallet_private_key_string = "5J..."  # 88-character base58 private key
-
-# Option 3: JSON array of 64 bytes
-# wallet_keypair_json = "[1,2,3,...]"
-
-# Option 4: Environment variable (MOST SECURE - recommended for production)
-# export SOL_BEAST_KEYPAIR_B64=$(cat keypair.json | base64 -w0)
-
-# SIMULATION WALLET (for testing transactions with funded account)
-# This wallet must have SOL but will NEVER be used for real transactions
-# Use this to test transaction simulation with realistic account states
-# simulate_wallet_private_key_string = "YOUR_TEST_WALLET_BASE58_KEY"
-
-# ==================== Trading Strategy ====================
-# Take profit percentage (e.g., 30 = sell when +30% profit)
-tp_percent = 30.0
-
-# Stop loss percentage (e.g., -20 = sell when -20% loss)
-sl_percent = -20.0
-
-# Maximum holding time in seconds before auto-sell
-timeout_secs = 3600
-
-# Amount of SOL to spend per buy
-buy_amount = 0.1
-
-# ==================== Safety & Sniping Filters ====================
-# Enable safer sniping filters (recommended for beginners)
-enable_safer_sniping = true
-
-# Minimum tokens you must receive (prevents buying expensive/late coins)
-# Example: 1,000,000 tokens minimum with 1 SOL buy = max price of 0.000001 SOL/token
-min_tokens_threshold = 1000000
-
-# Maximum price per token in SOL (additional price ceiling)
-# Example: 0.0001 SOL = won't buy if token costs more than 0.0001 SOL each
-max_sol_per_token = 0.0001
-
-# Slippage tolerance in basis points (500 = 5%)
-# Higher values = more likely to succeed but worse price
-slippage_bps = 500
-
-# Liquidity filters (bonding curve SOL reserves)
-# min_liquidity_sol: Minimum SOL in curve (too low = too early/risky)
-# max_liquidity_sol: Maximum SOL in curve (too high = too late)
-min_liquidity_sol = 0.0
-max_liquidity_sol = 100.0
-
-# ==================== Timing Configuration ====================
-# Maximum time from coin CREATE to BUY attempt (seconds)
-# This is measured from blockTime of creation tx to when buy is attempted
-# Lower = only snipe very fresh coins, Higher = accept older coins
-max_create_to_buy_secs = 30
-
-# ==================== Position Management ====================
-# Maximum number of coins to hold simultaneously
-max_holded_coins = 100
-
-# ==================== Price Data Source ====================
-# Price source: "wss" (WebSocket), "rpc" (HTTP), or "hybrid"
-price_source = "wss"
-
-# ==================== RPC Rotation ====================
-rotate_rpc = true
-rpc_rotate_interval_secs = 60
-
-# ==================== WebSocket Configuration ====================
-# Maximum subscriptions per WebSocket connection
-max_subs_per_wss = 4
-
-# Subscription time-to-live (seconds)
-sub_ttl_secs = 900
-
-# Timeout waiting for WebSocket subscription confirmation
-wss_subscribe_timeout_secs = 6
-
-# ==================== Caching ====================
+timeout_secs = 30
+tp_levels = [{trigger_percent = 30.0, sell_percent = 50.0}, {trigger_percent = 100.0, sell_percent = 50.0}]
+sl_levels = [{trigger_percent = -20.0, sell_percent = 100.0}]
 cache_capacity = 1024
 price_cache_ttl_secs = 30
-
-# ==================== Advanced Options ====================
-# Strict bonding curve validation
+buy_amount = 0.1
+price_source = "wss"
+rotate_rpc = true
+rpc_rotate_interval_secs = 60
+max_holded_coins = 1
+max_subs_per_wss = 2
+sub_ttl_secs = 900
+wss_subscribe_timeout_secs = 6
+max_create_to_buy_secs = 30
 bonding_curve_strict = false
-
-# Debounce time for bonding curve log messages (seconds)
 bonding_curve_log_debounce_secs = 300
-
-# ==================== Helius Sender Configuration ====================
-# Enable Helius Sender for ultra-low latency transaction submission
-# When enabled, transactions are sent to both validators and Jito infrastructure
-# Requires: minimum tip (default 0.001 SOL) and priority fees
-helius_sender_enabled = false
-
-# Optional: Helius API key (for custom TPS limits)
-# Leave empty/commented for default 15 TPS limit
-# Get your key from: https://dashboard.helius.dev/api-keys
-# helius_api_key = "your-helius-api-key-here"
-
-# Helius Sender endpoint (default: global HTTPS for frontend/browser)
-# For backend/server applications, use regional HTTP endpoints for better performance:
-#   - http://slc-sender.helius-rpc.com/fast  (Salt Lake City)
-#   - http://ewr-sender.helius-rpc.com/fast  (Newark)
-#   - http://lon-sender.helius-rpc.com/fast  (London)
-#   - http://fra-sender.helius-rpc.com/fast  (Frankfurt)
-#   - http://ams-sender.helius-rpc.com/fast  (Amsterdam)
-#   - http://sg-sender.helius-rpc.com/fast   (Singapore)
-#   - http://tyo-sender.helius-rpc.com/fast  (Tokyo)
+min_tokens_threshold = 1000000
+max_sol_per_token = 0.0001
+slippage_bps = 500
+enable_safer_sniping = true
+min_liquidity_sol = 0.0
+max_liquidity_sol = 100.0
+helius_sender_enabled = true
 helius_sender_endpoint = "https://sender.helius-rpc.com/fast"
-
-# Minimum tip amount in SOL (required by Helius Sender)
-# Default dual routing: 0.001 SOL minimum
-# SWQOS-only mode: 0.000005 SOL minimum (see helius_use_swqos_only below)
-# For competitive trading, consider higher tips (e.g., 0.005-0.01 SOL)
 helius_min_tip_sol = 0.001
-
-# Priority fee multiplier for recommended fees
-# Applied to Helius Priority Fee API recommendations
-# Default: 1.2 (20% above recommended for better inclusion)
 helius_priority_fee_multiplier = 1.2
-
-# Routing mode: Dual Routing (default) vs SWQOS-Only
-# false (default) = Dual Routing: sends to both validators AND Jito infrastructure
-#                   - Maximum inclusion probability
-#                   - Requires minimum 0.001 SOL tip
-#                   - Best for time-critical transactions
-# 
-# true = SWQOS-Only: routes exclusively through SWQOS infrastructure
-#        - Cost-optimized (lower tip requirement: 0.000005 SOL minimum)
-#        - Good for less time-critical trades
-#        - Automatically appends ?swqos_only=true to endpoint URL
-helius_use_swqos_only = false
-
-# Dynamic tips from Jito API (recommended for dual routing)
-# true (default) = Fetch 75th percentile tip amount from Jito API for dual routing
-#                  - Automatically adjusts to current network conditions
-#                  - Falls back to helius_min_tip_sol if API fails
-#                  - SWQOS-only always uses minimum regardless of this setting
-# 
-# false = Always use static helius_min_tip_sol value
-#         - Predictable costs
-#         - May result in lower inclusion probability during high competition
+helius_use_swqos_only = true
 helius_use_dynamic_tips = true
-
-# Transaction confirmation timeout (seconds)
-# How long to wait for transaction confirmation after sending
-# Default: 15 seconds (0 = don't wait for confirmation, return signature immediately)
-# Note: Confirmation checking is currently disabled by default in send_transaction_with_retry
-#       Uncomment the confirmation code block to enable
 helius_confirm_timeout_secs = 15
-
-# ==================== Dev Fee Configuration ====================
-# Enable 2% dev fee on all buy/sell transactions
-# This fee is enforced by the backend and includes anti-copycat protection
-dev_fee_enabled = true
-
-# Optional: Override dev wallet address (use default if not specified)
-# dev_wallet_address = "YourDevWalletAddressHere"
-
-# PumpPortal websocket integration
-# Enable receiving new-token events from PumpPortal (avoid opening multiple connections)
 pumpportal_enabled = true
-# Array of PumpPortal websocket endpoints (single connection recommended)
 pumpportal_wss = ["wss://pumpportal.fun/api/data"]
+detected_coins_max = 300
+default_token_decimals = 9

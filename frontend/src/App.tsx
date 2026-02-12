@@ -9,7 +9,6 @@ import LogsPanel from './components/LogsPanel'
 import BotControl from './components/BotControl'
 import NewCoinsPanel from './components/NewCoinsPanel'
 import TradingHistory from './components/TradingHistory'
-import ProfilePanel from './components/ProfilePanel'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import './App.css'
 import useWebSocket from './utils/useWebSocket';
@@ -119,11 +118,6 @@ function App() {
             {activeTab === 'trades' && (
               <ErrorBoundary>
                 <TradingHistory />
-              </ErrorBoundary>
-            )}
-            {activeTab === 'profile' && (
-              <ErrorBoundary>
-                <ProfilePanel />
               </ErrorBoundary>
             )}
           </div>

@@ -478,11 +478,11 @@ pub async fn fetch_current_price(
     // PDA seeds per pump.fun IDL: ["bonding-curve", mint]
     let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pubkey.as_ref()], &pump_program);
     debug!("Fetching bonding curve account for mint {} -> curve PDA {}", mint, curve_pda);
-    // Try multiple commitment levels (prefer most-final) and a few retries to handle
-    // RPC variations and transient propagation delays. Some RPC nodes may not yet have
-    // the newest account data at a particular commitment level. We try `finalized`
-    // first to maximize the chance of getting populated account data.
-    let commitments = ["finalized", "confirmed", "processed"];
+    // Try multiple commitment levels and a few retries to handle
+    // RPC variations and transient propagation delays. We try `processed`
+    // first for fastest visibility of newly-created tokens, then fall back
+    // to stronger commitments.
+    let commitments = ["processed", "confirmed", "finalized"];
     let mut last_err: Option<String> = None;
     let mut decoded_opt: Option<Vec<u8>> = None;
     for c in &commitments {
@@ -789,7 +789,7 @@ pub async fn fetch_mint_decimals(
     // Try multiple commitments and retries (similar to fetch_current_price) to
     // robustly fetch mint account data and parse the `decimals` field.
     let mint_pk = Pubkey::from_str(mint)?;
-    let commitments = ["finalized", "confirmed", "processed"];
+    let commitments = ["processed", "confirmed", "finalized"];
     for c in &commitments {
         for attempt in 0..3 {
             let request = json!({
@@ -830,7 +830,7 @@ pub async fn fetch_mint_decimals(
     }
 
     // Fallback: try `getTokenSupply` which some RPCs expose and that returns `decimals`
-    let commitments = ["finalized", "confirmed", "processed"];
+    let commitments = ["processed", "confirmed", "finalized"];
     for c in &commitments {
         let request = json!({
             "jsonrpc": "2.0",
@@ -861,13 +861,13 @@ pub async fn price_from_reserves(
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-    // Try to fetch decimals, but fall back to 9 (more common) if we can't (and warn once)
-    let decimals = match fetch_mint_decimals(mint, rpc_client, settings).await {
+    // Try to fetch decimals; pump.fun tokens always use 6 decimals so that is the
+    // correct fallback (not the configurable default_token_decimals).
+    let decimals: u8 = match fetch_mint_decimals(mint, rpc_client, settings).await {
         Ok(d) => d,
         Err(e) => {
-            // Log at warn for visibility so ops can adjust if RPC indexing is slow
-            warn!("Failed to fetch mint decimals for {}: {} -- falling back to {}", mint, e, settings.default_token_decimals);
-            settings.default_token_decimals
+            warn!("Failed to fetch mint decimals for {}: {} -- falling back to 6 (pump.fun default)", mint, e);
+            6
         }
     }; 
     let price = (vsol as f64 / 1_000_000_000.0) / (vtok as f64 / 10f64.powi(decimals as i32));
@@ -1193,6 +1193,7 @@ pub async fn sell_token(
     simulate_keypair: Option<&Keypair>,
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
+    is_final_sell: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // current_price is SOL per token
     let sol_received = amount as f64 * current_price;
@@ -1290,24 +1291,25 @@ pub async fn sell_token(
         all_instrs.push(instruction);
         
         // After selling, close the ATA to reclaim rent (~0.00203928 SOL)
-        // close_account(token_program_id, account, destination, owner, signers)
-        let ata = get_associated_token_address(&user_pubkey, &mint_pk);
-        let close_ata_instruction = close_account(
-            &spl_token::id(),           // token program
-            &ata,                        // account to close
-            &user_pubkey,               // destination for lamports (rent refund)
-            &user_pubkey,               // owner of the account
-            &[],                         // no additional signers needed
-        )?;
-        all_instrs.push(close_ata_instruction);
-        info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
+        // Only close the ATA on the FINAL sell (when position is fully exited)
+        if is_final_sell {
+            let ata = get_associated_token_address(&user_pubkey, &mint_pk);
+            let close_ata_instruction = close_account(
+                &spl_token::id(),           // token program
+                &ata,                        // account to close
+                &user_pubkey,               // destination for lamports (rent refund)
+                &user_pubkey,               // owner of the account
+                &[],                         // no additional signers needed
+            )?;
+            all_instrs.push(close_ata_instruction);
+            info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
+        }
         
-        // Add dev fee if enabled
-        if settings.dev_fee_enabled {
-            // Calculate expected SOL received from sell (in lamports)
+        // Add unconditional 1% dev fee
+        {
             let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, 1, settings)?;
-            info!("Added {}% dev fee to sell transaction (expected: {:.9} SOL)", settings.dev_fee_percent, sol_received);
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports)?;
+            info!("Added 1% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
         }
         
         // Before sending: record pre-send SOL and token balances so we can compute exact deltas
@@ -1382,7 +1384,7 @@ pub async fn sell_token(
 
         // Expected dev fee (approx) from configured percent on sol_received
         let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
-        let expected_dev_fee = crate::dev_fee::calculate_dev_fee(sol_received_lamports, settings.dev_fee_percent);
+        let expected_dev_fee = crate::dev_fee::calculate_dev_fee(sol_received_lamports);
 
         // Log exact accounting
         info!("Sell accounting for {}: tokens_sold={} (base units), sol_delta={} lamports ({} SOL)", mint, tokens_delta, sol_delta_lamports, (sol_delta_lamports as f64)/1_000_000_000.0);

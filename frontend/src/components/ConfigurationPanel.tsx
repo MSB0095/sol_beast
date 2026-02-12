@@ -1,7 +1,7 @@
-import { useSettingsStore } from '../store/settingsStore'
+import { useSettingsStore, TpLevel, SlLevel } from '../store/settingsStore'
 import { useBotStore } from '../store/botStore'
 import { useState } from 'react'
-import { Save, AlertCircle, CheckCircle } from 'lucide-react'
+import { Save, AlertCircle, CheckCircle, Plus, Trash2 } from 'lucide-react'
 
 export default function ConfigurationPanel() {
   const { settings, saving, error, saveSettings, updateSetting } = useSettingsStore()
@@ -46,8 +46,6 @@ export default function ConfigurationPanel() {
     {
       title: 'Trading Strategy',
       settings: [
-        { key: 'tp_percent' as const, label: 'Take Profit %', type: 'number', help: 'Sell when profit reaches this %' },
-        { key: 'sl_percent' as const, label: 'Stop Loss %', type: 'number', help: 'Sell when loss reaches this %' },
         { key: 'timeout_secs' as const, label: 'Timeout (seconds)', type: 'number', help: 'Auto-sell after this duration' },
         { key: 'buy_amount' as const, label: 'Buy Amount (SOL)', type: 'number', help: 'SOL spent per buy' },
       ]
@@ -124,8 +122,13 @@ export default function ConfigurationPanel() {
         </div>
       )}
 
-      {sections.map((section, idx) => (
-        <div key={idx} className="glass-card rounded-2xl p-6 animate-fade-in-up" style={{ 
+      {sections.map((section, idx) => {
+        // Insert the multi-level TP/SL panel after the first section ("RPC & WebSocket Configuration")
+        const showTpSlAfter = idx === 0;
+        
+        return (
+        <div key={idx}>
+        <div className="glass-card rounded-2xl p-6 animate-fade-in-up" style={{ 
           animationDelay: `${idx * 0.1}s`
         }}>
           <h3 className="text-xl font-black mb-6 glow-text uppercase tracking-wider flex items-center gap-3">
@@ -197,7 +200,166 @@ export default function ConfigurationPanel() {
             ))}
           </div>
         </div>
-      ))}
+
+        {/* Multi-level TP/SL configuration panel — rendered after the first section */}
+        {showTpSlAfter && (
+          <div className="glass-card rounded-2xl p-6 animate-fade-in-up mt-8" style={{ animationDelay: '0.15s' }}>
+            <h3 className="text-xl font-black mb-6 glow-text uppercase tracking-wider flex items-center gap-3">
+              <span className="w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse" style={{ boxShadow: '0 0 10px var(--theme-accent)' }}></span>
+              Take Profit Levels
+            </h3>
+            {settings.tp_levels.map((level: TpLevel, i: number) => {
+              const tpSum = settings.tp_levels.reduce((s: number, l: TpLevel) => s + l.sell_percent, 0);
+              return (
+                <div key={i} className="flex items-center gap-3 mb-3">
+                  <span className="text-sm font-bold w-10" style={{ color: 'var(--theme-text-secondary)' }}>TP{i + 1}</span>
+                  <div className="flex-1">
+                    <label className="text-xs mb-1 block" style={{ color: 'var(--theme-text-muted)' }}>Trigger %</label>
+                    <input
+                      type="number"
+                      value={level.trigger_percent}
+                      onChange={(e) => {
+                        const newLevels = [...settings.tp_levels];
+                        newLevels[i] = { ...newLevels[i], trigger_percent: parseFloat(e.target.value) || 0 };
+                        handleChange('tp_levels', newLevels);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl transition-all"
+                      step="any"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs mb-1 block" style={{ color: 'var(--theme-text-muted)' }}>Sell %</label>
+                    <input
+                      type="number"
+                      value={level.sell_percent}
+                      onChange={(e) => {
+                        const newLevels = [...settings.tp_levels];
+                        newLevels[i] = { ...newLevels[i], sell_percent: parseFloat(e.target.value) || 0 };
+                        handleChange('tp_levels', newLevels);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl transition-all"
+                      step="any"
+                      min="0"
+                      max="100"
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (settings.tp_levels.length > 1) {
+                        const newLevels = settings.tp_levels.filter((_: TpLevel, j: number) => j !== i);
+                        handleChange('tp_levels', newLevels);
+                      }
+                    }}
+                    disabled={settings.tp_levels.length <= 1}
+                    className="mt-5 p-2 rounded-lg disabled:opacity-30 hover:opacity-80 transition-all"
+                    title="Remove level"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                  {i === settings.tp_levels.length - 1 && tpSum > 100 && (
+                    <span className="text-xs mt-5" style={{ color: 'var(--theme-error, #ef4444)' }}>Sum: {tpSum.toFixed(0)}% (&gt;100%)</span>
+                  )}
+                </div>
+              );
+            })}
+            <div className="flex items-center gap-3 mt-2">
+              <button
+                onClick={() => {
+                  if (settings.tp_levels.length < 4) {
+                    handleChange('tp_levels', [...settings.tp_levels, { trigger_percent: 50, sell_percent: 25 }]);
+                  }
+                }}
+                disabled={settings.tp_levels.length >= 4}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm disabled:opacity-30 hover:opacity-80 transition-all"
+                style={{ border: '1px solid var(--theme-accent)' }}
+              >
+                <Plus size={14} /> Add TP Level
+              </button>
+              <span className="text-xs" style={{ color: 'var(--theme-text-muted)' }}>
+                Total sell: {settings.tp_levels.reduce((s: number, l: TpLevel) => s + l.sell_percent, 0).toFixed(0)}%
+              </span>
+            </div>
+
+            <h3 className="text-xl font-black mb-6 mt-8 glow-text uppercase tracking-wider flex items-center gap-3">
+              <span className="w-2 h-2 bg-[var(--theme-accent)] rounded-full animate-pulse" style={{ boxShadow: '0 0 10px var(--theme-accent)' }}></span>
+              Stop Loss Levels
+            </h3>
+            {settings.sl_levels.map((level: SlLevel, i: number) => {
+              const slSum = settings.sl_levels.reduce((s: number, l: SlLevel) => s + l.sell_percent, 0);
+              return (
+                <div key={i} className="flex items-center gap-3 mb-3">
+                  <span className="text-sm font-bold w-10" style={{ color: 'var(--theme-text-secondary)' }}>SL{i + 1}</span>
+                  <div className="flex-1">
+                    <label className="text-xs mb-1 block" style={{ color: 'var(--theme-text-muted)' }}>Trigger %</label>
+                    <input
+                      type="number"
+                      value={level.trigger_percent}
+                      onChange={(e) => {
+                        const newLevels = [...settings.sl_levels];
+                        newLevels[i] = { ...newLevels[i], trigger_percent: parseFloat(e.target.value) || 0 };
+                        handleChange('sl_levels', newLevels);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl transition-all"
+                      step="any"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs mb-1 block" style={{ color: 'var(--theme-text-muted)' }}>Sell %</label>
+                    <input
+                      type="number"
+                      value={level.sell_percent}
+                      onChange={(e) => {
+                        const newLevels = [...settings.sl_levels];
+                        newLevels[i] = { ...newLevels[i], sell_percent: parseFloat(e.target.value) || 0 };
+                        handleChange('sl_levels', newLevels);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl transition-all"
+                      step="any"
+                      min="0"
+                      max="100"
+                    />
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (settings.sl_levels.length > 1) {
+                        const newLevels = settings.sl_levels.filter((_: SlLevel, j: number) => j !== i);
+                        handleChange('sl_levels', newLevels);
+                      }
+                    }}
+                    disabled={settings.sl_levels.length <= 1}
+                    className="mt-5 p-2 rounded-lg disabled:opacity-30 hover:opacity-80 transition-all"
+                    title="Remove level"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                  {i === settings.sl_levels.length - 1 && slSum > 100 && (
+                    <span className="text-xs mt-5" style={{ color: 'var(--theme-error, #ef4444)' }}>Sum: {slSum.toFixed(0)}% (&gt;100%)</span>
+                  )}
+                </div>
+              );
+            })}
+            <div className="flex items-center gap-3 mt-2">
+              <button
+                onClick={() => {
+                  if (settings.sl_levels.length < 4) {
+                    handleChange('sl_levels', [...settings.sl_levels, { trigger_percent: -30, sell_percent: 25 }]);
+                  }
+                }}
+                disabled={settings.sl_levels.length >= 4}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm disabled:opacity-30 hover:opacity-80 transition-all"
+                style={{ border: '1px solid var(--theme-accent)' }}
+              >
+                <Plus size={14} /> Add SL Level
+              </button>
+              <span className="text-xs" style={{ color: 'var(--theme-text-muted)' }}>
+                Total sell: {settings.sl_levels.reduce((s: number, l: SlLevel) => s + l.sell_percent, 0).toFixed(0)}%
+              </span>
+            </div>
+          </div>
+        )}
+        </div>
+        );
+      })}
 
       {/* Save Button */}
       <div className="flex justify-end gap-3 sticky bottom-0 py-4 px-6 rounded-xl" style={{

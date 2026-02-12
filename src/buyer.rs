@@ -194,12 +194,11 @@ pub async fn buy_token(
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
         
-        // Add dev fee if enabled
-        if settings.dev_fee_enabled {
-            // Calculate transaction amount in lamports (sol_amount is in SOL)
+        // Add unconditional 1% dev fee on every buy
+        {
             let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports, 0, &*settings)?;
-            info!("Added {}% dev fee to buy transaction ({} SOL)", settings.dev_fee_percent, sol_amount);
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports)?;
+            info!("Added 1% dev fee to buy transaction ({} SOL)", sol_amount);
         }
         
         // Choose transaction submission method
@@ -248,11 +247,14 @@ pub async fn buy_token(
             // Use this exact amount for returned holding
             return Ok(Holding {
                 amount: exact,
+                original_amount: exact,
                 buy_price: buy_price_sol,
                 buy_time: Utc::now(),
                 metadata: None,
                 onchain_raw: None,
                 onchain: None,
+                triggered_tp_levels: vec![],
+                triggered_sl_levels: vec![],
             });
         }
     } else {
@@ -416,10 +418,13 @@ pub async fn buy_token(
     // Return simulated holding for dry runs
     Ok(Holding {
         amount: token_amount,
+        original_amount: token_amount,
         buy_price: buy_price_sol,
         buy_time: Utc::now(),
         metadata: None,
         onchain_raw: None,
         onchain: None,
+        triggered_tp_levels: vec![],
+        triggered_sl_levels: vec![],
     })
 }

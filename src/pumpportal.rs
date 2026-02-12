@@ -113,27 +113,29 @@ pub async fn run_pumpportal_ws(
 
             // Mint: tolerate noisy PumpPortal values and trim whitespace
             if let Some(raw_mint) = get_str(&v, &["mint", "mintAddress", "tokenMint", "mintAddr", "mint_addr", "mintAddrStr", "mintPubkey", "mint_pubkey", "token_mint"]) {
-                // Normalize: remove trailing punctuation and common 'pump' variants case-insensitively
+                // Normalize: trim whitespace first
                 let mut mint = raw_mint.trim().to_string();
-                // strip trailing non-alphanumeric characters first
+                // strip trailing non-alphanumeric characters
                 while mint.ends_with(|c: char| !c.is_ascii_alphanumeric()) { mint.pop(); }
-                // strip trailing case-insensitive "pump" (with optional punctuation/spaces before it)
-                loop {
-                    let low = mint.to_lowercase();
-                    if low.ends_with("pump") {
-                        mint.truncate(mint.len() - 4);
-                        mint = mint.trim().to_string();
-                        // strip trailing punctuation again
-                        while mint.ends_with(|c: char| !c.is_ascii_alphanumeric()) { mint.pop(); }
-                        continue;
-                    }
-                    break;
-                }
-                // Validate it's a Pubkey-like string before accepting
+
+                // First, try the mint as-is (some valid pubkeys can end with "pump")
                 if Pubkey::from_str(&mint).is_ok() {
                     pumpobj.insert("mint".to_string(), Value::String(mint));
                 } else {
-                    debug!("PumpPortal sanitized mint is not valid pubkey, skipping: {}", mint);
+                    // If invalid, try a single trailing "pump" trim (case-insensitive)
+                    let mut trimmed = mint.clone();
+                    let low = trimmed.to_lowercase();
+                    if low.ends_with("pump") {
+                        trimmed.truncate(trimmed.len() - 4);
+                        trimmed = trimmed.trim().to_string();
+                        while trimmed.ends_with(|c: char| !c.is_ascii_alphanumeric()) { trimmed.pop(); }
+                    }
+
+                    if Pubkey::from_str(&trimmed).is_ok() {
+                        pumpobj.insert("mint".to_string(), Value::String(trimmed));
+                    } else {
+                        debug!("PumpPortal mint is not valid pubkey, skipping: {}", mint);
+                    }
                 }
             }
 
@@ -187,8 +189,42 @@ pub async fn run_pumpportal_ws(
             // Bonding state / reserves normalization
             // Accept multiple naming conventions and normalize to virtual_token_reserves / virtual_sol_reserves
             let mut bstate_map = serde_json::Map::new();
-            if let Some(vtok) = get_num_u64(&v, &["vTokensInBondingCurve", "v_tokens_in_bonding_curve", "v_tokens", "virtual_token_reserves", "vTokens"]) {
-                bstate_map.insert("virtual_token_reserves".to_string(), Value::Number(serde_json::Number::from(vtok)));
+            // Robust parsing for vTokens: PumpPortal sends token counts in human-readable
+            // units (e.g. 1_073_000_000 for ~1.073B tokens), NOT in base units (which would
+            // be 1_073_000_000_000_000 for a 6-decimal token).  We convert to base units
+            // (multiply by 1e6) the same way we convert vSol from SOL to lamports (×1e9).
+            // pump.fun tokens always have 6 decimals.
+            if let Some(vv) = v.get("vTokensInBondingCurve").or_else(|| v.get("v_tokens_in_bonding_curve")).or_else(|| v.get("v_tokens")).or_else(|| v.get("virtual_token_reserves")).or_else(|| v.get("vTokens")) {
+                let vtok_base_opt: Option<u64> = match vv {
+                    Value::Number(n) => {
+                        if let Some(f) = n.as_f64() {
+                            // Float → always human-readable tokens, convert to base units
+                            Some((f * 1_000_000.0).round() as u64)
+                        } else if let Some(u) = n.as_u64() {
+                            // Integer: if < 1e12, likely human-readable; if >= 1e12, already base units
+                            if u < 1_000_000_000_000 {
+                                Some(u * 1_000_000)
+                            } else {
+                                Some(u)
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    Value::String(s) => {
+                        if s.contains('.') || s.to_lowercase().contains('e') {
+                            s.parse::<f64>().ok().map(|f| (f * 1_000_000.0).round() as u64)
+                        } else {
+                            s.parse::<u64>().ok().map(|u| {
+                                if u < 1_000_000_000_000 { u * 1_000_000 } else { u }
+                            })
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(vtok_base) = vtok_base_opt {
+                    bstate_map.insert("virtual_token_reserves".to_string(), Value::Number(serde_json::Number::from(vtok_base)));
+                }
             }
             // Parse mint decimals if PumpPortal provides them (avoid RPC lookup)
             if let Some(dec) = get_num_u64(&v, &["decimals", "mintDecimals", "mint_decimals", "tokenDecimals"]) {
@@ -201,16 +237,25 @@ pub async fn run_pumpportal_ws(
                         if n.is_f64() {
                             // treat as SOL float
                             n.as_f64().map(|f| (f * 1_000_000_000.0).round() as u64)
+                        } else if let Some(u) = n.as_u64() {
+                            // Integer: if < 1e9 (< 1 SOL in lamports), it's human-readable SOL;
+                            // pump.fun virtual_sol_reserves always starts at ~30 SOL.
+                            if u < 1_000_000_000 {
+                                Some(u * 1_000_000_000)
+                            } else {
+                                Some(u)
+                            }
                         } else {
-                            // integer -> treat as lamports
-                            n.as_u64()
+                            None
                         }
                     }
                     Value::String(s) => {
                         if s.contains('.') || s.to_lowercase().contains('e') {
                             s.parse::<f64>().ok().map(|f| (f * 1_000_000_000.0).round() as u64)
                         } else {
-                            s.parse::<u64>().ok()
+                            s.parse::<u64>().ok().map(|u| {
+                                if u < 1_000_000_000 { u * 1_000_000_000 } else { u }
+                            })
                         }
                     }
                     _ => None,
@@ -225,6 +270,16 @@ pub async fn run_pumpportal_ws(
             }
             if !bstate_map.is_empty() {
                 pumpobj.insert("bonding_state".to_string(), Value::Object(bstate_map));
+            }
+
+            // Skip non-pump.fun pool tokens (e.g. "bonk") early to avoid wasted RPC calls
+            if let Some(meta) = pumpobj.get("metadata").and_then(|m| m.as_object()) {
+                if let Some(pool) = meta.get("pool").and_then(|p| p.as_str()) {
+                    if pool != "pump" {
+                        debug!("Skipping non-pump.fun token (pool={})", pool);
+                        continue;
+                    }
+                }
             }
 
             // Build normalized message

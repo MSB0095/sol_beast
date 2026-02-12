@@ -14,6 +14,7 @@ use axum::http::StatusCode;
 use tower_http::cors::CorsLayer;
 use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::Ordering;
 
 use crate::{
     models::Holding,
@@ -480,8 +481,12 @@ async fn get_detected_coins_handler(
     State(state): State<ApiState>,
 ) -> impl IntoResponse {
     let coins = state.detected_coins.lock().await;
-    info!("Serving /detected-coins: {} coins", coins.len());
-    Json(coins.clone())
+    let total = crate::TOTAL_DETECTED_COINS.load(Ordering::Relaxed);
+    info!("Serving /detected-coins: {} coins (total detected: {})", coins.len(), total);
+    Json(json!({
+        "coins": coins.clone(),
+        "total": total
+    }))
 }
 
 async fn get_trades_handler(
@@ -506,10 +511,12 @@ async fn handle_socket(socket: WebSocket, state: ApiState) {
     let initial_data = {
         let coins = state.detected_coins.lock().await;
         let holdings = state.stats.lock().await.current_holdings.clone();
+        let total = crate::TOTAL_DETECTED_COINS.load(Ordering::Relaxed);
         json!({
             "type": "initial",
             "detected_coins": coins.clone(),
             "holdings": holdings,
+            "total_detected_coins": total,
         }).to_string()
     };
     

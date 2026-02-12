@@ -1,8 +1,22 @@
+import { useState, useEffect } from 'react'
 import { useBotStore } from '../store/botStore'
-import { Clock } from 'lucide-react'
+import { Clock, TrendingUp, TrendingDown, Minus } from 'lucide-react'
+
+function formatHoldTime(buyTimeStr: string) {
+  const elapsed = Math.max(0, Math.floor((Date.now() - new Date(buyTimeStr).getTime()) / 1000))
+  const m = Math.floor(elapsed / 60)
+  const s = elapsed % 60
+  return `${m}m ${s}s`
+}
 
 export default function HoldingsPanel() {
-  const { stats } = useBotStore()
+  const { stats, prices } = useBotStore()
+  // Force re-render every second so hold times and PnL stay live
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
 
   if (!stats?.current_holdings || stats.current_holdings.length === 0) {
     return (
@@ -14,8 +28,54 @@ export default function HoldingsPanel() {
     )
   }
 
+  // Compute aggregate live PnL across all holdings — always derived from
+  // holding.buy_price (authoritative, from stats API) and the latest WS price.
+  // This avoids stale / zero PnL values that can arrive from the backend when
+  // the WSS handler races with the monitor loop.
+  let totalPnlSol = 0
+  let totalPositionValueSol = 0
+  let totalBuyCostSol = 0
+
+  stats.current_holdings.forEach(h => {
+    const live = prices[h.mint]
+    const currentPrice = live ? live.price : h.buy_price
+    const tokens = h.amount / 1_000_000
+    const positionValue = currentPrice * tokens
+    const buyCost = h.buy_price * tokens
+    totalPositionValueSol += positionValue
+    totalBuyCostSol += buyCost
+    totalPnlSol += positionValue - buyCost
+  })
+
+  const totalPnlPercent = totalBuyCostSol > 0 ? ((totalPositionValueSol - totalBuyCostSol) / totalBuyCostSol) * 100 : 0
+  const totalPnlClass = totalPnlSol > 0.000000001 ? 'text-green-400' : totalPnlSol < -0.000000001 ? 'text-red-400' : 'text-gray-400'
+
   return (
     <div className="space-y-4">
+      {/* Live Aggregate PnL Banner */}
+      <div className="card-enhanced rounded-xl p-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {totalPnlSol > 0 ? <TrendingUp className="text-green-400" size={24} /> :
+             totalPnlSol < 0 ? <TrendingDown className="text-red-400" size={24} /> :
+             <Minus className="text-gray-500" size={24} />}
+            <div>
+              <p className="text-xs text-gray-400 uppercase tracking-wider font-mono">Live Unrealized PnL</p>
+              <p className={`text-2xl font-bold font-mono ${totalPnlClass}`}>
+                {totalPnlSol >= 0 ? '+' : ''}{totalPnlSol.toFixed(9)} SOL
+                <span className="text-sm ml-2">({totalPnlPercent >= 0 ? '+' : ''}{totalPnlPercent.toFixed(2)}%)</span>
+              </p>
+            </div>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-400 uppercase tracking-wider font-mono">Position Value</p>
+            <p className="text-lg font-bold font-mono text-blue-400">
+              {totalPositionValueSol.toFixed(9)} SOL
+            </p>
+          </div>
+        </div>
+      </div>
+
       <div className="card-enhanced rounded-xl p-6">
         <h3 className="text-lg font-semibold mb-4 gradient-text">Current Holdings ({stats.current_holdings.length})</h3>
         
@@ -26,6 +86,10 @@ export default function HoldingsPanel() {
                 <th className="text-left py-3 px-4">Token</th>
                 <th className="text-left py-3 px-4">Name/Symbol</th>
                 <th className="text-right py-3 px-4">Buy Price</th>
+                <th className="text-right py-3 px-4">Current Price</th>
+                <th className="text-right py-3 px-4">PnL %</th>
+                <th className="text-right py-3 px-4">PnL SOL</th>
+                <th className="text-right py-3 px-4">Value</th>
                 <th className="text-right py-3 px-4">Tokens</th>
                 <th className="text-right py-3 px-4">Hold Time</th>
                 <th className="text-center py-3 px-4">Link</th>
@@ -37,12 +101,23 @@ export default function HoldingsPanel() {
                 const symbol = holding.metadata?.symbol || holding.onchain?.symbol
                 const name = holding.metadata?.name || holding.onchain?.name
                 const image = holding.metadata?.image
-                const holdTime = Math.floor((Date.now() - new Date(holding.buy_time).getTime()) / 1000)
-                const minutes = Math.floor(holdTime / 60)
-                const seconds = holdTime % 60
+                
+                const liveData = prices[mint]
+                const currentPrice = liveData ? liveData.price : holding.buy_price
+                const tokens = holding.amount / 1_000_000
+                // Always compute PnL locally from authoritative buy_price + latest price
+                const buyCost = holding.buy_price * tokens
+                const positionValue = currentPrice * tokens
+                const pnlSol = positionValue - buyCost
+                const pnlPercent = buyCost > 0 ? ((positionValue - buyCost) / buyCost) * 100 : 0
+                
+                const pnlClass = pnlPercent > 0.01 ? 'text-green-500' : pnlPercent < -0.01 ? 'text-red-500' : 'text-gray-400'
+                const pnlSign = pnlPercent > 0 ? '+' : ''
+                const pnlSolSign = pnlSol > 0 ? '+' : ''
+                const isLive = !!liveData
 
                 return (
-                  <tr key={mint} className="border-b border-gray-700/50 hover:bg-sol-darker/50 transition-colors">
+                  <tr key={mint} className={`border-b border-gray-700/50 hover:bg-sol-darker/50 transition-all ${isLive ? '' : 'opacity-70'}`}>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         {image ? (
@@ -59,9 +134,14 @@ export default function HoldingsPanel() {
                             ?
                           </div>
                         )}
-                        <span className="font-mono text-xs text-gray-400">
-                          {mint.slice(0, 6)}...{mint.slice(-4)}
-                        </span>
+                        <div>
+                          <span className="font-mono text-xs text-gray-400">
+                            {mint.slice(0, 6)}...{mint.slice(-4)}
+                          </span>
+                          {isLive && (
+                            <span className="ml-2 inline-block w-2 h-2 rounded-full bg-green-400 animate-pulse" title="Live price feed" />
+                          )}
+                        </div>
                       </div>
                     </td>
                     <td className="py-3 px-4">
@@ -77,13 +157,27 @@ export default function HoldingsPanel() {
                       )}
                     </td>
                     <td className="py-3 px-4 text-right font-mono text-xs">
-                      {holding.buy_price.toFixed(9)} SOL
+                      {holding.buy_price.toFixed(12)} SOL
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono text-xs">
+                      {isLive ? (
+                        <span className={pnlClass}>{currentPrice.toFixed(12)} SOL</span>
+                      ) : '-'}
+                    </td>
+                    <td className={`py-3 px-4 text-right font-mono text-xs font-bold ${pnlClass}`}>
+                      {isLive ? `${pnlSign}${pnlPercent.toFixed(2)}%` : '-'}
+                    </td>
+                    <td className={`py-3 px-4 text-right font-mono text-xs font-bold ${pnlClass}`}>
+                      {isLive ? `${pnlSolSign}${pnlSol.toFixed(9)}` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono text-xs text-blue-400">
+                      {isLive ? `${positionValue.toFixed(9)}` : '-'}
                     </td>
                     <td className="py-3 px-4 text-right font-mono">
-                      {(holding.amount / 1_000_000).toLocaleString()}
+                      {tokens.toLocaleString()}
                     </td>
-                    <td className="py-3 px-4 text-right text-gray-400 text-xs">
-                      {minutes}m {seconds}s
+                    <td className="py-3 px-4 text-right text-gray-400 text-xs font-mono">
+                      {formatHoldTime(holding.buy_time)}
                     </td>
                     <td className="py-3 px-4 text-center">
                       <a
@@ -118,16 +212,16 @@ export default function HoldingsPanel() {
         </div>
 
         <div className="card-enhanced rounded-xl p-4 hover:scale-105">
-          <p className="text-gray-400 text-sm font-medium mb-2">Avg Entry Price</p>
+          <p className="text-gray-400 text-sm font-medium mb-2">Total Entry Cost</p>
           <p className="text-2xl font-bold text-blue-400">
-            {(stats.current_holdings.reduce((sum, h) => sum + h.buy_price, 0) / stats.current_holdings.length).toFixed(9)} SOL
+            {totalBuyCostSol.toFixed(9)} SOL
           </p>
         </div>
 
         <div className="card-enhanced rounded-xl p-4 hover:scale-105">
-          <p className="text-gray-400 text-sm font-medium mb-2">Total Tokens</p>
-          <p className="text-2xl font-bold text-green-400">
-            {(stats.current_holdings.reduce((sum, h) => sum + h.amount, 0) / 1_000_000).toLocaleString()}
+          <p className="text-gray-400 text-sm font-medium mb-2">Unrealized PnL</p>
+          <p className={`text-2xl font-bold ${totalPnlClass}`}>
+            {totalPnlSol >= 0 ? '+' : ''}{totalPnlSol.toFixed(9)} SOL
           </p>
         </div>
       </div>

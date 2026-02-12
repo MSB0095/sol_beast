@@ -14,20 +14,18 @@ use solana_sdk::{
 use crate::ws::WsRequest;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use once_cell::sync::Lazy;
-use log::{info, debug, error};
+use log::error;
 use chrono::Utc;
 use std::str::FromStr;
-use std::io::Write;
-
-
+use solana_sdk::pubkey::Pubkey;
 
 pub async fn monitor_holdings(
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
     price_cache: Arc<Mutex<PriceCache>>,
     rpc_client: Arc<RpcClient>,
     is_real: bool,
-    keypair: Option<&Keypair>,
-    simulate_keypair: Option<&Keypair>,
+    keypair: Option<Arc<Keypair>>,
+    simulate_keypair: Option<Arc<Keypair>>,
     settings: Arc<Settings>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
@@ -37,359 +35,309 @@ pub async fn monitor_holdings(
     bot_control: Arc<BotControl>,
     ws_tx: tokio::sync::broadcast::Sender<String>,
 ) {
-    // Debounce maps to avoid repeated subscribe/prime attempts and noisy warnings
     static SUBSCRIBE_ATTEMPT_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
     const SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS: u64 = 30;
-    static PRICE_MISS_WARN_TIMES: Lazy<tokio::sync::Mutex<HashMap<String, Instant>>> = Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-    const PRICE_MISS_WARN_DEBOUNCE_SECS: u64 = 60;
+    
+    let (remove_tx, mut remove_rx) = tokio::sync::mpsc::channel::<String>(100);
+    let mut processing = std::collections::HashSet::new();
+
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         
-        // Check if bot is still running before processing trades
+        while let Ok(msg) = remove_rx.try_recv() {
+            let (is_done_only, mint_to_rem) = if msg.starts_with("DONE:") {
+                (true, msg.replace("DONE:", ""))
+            } else {
+                (false, msg)
+            };
+            
+            processing.remove(&mint_to_rem);
+            
+            if !is_done_only {
+                {
+                    let mut submap = sub_map.lock().await;
+                    if let Some((idx, sub_id)) = submap.remove(&mint_to_rem) {
+                        if idx < ws_control_senders.len() {
+                            let sender = &ws_control_senders[idx];
+                            let (u_tx, u_rx) = tokio::sync::oneshot::channel();
+                            let _ = sender.send(WsRequest::Unsubscribe { sub_id, resp: u_tx }).await;
+                            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
+                        }
+                    }
+                }
+                {
+                    let mut guard = holdings.lock().await;
+                    if guard.remove(&mint_to_rem).is_some() {
+                        let _ = bot_control.add_log("info", format!("Removed {} from monitor", mint_to_rem), None).await;
+                    }
+                }
+            }
+        }
+
         let running_state = bot_control.running_state.lock().await;
-        if format!("{:?}", *running_state).to_lowercase() != "running" {
-            debug!("Monitor exiting: bot is not in running state");
+        if !matches!(*running_state, crate::api::BotRunningState::Running) { 
             drop(running_state);
-            break;
+            continue; 
         }
         drop(running_state);
         
-        let mut to_remove = Vec::new();
-        let holdings_snapshot = holdings.lock().await.clone();
+        let holdings_snapshot = { holdings.lock().await.clone() };
 
-        for (mint, holding) in &holdings_snapshot {
-            // If amount appears to be zero (e.g., token transferred/sold externally)
-            // schedule removal to keep in-memory holdings consistent with on-chain state.
-            if holding.amount == 0 {
-                debug!("Detected zero balance for {} - scheduling removal", mint);
-                to_remove.push(mint.clone());
-                continue;
+        for (mint, holding) in holdings_snapshot {
+            if holding.amount == 0 { 
+                let _ = remove_tx.send(mint).await;
+                continue; 
             }
-            // Prefer WSS-provided cached prices when configured to use WSS only.
-            // This avoids RPC polling and keeps the monitor reacting to real-time
-            // websocket updates. If `price_source` is not strict "wss", fall
-            // back to the RPC fetcher which itself will consult the same cache
-            // and only call RPC when needed.
-            let current_price_result: Result<f64, Box<dyn std::error::Error + Send + Sync>> = if settings.price_source == "wss" {
-                let mut cache_guard = price_cache.lock().await;
-                if let Some((ts, price)) = cache_guard.get(mint) {
-                    // honor the cache TTL
-                    if Instant::now().duration_since(*ts) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
-                        Ok(*price)
+            if processing.contains(&mint) { continue; }
+            processing.insert(mint.clone());
+
+            let rpc_client = Arc::clone(&rpc_client);
+            let price_cache = Arc::clone(&price_cache);
+            let settings = Arc::clone(&settings);
+            let ws_control_senders = Arc::clone(&ws_control_senders);
+            let trades_list = Arc::clone(&trades_list);
+            let trades_map = Arc::clone(&trades_map);
+            let ws_tx = ws_tx.clone();
+            let sub_map = Arc::clone(&sub_map);
+            let next_wss_sender = Arc::clone(&_next_wss_sender);
+            let remove_tx = remove_tx.clone();
+            let bot_control = Arc::clone(&bot_control);
+            let holdings = Arc::clone(&holdings);
+            let kp = keypair.clone();
+            let sim_kp = simulate_keypair.clone();
+            let mint_c = mint.clone();
+
+            tokio::spawn(async move {
+                // Calculate elapsed FIRST — timeout must be checked before the
+                // potentially slow price fetch to avoid coins stuck past timeout.
+                let elapsed = Utc::now().signed_duration_since(holding.buy_time).num_seconds();
+                let is_timed_out = elapsed >= settings.timeout_secs;
+
+                let current_price: f64 = if is_timed_out {
+                    // Timeout: use any available cached price (even stale) or buy_price.
+                    // Don't block on slow RPC — we already know we want to sell.
+                    let cached = {
+                        let mut cache_guard = price_cache.lock().await;
+                        cache_guard.get(&mint_c).map(|(_, p)| *p)
+                    };
+                    let p = cached.unwrap_or(holding.buy_price);
+                    log::info!("Timeout for {} ({}s >= {}s), using price {:.18}",
+                        mint_c, elapsed, settings.timeout_secs, p);
+                    p
+                } else {
+                    // Normal TP/SL evaluation — need fresh price
+                    let price_result = if settings.price_source == "wss" {
+                        let mut cache_guard = price_cache.lock().await;
+                        if let Some((ts, price)) = cache_guard.get(&mint_c) {
+                            if Instant::now().duration_since(*ts) < std::time::Duration::from_secs(settings.price_cache_ttl_secs) {
+                                Ok(*price)
+                            } else {
+                                Err("expired")
+                            }
+                        } else {
+                            Err("miss")
+                        }
                     } else {
-                        Err(Box::new(std::io::Error::other(format!("WSS cached price for {} expired", mint))))
+                        rpc::fetch_current_price(&mint_c, &price_cache, &rpc_client, &settings).await.map_err(|_| "rpc_err")
+                    };
+
+                    match price_result {
+                        Ok(p) => p,
+                        Err(_) => {
+                            if settings.price_source == "wss" && !ws_control_senders.is_empty() {
+                                let has_sub = { sub_map.lock().await.get(&mint_c).is_some() };
+                                if !has_sub {
+                                    let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
+                                    if !matches!(attempts.get(&mint_c), Some(last) if Instant::now().duration_since(*last).as_secs() < SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS) {
+                                        attempts.insert(mint_c.clone(), Instant::now());
+                                        drop(attempts);
+                                        if let Ok(mint_pk) = Pubkey::from_str(&mint_c) {
+                                            let pump_prog = Pubkey::from_str(&settings.pump_fun_program).unwrap_or_default();
+                                            let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
+                                            let idx = next_wss_sender.fetch_add(1, Ordering::Relaxed) % ws_control_senders.len();
+                                            let (otx, _) = tokio::sync::oneshot::channel();
+                                            let _ = ws_control_senders[idx].send(WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint_c.clone(), resp: otx }).await;
+                                        }
+                                    }
+                                }
+                            }
+                            // Cap RPC fallback at 15s to prevent blocking the monitor task
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(15),
+                                rpc::fetch_current_price(&mint_c, &price_cache, &rpc_client, &settings)
+                            ).await {
+                                Ok(Ok(p)) => p,
+                                Ok(Err(e2)) => {
+                                    let err_msg = e2.to_string();
+                                    if err_msg.contains("migrated") { 
+                                        let _ = remove_tx.send(mint_c).await; 
+                                    } else {
+                                        log::warn!("Price fetch failed for {} (will retry): {}", mint_c, err_msg);
+                                        let _ = remove_tx.send(format!("DONE:{}", mint_c)).await;
+                                    }
+                                    return;
+                                }
+                                Err(_timeout) => {
+                                    log::warn!("Price fetch timed out (15s) for {} (will retry)", mint_c);
+                                    let _ = remove_tx.send(format!("DONE:{}", mint_c)).await;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                };
+
+                let profit_percent = if holding.buy_price != 0.0 { ((current_price - holding.buy_price) / holding.buy_price) * 100.0 } else { 0.0 };
+                let tokens = holding.amount as f64 / 1_000_000.0;
+                let pnl_sol = (current_price - holding.buy_price) * tokens;
+
+                let _ = ws_tx.send(serde_json::json!({
+                    "type": "price-update",
+                    "mint": mint_c,
+                    "price": current_price,
+                    "profit_percent": profit_percent,
+                    "pnl_sol": pnl_sol,
+                    "buy_price": holding.buy_price,
+                    "amount": holding.amount,
+                    "triggered_tp": holding.triggered_tp_levels,
+                    "triggered_sl": holding.triggered_sl_levels
+                }).to_string());
+
+                // --- Multi-level TP/SL evaluation ---
+                // Check which TP/SL levels should trigger (that haven't already)
+                let mut sell_amount: u64 = 0;
+                let mut reason_str = String::new();
+                let mut newly_triggered_tp: Vec<usize> = Vec::new();
+                let mut newly_triggered_sl: Vec<usize> = Vec::new();
+
+                if is_timed_out {
+                    // Timeout: sell ALL remaining tokens
+                    sell_amount = holding.amount;
+                    reason_str = "TIMEOUT".to_string();
+                } else {
+                    // Check TP levels (sorted ascending by trigger_percent)
+                    let mut tp_levels: Vec<(usize, &crate::settings::TpLevel)> = settings.tp_levels.iter().enumerate().collect();
+                    tp_levels.sort_by(|a, b| a.1.trigger_percent.partial_cmp(&b.1.trigger_percent).unwrap_or(std::cmp::Ordering::Equal));
+                    for (idx, level) in &tp_levels {
+                        if holding.triggered_tp_levels.contains(idx) { continue; }
+                        if profit_percent >= level.trigger_percent {
+                            let partial = ((level.sell_percent / 100.0) * holding.original_amount as f64).round() as u64;
+                            sell_amount += partial;
+                            newly_triggered_tp.push(*idx);
+                            if reason_str.is_empty() {
+                                reason_str = format!("TP{} ({:.0}% @ +{:.1}%)", idx + 1, level.sell_percent, level.trigger_percent);
+                            } else {
+                                reason_str.push_str(&format!(" + TP{}", idx + 1));
+                            }
+                        }
+                    }
+
+                    // Check SL levels (sorted descending by trigger_percent, i.e. -10% before -20%)
+                    let mut sl_levels: Vec<(usize, &crate::settings::SlLevel)> = settings.sl_levels.iter().enumerate().collect();
+                    sl_levels.sort_by(|a, b| b.1.trigger_percent.partial_cmp(&a.1.trigger_percent).unwrap_or(std::cmp::Ordering::Equal));
+                    for (idx, level) in &sl_levels {
+                        if holding.triggered_sl_levels.contains(idx) { continue; }
+                        if profit_percent <= level.trigger_percent {
+                            let partial = ((level.sell_percent / 100.0) * holding.original_amount as f64).round() as u64;
+                            sell_amount += partial;
+                            newly_triggered_sl.push(*idx);
+                            if reason_str.is_empty() {
+                                reason_str = format!("SL{} ({:.0}% @ {:.1}%)", idx + 1, level.sell_percent, level.trigger_percent);
+                            } else {
+                                reason_str.push_str(&format!(" + SL{}", idx + 1));
+                            }
+                        }
+                    }
+
+                    // Clamp sell_amount to remaining tokens
+                    if sell_amount > holding.amount {
+                        sell_amount = holding.amount;
+                    }
+                }
+
+                if sell_amount > 0 {
+                    let is_final_sell = sell_amount >= holding.amount;
+                    let kp_ref = kp.as_ref().map(|k| k.as_ref());
+                    let sim_kp_ref = sim_kp.as_ref().map(|k| k.as_ref());
+                    
+                    match rpc::sell_token(&mint_c, sell_amount, current_price, is_real, kp_ref, sim_kp_ref, &rpc_client, &settings, is_final_sell).await {
+                        Ok(_) => {
+                            let sell_sol = (sell_amount as f64 / 1_000_000.0) * current_price;
+                            let buy_sol = holding.buy_price * (sell_amount as f64 / 1_000_000.0);
+                            let mut trades = trades_list.lock().await;
+                            trades.insert(0, TradeRecord {
+                                mint: mint_c.clone(),
+                                symbol: holding.metadata.as_ref().and_then(|m| m.symbol.clone()),
+                                name: holding.metadata.as_ref().and_then(|m| m.name.clone()),
+                                image: holding.metadata.as_ref().and_then(|m| m.image.clone()),
+                                trade_type: "sell".to_string(),
+                                timestamp: Utc::now().to_rfc3339(),
+                                tx_signature: None,
+                                amount_sol: sell_sol,
+                                amount_tokens: sell_amount as f64 / 1_000_000.0,
+                                price_per_token: current_price,
+                                profit_loss: Some(sell_sol - buy_sol),
+                                profit_loss_percent: Some(profit_percent),
+                                reason: Some(reason_str.clone()),
+                            });
+                            if trades.len() > 200 { trades.truncate(200); }
+                            drop(trades);
+
+                            if is_final_sell {
+                                // Full exit: remove holding entirely
+                                let _ = remove_tx.send(mint_c.clone()).await;
+                                trades_map.lock().await.remove(&mint_c);
+                                let _ = bot_control.add_log("info", format!("Sold 100% of {} ({}) at {:.18} (profit: {:.2}%)", mint_c, reason_str, current_price, profit_percent), None).await;
+                            } else {
+                                // Partial sell: update holding in-place
+                                {
+                                    let mut guard = holdings.lock().await;
+                                    if let Some(h) = guard.get_mut(&mint_c) {
+                                        h.amount = h.amount.saturating_sub(sell_amount);
+                                        for idx in &newly_triggered_tp { h.triggered_tp_levels.push(*idx); }
+                                        for idx in &newly_triggered_sl { h.triggered_sl_levels.push(*idx); }
+                                    }
+                                }
+                                let _ = remove_tx.send(format!("DONE:{}", mint_c)).await;
+                                let pct_sold = (sell_amount as f64 / holding.original_amount as f64) * 100.0;
+                                let _ = bot_control.add_log("info", format!("Partial sell {:.0}% of {} ({}) at {:.18} (profit: {:.2}%)", pct_sold, mint_c, reason_str, current_price, profit_percent), None).await;
+                            }
+                        }
+                        Err(e) => { 
+                            error!("Sell failed for {} ({}): {}", mint_c, reason_str, e);
+                            let _ = bot_control.add_log("error", format!("Sell failed for {} ({}): {}", mint_c, reason_str, e), None).await;
+                            if is_timed_out {
+                                // Force-remove timed-out coins after sell failure to prevent
+                                // infinite retry loops. Record as forced timeout sell.
+                                log::warn!("Force-removing timed-out {} after sell failure", mint_c);
+                                let _ = remove_tx.send(mint_c.clone()).await;
+                                let mut trades = trades_list.lock().await;
+                                trades.insert(0, TradeRecord {
+                                    mint: mint_c.clone(),
+                                    symbol: holding.metadata.as_ref().and_then(|m| m.symbol.clone()),
+                                    name: holding.metadata.as_ref().and_then(|m| m.name.clone()),
+                                    image: holding.metadata.as_ref().and_then(|m| m.image.clone()),
+                                    trade_type: "sell".to_string(),
+                                    timestamp: Utc::now().to_rfc3339(),
+                                    tx_signature: None,
+                                    amount_sol: (holding.amount as f64 / 1_000_000.0) * current_price,
+                                    amount_tokens: holding.amount as f64 / 1_000_000.0,
+                                    price_per_token: current_price,
+                                    profit_loss: Some(((holding.amount as f64 / 1_000_000.0) * current_price) - (holding.buy_price * (holding.amount as f64 / 1_000_000.0))),
+                                    profit_loss_percent: Some(profit_percent),
+                                    reason: Some("TIMEOUT_FORCED".to_string()),
+                                });
+                                if trades.len() > 200 { trades.truncate(200); }
+                                trades_map.lock().await.remove(&mint_c);
+                            } else {
+                                let _ = remove_tx.send(format!("DONE:{}", mint_c)).await;
+                            }
+                        }
                     }
                 } else {
-                    Err(Box::new(std::io::Error::other(format!("No WSS cached price for {}", mint))))
+                    let _ = remove_tx.send(format!("DONE:{}", mint_c)).await;
                 }
-            } else {
-                rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await
-            };
-
-            let current_price = match current_price_result {
-                Ok(price) => price,
-                Err(e) => {
-                    // If we're using WSS as the source, try to ensure a subscription
-                    // exists and attempt a single RPC prime before giving up. Rate-
-                    // limit subscribe/prime attempts per-mint to avoid storms.
-                    if settings.price_source == "wss" {
-                        // Check if a subscription exists for this mint
-                        let has_sub = { sub_map.lock().await.get(mint).is_some() };
-                        let mut attempted_subscribe = false;
-                        if !has_sub {
-                            let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
-                            let now = Instant::now();
-                            let do_try = !matches!(attempts.get(mint), Some(last) if now.duration_since(*last).as_secs() < SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS);
-                            if do_try {
-                                attempts.insert(mint.clone(), now);
-                                if !ws_control_senders.is_empty() {
-                                    let idx = _next_wss_sender.fetch_add(1, Ordering::Relaxed) % ws_control_senders.len();
-                                    let sender = &ws_control_senders[idx];
-                                    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel::<Result<u64, String>>();
-                                    let pump_prog = match solana_sdk::pubkey::Pubkey::from_str(&settings.pump_fun_program) {
-                                        Ok(pk) => pk,
-                                        Err(_) => {
-                                            debug!("Invalid pump_fun_program pubkey in settings");
-                                            solana_sdk::pubkey::Pubkey::default()
-                                        }
-                                    };
-                                    if let Ok(mint_pk) = solana_sdk::pubkey::Pubkey::from_str(mint) {
-                                        let (curve_pda, _) = solana_sdk::pubkey::Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_prog);
-                                        let _ = sender.send(WsRequest::Subscribe { account: curve_pda.to_string(), mint: mint.clone(), resp: resp_tx }).await;
-                                        match tokio::time::timeout(std::time::Duration::from_secs(settings.wss_subscribe_timeout_secs), resp_rx).await {
-                                            Ok(Ok(Ok(sub_id))) => {
-                                                // persist mapping
-                                                sub_map.lock().await.insert(mint.clone(), (idx, sub_id));
-                                                debug!("Monitor auto-subscribed {} on sub {} (idx={})", mint, sub_id, idx);
-                                                attempted_subscribe = true;
-                                            }
-                                            _ => {
-                                                debug!("Monitor subscribe attempt failed/timed out for {}", mint);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // If subscription exists or we attempted one, try one RPC prime
-                        // to populate the cache (rate-limited implicitly by subscribe debounce).
-                        if has_sub || attempted_subscribe {
-                            match rpc::fetch_current_price(mint, &price_cache, &rpc_client, &settings).await {
-                                Ok(p) => {
-                                    debug!("Monitor primed price via RPC for {}: {:.18}", mint, p);
-                                    // Continue to compute using the newly-fetched price
-                                    p
-                                }
-                                Err(e2) => {
-                                    // Debounced warn
-                                    let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                                    let now = Instant::now();
-                                    let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
-                                    if should_log {
-                                        warns.insert(mint.clone(), now);
-                                        log::warn!("Price fetch failed for {}: {}", mint, e2);
-                                    } else {
-                                        debug!("Suppressed repeated price-miss warn for {}: {}", mint, e2);
-                                    }
-                                    // If migrated, schedule removal
-                                    if e2.to_string().contains("migrated") {
-                                        to_remove.push(mint.clone());
-                                    }
-                                    continue;
-                                }
-                            }
-                        } else {
-                            // No subscription and we didn't attempt one — debounced warn and continue
-                            let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-                            let now = Instant::now();
-                            let should_log = !matches!(warns.get(mint), Some(last) if now.duration_since(*last).as_secs() < PRICE_MISS_WARN_DEBOUNCE_SECS);
-                            if should_log {
-                                warns.insert(mint.clone(), now);
-                                log::warn!("Price fetch failed for {}: {}", mint, e);
-                            } else {
-                                debug!("Suppressed repeated price-miss warn for {}: {}", mint, e);
-                            }
-                            if e.to_string().contains("migrated") {
-                                to_remove.push(mint.clone());
-                            }
-                            continue;
-                        }
-                    } else {
-                        log::warn!("Price fetch failed for {}: {}", mint, e);
-                        // If the curve reports migrated, schedule removal of holding
-                        if e.to_string().contains("migrated") {
-                            to_remove.push(mint.clone());
-                        }
-                        continue;
-                    }
-                }
-            };
-            // current_price and holding.buy_price are SOL per token
-            let profit_percent = if holding.buy_price != 0.0 {
-                ((current_price - holding.buy_price) / holding.buy_price) * 100.0
-            } else { 0.0 };
-            let elapsed = Utc::now().signed_duration_since(holding.buy_time).num_seconds();
-
-            // Broadcast price update to WebSocket clients
-            let ws_message = serde_json::json!({
-                "type": "price-update",
-                "mint": mint,
-                "price": current_price,
-                "profit_percent": profit_percent
             });
-            let _ = ws_tx.send(ws_message.to_string());
-
-            let should_sell = if profit_percent >= settings.tp_percent {
-                info!("TP hit for {}: +{:.6}% ({:.18} SOL/token)", mint, profit_percent, current_price);
-                true
-            } else if profit_percent <= settings.sl_percent {
-                info!("SL hit for {}: {:.6}% ({:.18} SOL/token)", mint, profit_percent, current_price);
-                true
-            } else if elapsed >= settings.timeout_secs {
-                info!("Timeout for {}: {}s ({:.18} SOL/token)", mint, elapsed, current_price);
-                true
-            } else {
-                false
-            };
-
-            if should_sell {
-                // Attempt sell
-                match rpc::sell_token(
-                    mint,
-                    holding.amount,
-                    current_price,
-                    is_real,
-                    keypair,
-                    simulate_keypair,
-                    &rpc_client,
-                    &settings,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        let _reason = if profit_percent >= settings.tp_percent {
-                            "Take Profit"
-                        } else if profit_percent <= settings.sl_percent {
-                            "Stop Loss"
-                        } else {
-                            "Timeout"
-                        };
-                        // bot_log!(
-                        //     "info",
-                        //     format!("Successfully sold token {}", mint),
-                        //     format!("Reason: {}, Profit: {:.2}%, Current price: {:.9} SOL", reason, profit_percent, current_price)
-                        // );
-                    }
-                    Err(e) => {
-                        error!("Sell error for {}: {}", mint, e);
-                        // bot_log!("error", format!("Failed to sell token {}", mint), format!("{}", e));
-                    }
-                }
-                // Prepare trade CSV row using buy record if available
-                let sell_time = Utc::now();
-                let sell_tokens = holding.amount;
-                // amount is in microtokens (10^6), so convert to tokens
-                let sell_tokens_amount = sell_tokens as f64 / 1_000_000.0;
-                // current_price is SOL per token; compute totals in SOL
-                let sell_sol = sell_tokens_amount * current_price;
-                let profit_percent = if holding.buy_price != 0.0 { ((current_price - holding.buy_price) / holding.buy_price) * 100.0 } else { 0.0 };
-                // compute profit in SOL
-                let profit_sol = sell_sol - (holding.buy_price * sell_tokens_amount);
-                let _profit_lamports = profit_sol * 1_000_000_000.0;
-                let stop_reason = if profit_percent >= settings.tp_percent { "TP".to_string() } else if profit_percent <= settings.sl_percent { "SL".to_string() } else { "TIMEOUT".to_string() };
-                
-                // Add sell trade record to API
-                {
-                    let mut trades = trades_list.lock().await;
-                    trades.insert(0, TradeRecord {
-                        mint: mint.clone(),
-                        symbol: holding.metadata.as_ref().and_then(|m| m.symbol.clone())
-                            .or_else(|| holding.onchain.as_ref().and_then(|o| o.symbol.clone())),
-                        name: holding.metadata.as_ref().and_then(|m| m.name.clone())
-                            .or_else(|| holding.onchain.as_ref().and_then(|o| o.name.clone())),
-                        image: holding.metadata.as_ref().and_then(|m| m.image.clone()),
-                        trade_type: "sell".to_string(),
-                        timestamp: sell_time.to_rfc3339(),
-                        tx_signature: None,
-                        amount_sol: sell_sol,
-                        amount_tokens: sell_tokens_amount,
-                        price_per_token: current_price,
-                        profit_loss: Some(profit_sol),
-                        profit_loss_percent: Some(profit_percent),
-                        reason: Some(stop_reason.clone()),
-                    });
-                    // Keep only last 200 trades
-                    if trades.len() > 200 {
-                        trades.truncate(200);
-                    }
-                }
-                
-                // Remove buy record and write CSV
-                if let Some(buy_rec) = trades_map.lock().await.remove(mint) {
-                    // Append CSV row
-                    let file_path = "trades.csv";
-                    // New clearer header (human-readable, consistent numeric formatting)
-                    let header = "mint,symbol,name,uri,image,creator,detect_time,buy_time,detect_to_buy_secs,buy_sol,buy_price_sol_per_token,buy_tokens,sell_time,stop_reason,sell_tokens,sell_sol,profit_percent,profit_sol\n";
-                    let needs_header = !std::path::Path::new(file_path).exists();
-                    if needs_header {
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
-                            let _ = f.write_all(header.as_bytes());
-                        }
-                    }
-
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file_path) {
-                        let detect_to_buy = (buy_rec.buy_time - buy_rec.detect_time).num_seconds();
-                        // buy_rec.buy_price is SOL per token
-                        let buy_price_sol = buy_rec.buy_price;
-                        // Format numbers for readability: SOL amounts with 9 decimals, percents with 2 decimals
-                        let buy_sol_fmt = format!("{:.9}", buy_rec.buy_amount_sol);
-                        let buy_price_sol_fmt = format!("{:.9}", buy_price_sol);
-                        let sell_sol_fmt = format!("{:.9}", sell_sol);
-                        let profit_percent_fmt = format!("{:.2}", profit_percent);
-                        let profit_sol_fmt = format!("{:.9}", profit_sol);
-
-                        // CSV-quote text fields to avoid breaking on commas/newlines
-                        let q = |s: String| -> String {
-                            // Escape double-quotes by doubling them
-                            let escaped = s.replace('"', "\"\"");
-                            format!("\"{}\"", escaped)
-                        };
-
-                        let line = format!(
-                            "{mint},{symbol},{name},{uri},{image},{creator},{detect_time},{buy_time},{detect_to_buy_secs},{buy_sol},{buy_price},{buy_tokens},{sell_time},{stop_reason},{sell_tokens},{sell_sol},{profit_percent},{profit_sol}\n",
-                            mint = q(buy_rec.mint),
-                            symbol = q(buy_rec.symbol.unwrap_or_else(|| "".to_string())),
-                            name = q(buy_rec.name.unwrap_or_else(|| "".to_string())),
-                            uri = q(buy_rec.uri.unwrap_or_else(|| "".to_string())),
-                            image = q(buy_rec.image.unwrap_or_else(|| "".to_string())),
-                            creator = q(buy_rec.creator),
-                            detect_time = buy_rec.detect_time.format("%+"),
-                            buy_time = buy_rec.buy_time.format("%+"),
-                            detect_to_buy_secs = detect_to_buy,
-                            buy_sol = buy_sol_fmt,
-                            buy_price = buy_price_sol_fmt,
-                            buy_tokens = buy_rec.buy_amount_tokens,
-                            sell_time = sell_time.format("%+"),
-                            stop_reason = stop_reason,
-                            sell_tokens = format!("{:.6}", sell_tokens_amount),
-                            sell_sol = sell_sol_fmt,
-                            profit_percent = profit_percent_fmt,
-                            profit_sol = profit_sol_fmt
-                        );
-                        let _ = f.write_all(line.as_bytes());
-                    }
-                }
-                to_remove.push(mint.clone());
-            }
-        }
-
-        if !to_remove.is_empty() {
-            // Unsubscribe from WSS for removed holdings to free subscription slots.
-            let mut submap = sub_map.lock().await;
-            for mint in &to_remove {
-                if let Some((idx, sub_id)) = submap.remove(mint) {
-                    if idx < ws_control_senders.len() {
-                        let sender = &ws_control_senders[idx];
-                        let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
-                        let _ = sender.send(WsRequest::Unsubscribe { sub_id, resp: u_tx }).await;
-                        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
-                        debug!("Unsubscribed {} sub {} after sell", mint, sub_id);
-                    }
-                }
-            }
-
-            let mut holdings_lock = holdings.lock().await;
-            for mint in to_remove {
-                // Log removal to API for better observability
-                let _ = bot_control
-                    .add_log(
-                        "info",
-                        format!("Removing holding {} from in-memory map", mint),
-                        None,
-                    )
-                    .await;
-                holdings_lock.remove(&mint);
-            }
-        }
-
-        // Clean up old entries from debounce maps (every 10 minutes) to prevent unbounded growth
-        static LAST_CLEANUP: Lazy<tokio::sync::Mutex<Option<Instant>>> = 
-            Lazy::new(|| tokio::sync::Mutex::new(None));
-        let mut last_cleanup = LAST_CLEANUP.lock().await;
-        let now = Instant::now();
-        if last_cleanup.is_none() || now.duration_since(last_cleanup.unwrap()) > std::time::Duration::from_secs(600) {
-            *last_cleanup = Some(now);
-            
-            // Clean up SUBSCRIBE_ATTEMPT_TIMES
-            let mut attempts = SUBSCRIBE_ATTEMPT_TIMES.lock().await;
-            let cutoff = now - std::time::Duration::from_secs(SUBSCRIBE_ATTEMPT_DEBOUNCE_SECS * 2);
-            attempts.retain(|_, last_time| *last_time > cutoff);
-            
-            // Clean up PRICE_MISS_WARN_TIMES  
-            let mut warns = PRICE_MISS_WARN_TIMES.lock().await;
-            let cutoff = now - std::time::Duration::from_secs(PRICE_MISS_WARN_DEBOUNCE_SECS * 2);
-            warns.retain(|_, last_time| *last_time > cutoff);
         }
     }
 }

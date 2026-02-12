@@ -1,6 +1,16 @@
 import { create } from 'zustand'
 import { API_SETTINGS_URL } from '../config'
 
+export interface TpLevel {
+  trigger_percent: number
+  sell_percent: number
+}
+
+export interface SlLevel {
+  trigger_percent: number
+  sell_percent: number
+}
+
 export interface Settings {
   // RPC & WebSocket
   solana_ws_urls: string[]
@@ -13,8 +23,8 @@ export interface Settings {
   wallet_private_key_string?: string
   
   // Trading Strategy
-  tp_percent: number
-  sl_percent: number
+  tp_levels: TpLevel[]
+  sl_levels: SlLevel[]
   timeout_secs: number
   buy_amount: number
   
@@ -63,7 +73,7 @@ export interface Settings {
   helius_confirm_timeout_secs: number
 }
 
-type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades' | 'profile'
+type SettingsTab = 'dashboard' | 'configuration' | 'holdings' | 'logs' | 'newcoins' | 'trades'
 
 interface SettingsStore {
   settings: Settings | null
@@ -84,8 +94,8 @@ const defaultSettings: Settings = {
   solana_rpc_urls: ['https://solana-mainnet.core.chainstack.com/'],
   pump_fun_program: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
   metadata_program: 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s',
-  tp_percent: 100,
-  sl_percent: -50,
+  tp_levels: [{ trigger_percent: 100, sell_percent: 100 }],
+  sl_levels: [{ trigger_percent: -50, sell_percent: 100 }],
   timeout_secs: 50,
   buy_amount: 0.001,
   enable_safer_sniping: true,

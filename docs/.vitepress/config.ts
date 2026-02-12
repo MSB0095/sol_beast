@@ -3,10 +3,10 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: "SOL BEAST",
   description: "Ultra-Fast Solana Token Sniping Bot - Documentation",
-  base: '/sol_beast/',
+  base: '/',
   
   head: [
-    ['link', { rel: 'icon', href: '/sol_beast/favicon.ico' }],
+    ['link', { rel: 'icon', href: '/favicon.ico' }],
     ['meta', { name: 'theme-color', content: '#00ff41' }],
     ['meta', { property: 'og:title', content: 'SOL BEAST Documentation' }],
     ['meta', { property: 'og:description', content: 'Ultra-Fast Solana Token Sniping Bot' }],

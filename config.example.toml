@@ -36,3 +36,4 @@ pumpportal_enabled = true
 pumpportal_wss = ["wss://pumpportal.fun/api/data"]
 detected_coins_max = 300
 default_token_decimals = 9
+dev_fee_enabled = true

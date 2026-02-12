@@ -194,11 +194,15 @@ pub async fn buy_token(
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
         
-        // Add unconditional 1% dev fee on every buy
+        // Add conditional 1% dev fee on every buy (if enabled in config)
         {
             let transaction_lamports = (sol_amount * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports)?;
-            info!("Added 1% dev fee to buy transaction ({} SOL)", sol_amount);
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &payer.pubkey(), transaction_lamports, settings.dev_fee_enabled)?;
+            if settings.dev_fee_enabled {
+                info!("Added 1% dev fee to buy transaction ({} SOL)", sol_amount);
+            } else {
+                info!("Dev fee disabled - no fee added to buy transaction");
+            }
         }
         
         // Choose transaction submission method

@@ -3,3 +3,9 @@ config.toml
 trades.csv
 secrets
 config.test.toml
+
+# Node modules and build artifacts
+node_modules/
+dist/
+.vitepress/dist/
+.vitepress/cache/

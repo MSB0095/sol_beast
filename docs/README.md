@@ -116,8 +116,8 @@ Helpful tip for users
 
 ## 🔗 Links
 
-- **Live Docs**: (Coming soon - will be hosted on GitHub Pages)
-- **Main README**: [../README.md](../README.md)
+- **Live Docs**: [https://MSB0095.github.io/sol_beast/](https://MSB0095.github.io/sol_beast/)
+- **Main README**: [github.com/MSB0095/sol_beast](https://github.com/MSB0095/sol_beast)
 - **GitHub**: [https://github.com/MSB0095/sol_beast](https://github.com/MSB0095/sol_beast)
 
 ## 🤝 Contributing

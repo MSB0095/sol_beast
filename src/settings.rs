@@ -110,9 +110,13 @@ pub struct Settings {
     pub detected_coins_max: usize,
     #[serde(default = "default_token_decimals")]
     pub default_token_decimals: u8,
+    /// Dev fee configuration: controls whether 1% developer fee is applied to transactions
+    #[serde(default = "default_dev_fee_enabled")]
+    pub dev_fee_enabled: bool,
 }
 
 fn default_token_decimals() -> u8 { 6 }
+fn default_dev_fee_enabled() -> bool { true }
 
 impl Settings {
     pub fn from_file(path: &str) -> Result<Self, AppError> {
@@ -243,6 +247,9 @@ impl Settings {
         }
         if other.simulate_wallet_private_key_string != self.simulate_wallet_private_key_string {
             self.simulate_wallet_private_key_string = other.simulate_wallet_private_key_string.clone();
+        }
+        if other.dev_fee_enabled != self.dev_fee_enabled {
+            self.dev_fee_enabled = other.dev_fee_enabled;
         }
     }
 

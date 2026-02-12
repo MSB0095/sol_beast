@@ -1305,11 +1305,15 @@ pub async fn sell_token(
             info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
         }
         
-        // Add unconditional 1% dev fee
+        // Add conditional 1% dev fee (if enabled in config)
         {
             let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
-            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports)?;
-            info!("Added 1% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
+            crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, settings.dev_fee_enabled)?;
+            if settings.dev_fee_enabled {
+                info!("Added 1% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
+            } else {
+                info!("Dev fee disabled - no fee added to sell transaction");
+            }
         }
         
         // Before sending: record pre-send SOL and token balances so we can compute exact deltas

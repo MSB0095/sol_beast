@@ -2,3 +2,4 @@
 config.toml
 trades.csv
 secrets
+config.test.toml

@@ -1,12 +1,13 @@
 /// Dev fee enforcement module for SolBeast
-/// Hardcoded 1% dev fee on every buy and sell transaction.
-/// This fee is unconditional and cannot be disabled or configured.
+/// Configurable 1% dev fee on every buy and sell transaction.
+/// This fee can be enabled or disabled via config.toml (default: enabled).
 #[allow(deprecated)]
 use solana_program::{pubkey::Pubkey, instruction::Instruction, system_instruction};
 use std::str::FromStr;
 
 // HARDCODED: Dev wallet address and fee percentage
-// These values are compiled into the binary and cannot be changed at runtime.
+// The wallet address and percentage are fixed in the code.
+// Whether the fee is applied can be configured via settings.
 const DEV_WALLET: &str = "BEAST1kZRXbU2FQs3SDa38t5jb1gxiVvfoQ3Vos2i8QE";
 const DEV_FEE_PERCENT: f64 = 1.0;
 
@@ -22,14 +23,20 @@ pub fn calculate_dev_fee(amount_lamports: u64) -> u64 {
     if fee == 0 { 1 } else { fee }
 }
 
-/// Add dev fee instruction to a list of instructions.
-/// Creates a system transfer of 1% of the transaction amount to the hardcoded dev wallet.
-/// This is unconditional — always called for every buy and sell.
+/// Add dev fee instruction to a list of instructions if enabled.
+/// Creates a system transfer of 1% of the transaction amount to the dev wallet.
+/// Only adds the fee if `enabled` is true.
 pub fn add_dev_fee_to_instructions(
     instructions: &mut Vec<Instruction>,
     payer: &Pubkey,
     transaction_amount_lamports: u64,
+    enabled: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !enabled {
+        log::debug!("Dev fee is disabled, skipping fee instruction");
+        return Ok(());
+    }
+
     let dev_wallet = get_dev_wallet()?;
     let fee_amount = calculate_dev_fee(transaction_amount_lamports);
 

@@ -37,4 +37,4 @@ We welcome contributions! Here's how to get involved.
 
 - Discord: [Join us](https://discord.gg/solbeast)
 - GitHub: [Open issues](https://github.com/MSB0095/sol_beast/issues)
-- Twitter: [@solbeast](https://twitter.com/solbeast)
+- Twitter: [@Sol__Beast](https://x.com/Sol__Beast)

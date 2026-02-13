@@ -119,7 +119,7 @@ Adjust every parameter from trading amounts to heuristic filters. No code change
 
 - 📖 **Documentation**: Comprehensive guides and API reference
 - 💬 **Discord**: [Join our community](https://discord.gg/solbeast) *(Coming Soon)*
-- 🐦 **Twitter**: [Follow @solbeast](https://twitter.com/solbeast) *(Coming Soon)*
+- 🐦 **Twitter**: [Follow @Sol__Beast](https://x.com/Sol__Beast)
 - 🐛 **Issues**: [Report bugs on GitHub](https://github.com/MSB0095/sol_beast/issues)
 
 ## Performance Tips

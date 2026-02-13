@@ -155,6 +155,25 @@
   --vp-c-brand-3: var(--theme-accent-glow);
 }
 
+/* Navbar Beast logo styling */
+.VPNavBarTitle .beast-logo-wrap {
+  margin-right: 8px;
+  display: flex;
+  align-items: center;
+}
+
+/* Home hero Beast logo styling */
+.VPHero .VPImage {
+  display: none !important;
+}
+
+.VPHero .beast-logo-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+}
+
 /* Custom styling for cyberpunk aesthetic */
 .VPNav {
   background: var(--theme-bg-primary) !important;

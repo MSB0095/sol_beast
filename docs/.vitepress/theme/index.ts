@@ -11,7 +11,9 @@ export default {
   extends: DefaultTheme,
   Layout: () => {
     return h(DefaultTheme.Layout, null, {
-      'nav-bar-content-after': () => h(ThemeSwitcher)
+      'nav-bar-title-before': () => h(BeastLogo, { size: 32, animated: true }),
+      'nav-bar-content-after': () => h(ThemeSwitcher),
+      'home-hero-image': () => h(BeastLogo, { size: 220, animated: true })
     })
   },
   enhanceApp({ app, router, siteData }) {

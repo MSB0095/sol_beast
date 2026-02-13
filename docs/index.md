@@ -5,9 +5,6 @@ hero:
   name: "SOL BEAST"
   text: "Ultra-Fast Solana Token Sniping Bot"
   tagline: "Automated pump.fun monitoring & trading with real-time dashboard"
-  image:
-    src: /logo.svg
-    alt: SOL BEAST
   actions:
     - theme: brand
       text: Get Started

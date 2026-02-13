@@ -13,7 +13,8 @@ export default defineConfig({
   ],
 
   themeConfig: {
-    logo: '/logo.svg',
+    // Logo is rendered via BeastLogo.vue component in theme/index.ts
+    // logo: '/logo.svg',
     
     nav: [
       { text: 'Home', link: '/' },

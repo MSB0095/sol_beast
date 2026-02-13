@@ -1,8 +1,12 @@
-name: Deploy Frontend to GitHub Pages
+name: Deploy Documentation to GitHub Pages
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'docs/**'
+      - 'deploy.sh'
+      - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -28,15 +32,15 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: docs/package-lock.json
 
       - name: Install dependencies
-        working-directory: frontend
+        working-directory: docs
         run: npm ci
 
-      - name: Build Frontend
-        working-directory: frontend
-        run: npm run build
+      - name: Build Documentation
+        working-directory: docs
+        run: npm run docs:build
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
@@ -44,7 +48,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: frontend/dist
+          path: docs/.vitepress/dist
 
   deploy:
     environment:

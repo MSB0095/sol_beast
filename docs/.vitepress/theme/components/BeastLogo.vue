@@ -143,11 +143,11 @@ onUnmounted(() => {
 })
 
 const svgStyle = computed(() => ({
-  filter: `drop-shadow(0 0 ${props.size / 8}px var(--theme-accent)) ${glitch.value ? 'drop-shadow(2px 0 0 #ff0062) drop-shadow(-2px 0 0 #00d9ff)' : ''}`,
+  filter: `drop-shadow(0 0 ${props.size / 16}px var(--theme-accent)) ${glitch.value ? 'drop-shadow(2px 0 0 #ff0062) drop-shadow(-2px 0 0 #00d9ff)' : ''}`,
 }))
 
 const eyeGlowStyle = computed(() => ({
-  filter: `drop-shadow(0 0 ${props.size / 6}px var(--theme-accent))`,
+  filter: `drop-shadow(0 0 ${props.size / 12}px var(--theme-accent))`,
 }))
 </script>
 
@@ -170,8 +170,8 @@ const eyeGlowStyle = computed(() => ({
   inset: 0;
   z-index: -1;
   border-radius: 9999px;
-  filter: blur(16px);
-  opacity: 0.4;
+  filter: blur(12px);
+  opacity: 0.2;
   background: radial-gradient(circle, var(--theme-accent) 0%, transparent 70%);
 }
 

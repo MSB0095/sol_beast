@@ -6,7 +6,10 @@ export default defineConfig({
   base: '/',
   
   head: [
-    ['link', { rel: 'icon', href: '/favicon.ico' }],
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
+    ['link', { rel: 'icon', type: 'image/png', sizes: '256x256', href: '/favicon.png' }],
+    ['link', { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' }],
+    ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: '/apple-touch-icon.png' }],
     ['meta', { name: 'theme-color', content: '#00ff41' }],
     ['meta', { property: 'og:title', content: 'SOL BEAST Documentation' }],
     ['meta', { property: 'og:description', content: 'Ultra-Fast Solana Token Sniping Bot' }],

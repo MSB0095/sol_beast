@@ -3,7 +3,7 @@ config.toml
 trades.csv
 secrets
 config.test.toml
-
+keypair.json
 # Node modules and build artifacts
 node_modules/
 dist/

@@ -4,6 +4,8 @@ import type { Theme } from 'vitepress'
 import DefaultTheme from 'vitepress/theme'
 import './style.css'
 import ThemeSwitcher from './components/ThemeSwitcher.vue'
+import BeastLogo from './components/BeastLogo.vue'
+import BeastBanner from './components/BeastBanner.vue'
 
 export default {
   extends: DefaultTheme,
@@ -13,6 +15,10 @@ export default {
     })
   },
   enhanceApp({ app, router, siteData }) {
+    // Register brand components globally for use in markdown
+    app.component('BeastLogo', BeastLogo)
+    app.component('BeastBanner', BeastBanner)
+
     // Add theme class to document on mount
     if (typeof window !== 'undefined') {
       const savedTheme = localStorage.getItem('colorTheme') || 'sol-green'

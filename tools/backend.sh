@@ -7,6 +7,9 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
+# Source cargo env if available (needed after fresh install)
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
 export RUST_LOG=info
 
 echo "🚀 Starting Sol Beast Backend..."

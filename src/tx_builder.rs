@@ -38,7 +38,7 @@ pub const SELL_DISCRIMINATOR_FALLBACK: [u8; 8] = [51, 230, 133, 164, 1, 127, 131
 pub const BUY_DISCRIMINATOR: [u8; 8] = BUY_DISCRIMINATOR_FALLBACK;
 pub const SELL_DISCRIMINATOR: [u8; 8] = SELL_DISCRIMINATOR_FALLBACK;
 
-/// Get discriminator for buy instruction, preferring IDL over fallback
+/// Get discriminator for buy instruction, preferring IDL over computed value
 fn get_buy_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
     if let Some(idl) = idl_opt {
         match get_instruction_discriminator(idl, "buy") {
@@ -47,18 +47,18 @@ fn get_buy_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
                 return disc;
             }
             Err(e) => {
-                warn!("Failed to get buy discriminator from IDL: {}, using fallback", e);
+                warn!("Failed to get buy discriminator from IDL: {}, computing from name", e);
             }
         }
     }
     
-    // Fallback: try computing from name
+    // Compute discriminator from instruction name
     let computed = compute_anchor_discriminator("buy");
     debug!("Using computed buy discriminator: {:?}", computed);
     computed
 }
 
-/// Get discriminator for sell instruction, preferring IDL over fallback
+/// Get discriminator for sell instruction, preferring IDL over computed value
 fn get_sell_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
     if let Some(idl) = idl_opt {
         match get_instruction_discriminator(idl, "sell") {
@@ -67,12 +67,12 @@ fn get_sell_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
                 return disc;
             }
             Err(e) => {
-                warn!("Failed to get sell discriminator from IDL: {}, using fallback", e);
+                warn!("Failed to get sell discriminator from IDL: {}, computing from name", e);
             }
         }
     }
     
-    // Fallback: try computing from name
+    // Compute discriminator from instruction name
     let computed = compute_anchor_discriminator("sell");
     debug!("Using computed sell discriminator: {:?}", computed);
     computed

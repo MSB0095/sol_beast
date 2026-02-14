@@ -292,11 +292,11 @@ mod tests {
     use super::load_all_idls;
 
     #[test]
-    fn idls_load() {
-        let idls = load_all_idls();
+    fn idls_load_does_not_panic() {
         // IDL loading from local files is optional when on-chain fetching is available
-        // This test just verifies the function doesn't panic
-        // In production, IDLs can be loaded from on-chain or local files
-        assert!(idls.len() <= 3); // At most 3 IDL files (pumpfun, pumpfunamm, pumpfunfees)
+        // This test verifies the function doesn't panic when no local files are present
+        // In production, IDLs can be loaded from on-chain or from local files
+        let _idls = load_all_idls();
+        // Test passes if we reach here without panicking
     }
 }

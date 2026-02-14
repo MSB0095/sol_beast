@@ -16,7 +16,7 @@ use solana_sdk::{
 };
 use log::{info, warn, debug};
 use std::str::FromStr;
-use spl_associated_token_account::instruction::create_associated_token_account;
+use spl_associated_token_account::instruction::create_associated_token_account_idempotent;
 use spl_associated_token_account::get_associated_token_address;
 use chrono::Utc;
 
@@ -178,7 +178,7 @@ pub async fn buy_token(
         // This ensures the account exists and we can close it later when selling to reclaim rent
         let _ata = get_associated_token_address(&payer_pubkey, &mint_pk);
         let _pre_instructions: Vec<solana_program::instruction::Instruction> = vec![
-            create_associated_token_account(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()),
+            create_associated_token_account_idempotent(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()),
         ];        
         // prepare context with payer so ATA creation uses correct funding account
         let mut real_context: HashMap<String, Pubkey> = HashMap::new();
@@ -372,11 +372,11 @@ pub async fn buy_token(
         }), "getAccountInfo", rpc_client, settings).await {
             Ok(info) => {
                 if info.result.is_none() {
-                    pre_instructions.push(create_associated_token_account(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
+                    pre_instructions.push(create_associated_token_account_idempotent(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
                 } else if let Some(result_val) = info.result {
                     let val = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
                     if val.is_null() {
-                        pre_instructions.push(create_associated_token_account(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
+                        pre_instructions.push(create_associated_token_account_idempotent(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
                     }
                 }
             }

@@ -256,6 +256,8 @@ pub async fn buy_token(
             let buy_cost_sol = if pre_sol_lamports > post_sol_lamports {
                 (pre_sol_lamports - post_sol_lamports) as f64 / 1_000_000_000.0
             } else {
+                warn!("Buy balance unchanged or increased for {} (pre={}, post={}), falling back to intended amount {}",
+                      mint, pre_sol_lamports, post_sol_lamports, sol_amount);
                 sol_amount // fallback to intended amount
             };
             info!("Buy accounting for {}: pre_sol={} post_sol={} cost={:.9} SOL (intended {:.9} SOL)",

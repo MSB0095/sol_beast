@@ -1410,10 +1410,11 @@ pub async fn sell_token(
         info!("Transaction fee: {} lamports ({:.9} SOL), estimated dev fee: {} lamports ({:.9} SOL)",
               tx_fee_lamports, (tx_fee_lamports as f64) / 1_000_000_000.0,
               expected_dev_fee, (expected_dev_fee as f64) / 1_000_000_000.0);
-        // Gross SOL from sell = balance_change + all fees paid
-        let gross_sol_lamports = sol_delta_lamports + tx_fee_lamports as i128;
-        info!("Gross SOL received (before fees): {:.9} SOL, net balance change: {:.9} SOL",
-              (gross_sol_lamports as f64) / 1_000_000_000.0,
+        // Gross SOL from sell = balance_change + base tx fee (does not include pump.fun/dev fees
+        // which are deducted from the sell proceeds inside the program)
+        let gross_sol_before_tx_fee = sol_delta_lamports + tx_fee_lamports as i128;
+        info!("Gross SOL before tx fee: {:.9} SOL, net balance change (all fees included): {:.9} SOL",
+              (gross_sol_before_tx_fee as f64) / 1_000_000_000.0,
               (sol_delta_lamports as f64) / 1_000_000_000.0);
 
         return Ok(SellResult {

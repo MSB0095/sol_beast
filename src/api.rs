@@ -111,7 +111,19 @@ pub struct TradeRecord {
     pub profit_loss: Option<f64>,
     pub profit_loss_percent: Option<f64>,
     pub reason: Option<String>, // "TP", "SL", "TIMEOUT", "MANUAL"
+    /// Token decimals (e.g. 6 for most pump.fun tokens)
+    #[serde(default = "default_trade_decimals")]
+    pub decimals: u8,
+    /// Actual SOL balance change from on-chain data (real mode only).
+    /// For buys this is negative (SOL spent), for sells positive (SOL received).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_sol_change: Option<f64>,
+    /// Transaction fee in SOL (gas + priority fee, from on-chain data, real mode only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_fee_sol: Option<f64>,
 }
+
+fn default_trade_decimals() -> u8 { 6 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]

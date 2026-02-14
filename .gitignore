@@ -11,3 +11,5 @@ dist/
 .vitepress/cache/
 # IDL cache directory
 .idl_cache/
+# TypeScript build info
+*.tsbuildinfo

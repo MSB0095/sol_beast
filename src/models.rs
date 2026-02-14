@@ -55,6 +55,14 @@ pub struct Holding {
     pub original_amount: u64,
     pub buy_price: f64,
     pub buy_time: DateTime<Utc>,
+    /// Token decimals (e.g. 6 for most pump.fun tokens). Used to convert base units to
+    /// human-readable token amounts: `tokens = amount / 10^decimals`.
+    #[serde(default = "default_token_decimals_u8")]
+    pub decimals: u8,
+    /// Actual SOL cost of the buy transaction (from on-chain balance delta), including all
+    /// fees (gas, priority, pump.fun, dev). Only populated in real mode.
+    #[serde(default)]
+    pub buy_cost_sol: Option<f64>,
     /// Indices of TP levels that have already been triggered/executed.
     #[serde(default)]
     pub triggered_tp_levels: Vec<usize>,
@@ -70,6 +78,8 @@ pub struct Holding {
     // Parsed, convenient subset of the on-chain `Metadata` account saved for quick access
     pub onchain: Option<OnchainFullMetadata>,
 }
+
+fn default_token_decimals_u8() -> u8 { 6 }
 pub type PriceCache = LruCache<String, (Instant, f64)>;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

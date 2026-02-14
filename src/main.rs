@@ -1108,7 +1108,8 @@ async fn handle_new_token(
                                // Add buy trade record
                                {
                                    let mut trades = trades_list.lock().await;
-                                   let amount_tokens = holding.amount as f64 / 1_000_000.0;
+                                   let token_divisor = 10f64.powi(holding.decimals as i32);
+                                   let amount_tokens = holding.amount as f64 / token_divisor;
                                    trades.insert(0, api::TradeRecord {
                                        mint: mint.clone(),
                                        symbol: offchain_meta.as_ref().and_then(|o| o.symbol.clone()),
@@ -1117,12 +1118,15 @@ async fn handle_new_token(
                                        trade_type: "buy".to_string(),
                                        timestamp: holding.buy_time.to_rfc3339(),
                                        tx_signature: None,
-                                       amount_sol: settings.buy_amount,
+                                       amount_sol: holding.buy_cost_sol.unwrap_or(settings.buy_amount),
                                        amount_tokens,
                                        price_per_token: holding.buy_price,
                                        profit_loss: None,
                                        profit_loss_percent: None,
                                        reason: None,
+                                       decimals: holding.decimals,
+                                       actual_sol_change: holding.buy_cost_sol.map(|c| -c),
+                                       tx_fee_sol: None,
                                    });
                                    if trades.len() > 200 { trades.truncate(200); }
                                }
@@ -1666,7 +1670,8 @@ async fn handle_new_token_from_pumpportal(
                 // Emit trade record
                 {
                     let mut trades = trades_list.lock().await;
-                    let amount_tokens = holding.amount as f64 / 1_000_000.0;
+                    let token_divisor = 10f64.powi(holding.decimals as i32);
+                    let amount_tokens = holding.amount as f64 / token_divisor;
                     trades.insert(
                         0,
                         api::TradeRecord {
@@ -1677,12 +1682,15 @@ async fn handle_new_token_from_pumpportal(
                             trade_type: "buy".to_string(),
                             timestamp: holding.buy_time.to_rfc3339(),
                             tx_signature: None,
-                            amount_sol: settings.buy_amount,
+                            amount_sol: holding.buy_cost_sol.unwrap_or(settings.buy_amount),
                             amount_tokens,
                             price_per_token: holding.buy_price,
                             profit_loss: None,
                             profit_loss_percent: None,
                             reason: None,
+                            decimals: holding.decimals,
+                            actual_sol_change: holding.buy_cost_sol.map(|c| -c),
+                            tx_fee_sol: None,
                         },
                     );
                     if trades.len() > 200 { trades.truncate(200); }

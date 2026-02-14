@@ -1184,24 +1184,37 @@ async fn find_curve_account_by_mint(
 
 
 
+/// Result of a sell transaction, containing on-chain accounting data.
+#[derive(Debug, Clone)]
+pub struct SellResult {
+    /// Actual SOL balance change (post - pre), includes all fee deductions. Only for real mode.
+    pub sol_balance_change: Option<f64>,
+    /// Transaction fee in SOL (base fee + priority fee). Only for real mode.
+    pub tx_fee_sol: Option<f64>,
+}
+
 pub async fn sell_token(
     mint: &str,
     amount: u64,
     current_price: f64,
+    decimals: u8,
     is_real: bool,
     keypair: Option<&Keypair>,
     simulate_keypair: Option<&Keypair>,
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
     is_final_sell: bool,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // current_price is SOL per token
-    let sol_received = amount as f64 * current_price;
+) -> Result<SellResult, Box<dyn std::error::Error + Send + Sync>> {
+    // current_price is SOL per token; convert base units to whole tokens
+    let token_divisor = 10f64.powi(decimals as i32);
+    let sol_received_estimate = (amount as f64 / token_divisor) * current_price;
     info!(
-        "Sell {}: {} tokens for {:.9} SOL (price: {:.18} SOL/token)",
+        "Sell {}: {} tokens ({} base units, {} decimals) for ~{:.9} SOL (price: {:.18} SOL/token)",
         mint,
+        amount as f64 / token_divisor,
         amount,
-        sol_received,
+        decimals,
+        sol_received_estimate,
         current_price
     );
     let client = RpcClient::new(&settings.solana_rpc_urls[0]);
@@ -1240,9 +1253,8 @@ pub async fn sell_token(
             match idl.build_accounts_for("sell", &context) {
                 Ok(metas) => {
                     let mut d = SELL_DISCRIMINATOR.to_vec();
-                    // Calculate min_sol_output: (tokens / 1e6) * (SOL per token) * 1e9 lamports
-                    // Simplifies to: tokens * current_price * 1000
-                    let min_sol_output = (amount as f64 * current_price * 1000.0) as u64;
+                    // Calculate min_sol_output: (base_units / 10^decimals) * SOL_per_token * 1e9 lamports
+                    let min_sol_output = ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
                     // Apply slippage tolerance (reduce minimum by slippage percentage)
                     let slippage_multiplier = 1.0 - (settings.slippage_bps as f64 / 10000.0);
                     let min_sol_with_slippage = (min_sol_output as f64 * slippage_multiplier) as u64;
@@ -1257,7 +1269,7 @@ pub async fn sell_token(
             // fallback to legacy builder using configured pump program
             let program_id = Pubkey::from_str(&settings.pump_fun_program)?;
             // Calculate min_sol_output with slippage
-            let min_sol_output = (amount as f64 * current_price * 1000.0) as u64;
+            let min_sol_output = ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
             let slippage_multiplier = 1.0 - (settings.slippage_bps as f64 / 10000.0);
             let min_sol_with_slippage = (min_sol_output as f64 * slippage_multiplier) as u64;
             build_sell_instruction(
@@ -1307,10 +1319,10 @@ pub async fn sell_token(
         
         // Add conditional 1% dev fee (if enabled in config)
         {
-            let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
+            let sol_received_lamports = (sol_received_estimate * 1_000_000_000.0) as u64;
             crate::dev_fee::add_dev_fee_to_instructions(&mut all_instrs, &user_pubkey, sol_received_lamports, settings.dev_fee_enabled)?;
             if settings.dev_fee_enabled {
-                info!("Added 1% dev fee to sell transaction (expected: {:.9} SOL)", sol_received);
+                info!("Added 1% dev fee to sell transaction (estimated: {:.9} SOL)", sol_received_estimate);
             } else {
                 info!("Dev fee disabled - no fee added to sell transaction");
             }
@@ -1386,15 +1398,29 @@ pub async fn sell_token(
             }
         }
 
-        // Expected dev fee (approx) from configured percent on sol_received
-        let sol_received_lamports = (sol_received * 1_000_000_000.0) as u64;
-        let expected_dev_fee = crate::dev_fee::calculate_dev_fee(sol_received_lamports);
+        // Expected dev fee (approx) from configured percent on estimated sol_received
+        let sol_received_est_lamports = (sol_received_estimate * 1_000_000_000.0) as u64;
+        let expected_dev_fee = crate::dev_fee::calculate_dev_fee(sol_received_est_lamports);
 
         // Log exact accounting
-        info!("Sell accounting for {}: tokens_sold={} (base units), sol_delta={} lamports ({} SOL)", mint, tokens_delta, sol_delta_lamports, (sol_delta_lamports as f64)/1_000_000_000.0);
-        info!("Transaction fee: {} lamports ({} SOL), expected dev fee: {} lamports ({} SOL)", tx_fee_lamports, (tx_fee_lamports as f64)/1_000_000_000.0, expected_dev_fee, (expected_dev_fee as f64)/1_000_000_000.0);
-        let net_lamports = sol_delta_lamports - tx_fee_lamports as i128 - expected_dev_fee as i128;
-        info!("Net PnL (approx) for {}: {} lamports ({} SOL)", mint, net_lamports, (net_lamports as f64)/1_000_000_000.0);
+        // sol_delta_lamports already includes all fee deductions (gas, priority, dev fee, pump.fun fee)
+        // and any rent reclaimed from ATA closure
+        info!("Sell accounting for {}: tokens_sold={} (base units), sol_balance_change={} lamports ({:.9} SOL)",
+              mint, tokens_delta, sol_delta_lamports, (sol_delta_lamports as f64) / 1_000_000_000.0);
+        info!("Transaction fee: {} lamports ({:.9} SOL), estimated dev fee: {} lamports ({:.9} SOL)",
+              tx_fee_lamports, (tx_fee_lamports as f64) / 1_000_000_000.0,
+              expected_dev_fee, (expected_dev_fee as f64) / 1_000_000_000.0);
+        // Gross SOL from sell = balance_change + base tx fee (does not include pump.fun/dev fees
+        // which are deducted from the sell proceeds inside the program)
+        let gross_sol_before_tx_fee = sol_delta_lamports + tx_fee_lamports as i128;
+        info!("Gross SOL before tx fee: {:.9} SOL, net balance change (all fees included): {:.9} SOL",
+              (gross_sol_before_tx_fee as f64) / 1_000_000_000.0,
+              (sol_delta_lamports as f64) / 1_000_000_000.0);
+
+        return Ok(SellResult {
+            sol_balance_change: Some((sol_delta_lamports as f64) / 1_000_000_000.0),
+            tx_fee_sol: Some((tx_fee_lamports as f64) / 1_000_000_000.0),
+        });
     } else {
         // Dry-run simulation: construct same instruction and simulate it using
         // either the provided simulate_keypair or an ephemeral Keypair fallback.
@@ -1407,8 +1433,8 @@ pub async fn sell_token(
                 };
         let sim_payer_pubkey = sim_payer_ref.pubkey();
         let program_id = Pubkey::from_str(&settings.pump_fun_program)?;
-        // Calculate min_sol_output with slippage
-        let min_sol_output = (amount as f64 * current_price * 1000.0) as u64;
+        // Calculate min_sol_output with slippage using actual decimals
+        let min_sol_output = ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
         let slippage_multiplier = 1.0 - (settings.slippage_bps as f64 / 10000.0);
         let min_sol_with_slippage = (min_sol_output as f64 * slippage_multiplier) as u64;
         let instruction = build_sell_instruction(
@@ -1463,7 +1489,10 @@ pub async fn sell_token(
         }
     }
 
-    // Complete the function by returning success
-    Ok(())
+    // Complete the function by returning success (dry-run has no on-chain data)
+    Ok(SellResult {
+        sol_balance_change: None,
+        tx_fee_sol: None,
+    })
 }
 

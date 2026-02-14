@@ -187,8 +187,9 @@ pub async fn monitor_holdings(
                     }
                 };
 
+                let token_divisor = 10f64.powi(holding.decimals as i32);
                 let profit_percent = if holding.buy_price != 0.0 { ((current_price - holding.buy_price) / holding.buy_price) * 100.0 } else { 0.0 };
-                let tokens = holding.amount as f64 / 1_000_000.0;
+                let tokens = holding.amount as f64 / token_divisor;
                 let pnl_sol = (current_price - holding.buy_price) * tokens;
 
                 let _ = ws_tx.send(serde_json::json!({
@@ -199,6 +200,7 @@ pub async fn monitor_holdings(
                     "pnl_sol": pnl_sol,
                     "buy_price": holding.buy_price,
                     "amount": holding.amount,
+                    "decimals": holding.decimals,
                     "triggered_tp": holding.triggered_tp_levels,
                     "triggered_sl": holding.triggered_sl_levels
                 }).to_string());
@@ -260,10 +262,10 @@ pub async fn monitor_holdings(
                     let kp_ref = kp.as_ref().map(|k| k.as_ref());
                     let sim_kp_ref = sim_kp.as_ref().map(|k| k.as_ref());
                     
-                    match rpc::sell_token(&mint_c, sell_amount, current_price, is_real, kp_ref, sim_kp_ref, &rpc_client, &settings, is_final_sell).await {
-                        Ok(_) => {
-                            let sell_sol = (sell_amount as f64 / 1_000_000.0) * current_price;
-                            let buy_sol = holding.buy_price * (sell_amount as f64 / 1_000_000.0);
+                    match rpc::sell_token(&mint_c, sell_amount, current_price, holding.decimals, is_real, kp_ref, sim_kp_ref, &rpc_client, &settings, is_final_sell).await {
+                        Ok(sell_result) => {
+                            let sell_sol = (sell_amount as f64 / token_divisor) * current_price;
+                            let buy_sol = holding.buy_price * (sell_amount as f64 / token_divisor);
                             let mut trades = trades_list.lock().await;
                             trades.insert(0, TradeRecord {
                                 mint: mint_c.clone(),
@@ -274,11 +276,14 @@ pub async fn monitor_holdings(
                                 timestamp: Utc::now().to_rfc3339(),
                                 tx_signature: None,
                                 amount_sol: sell_sol,
-                                amount_tokens: sell_amount as f64 / 1_000_000.0,
+                                amount_tokens: sell_amount as f64 / token_divisor,
                                 price_per_token: current_price,
                                 profit_loss: Some(sell_sol - buy_sol),
                                 profit_loss_percent: Some(profit_percent),
                                 reason: Some(reason_str.clone()),
+                                decimals: holding.decimals,
+                                actual_sol_change: sell_result.sol_balance_change,
+                                tx_fee_sol: sell_result.tx_fee_sol,
                             });
                             if trades.len() > 200 { trades.truncate(200); }
                             drop(trades);
@@ -320,12 +325,15 @@ pub async fn monitor_holdings(
                                     trade_type: "sell".to_string(),
                                     timestamp: Utc::now().to_rfc3339(),
                                     tx_signature: None,
-                                    amount_sol: (holding.amount as f64 / 1_000_000.0) * current_price,
-                                    amount_tokens: holding.amount as f64 / 1_000_000.0,
+                                    amount_sol: (holding.amount as f64 / token_divisor) * current_price,
+                                    amount_tokens: holding.amount as f64 / token_divisor,
                                     price_per_token: current_price,
-                                    profit_loss: Some(((holding.amount as f64 / 1_000_000.0) * current_price) - (holding.buy_price * (holding.amount as f64 / 1_000_000.0))),
+                                    profit_loss: Some(((holding.amount as f64 / token_divisor) * current_price) - (holding.buy_price * (holding.amount as f64 / token_divisor))),
                                     profit_loss_percent: Some(profit_percent),
                                     reason: Some("TIMEOUT_FORCED".to_string()),
+                                    decimals: holding.decimals,
+                                    actual_sol_change: None,
+                                    tx_fee_sol: None,
                                 });
                                 if trades.len() > 200 { trades.truncate(200); }
                                 trades_map.lock().await.remove(&mint_c);

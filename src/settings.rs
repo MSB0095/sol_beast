@@ -113,10 +113,17 @@ pub struct Settings {
     /// Dev fee configuration: controls whether 1% developer fee is applied to transactions
     #[serde(default = "default_dev_fee_enabled")]
     pub dev_fee_enabled: bool,
+    /// Enable fetching IDLs from on-chain (Anchor-style IDL accounts)
+    #[serde(default = "default_use_onchain_idl")]
+    pub use_onchain_idl: bool,
+    /// Optional: Override IDL account pubkeys for specific programs (program_id -> idl_account)
+    #[serde(default)]
+    pub idl_account_overrides: std::collections::HashMap<String, String>,
 }
 
 fn default_token_decimals() -> u8 { 6 }
 fn default_dev_fee_enabled() -> bool { true }
+fn default_use_onchain_idl() -> bool { true }
 
 impl Settings {
     pub fn from_file(path: &str) -> Result<Self, AppError> {
@@ -250,6 +257,12 @@ impl Settings {
         }
         if other.dev_fee_enabled != self.dev_fee_enabled {
             self.dev_fee_enabled = other.dev_fee_enabled;
+        }
+        if other.use_onchain_idl != self.use_onchain_idl {
+            self.use_onchain_idl = other.use_onchain_idl;
+        }
+        if other.idl_account_overrides != self.idl_account_overrides {
+            self.idl_account_overrides = other.idl_account_overrides.clone();
         }
     }
 

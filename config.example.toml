@@ -37,3 +37,8 @@ pumpportal_wss = ["wss://pumpportal.fun/api/data"]
 detected_coins_max = 300
 default_token_decimals = 9
 dev_fee_enabled = true
+# Enable fetching IDLs from on-chain (default: true)
+use_onchain_idl = true
+# Optional: Override IDL account addresses for specific programs
+# [idl_account_overrides]
+# "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P" = "CustomIdlAccountPubkeyHere"

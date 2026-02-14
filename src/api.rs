@@ -400,34 +400,43 @@ async fn stop_bot_handler(
     
     let bot_control = state.bot_control.clone();
     
-    info!("Bot stopping");
-    bot_control.add_log(
-        "info",
-        "Bot stopping".to_string(),
-        None
-    ).await;
+    // Check if there are active holdings to drain
+    let holdings_count = state.stats.lock().await.current_holdings.len();
     
-    // Simulate shutdown delay
-    let bot_control_clone = bot_control.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        let mut state = bot_control_clone.running_state.lock().await;
-        *state = BotRunningState::Stopped;
-        bot_control_clone.add_log(
+    if holdings_count == 0 {
+        // No holdings — stop immediately
+        let mut rs = bot_control.running_state.lock().await;
+        *rs = BotRunningState::Stopped;
+        drop(rs);
+        info!("Bot stopped (no active holdings)");
+        bot_control.add_log(
             "info",
-            "Bot stopped successfully".to_string(),
+            "Bot stopped (no active holdings)".to_string(),
             None
         ).await;
-        info!("Bot state changed to Stopped");
-    });
-    
-    (
-        StatusCode::OK,
-        Json(json!({
-            "status": "success",
-            "message": "Bot is stopping"
-        }))
-    )
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "message": "Bot stopped"
+            }))
+        )
+    } else {
+        // Holdings exist — enter draining mode, monitor will transition to Stopped when empty
+        info!("Bot stopping — draining {} active holdings (TP/SL/Timeout)", holdings_count);
+        bot_control.add_log(
+            "info",
+            format!("Bot stopping — draining {} active holding(s). Will stop after all positions close via TP/SL/Timeout.", holdings_count),
+            None
+        ).await;
+        (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "message": format!("Bot is draining {} holding(s) before stopping", holdings_count)
+            }))
+        )
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

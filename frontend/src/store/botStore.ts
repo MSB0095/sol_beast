@@ -354,11 +354,14 @@ export const useBotStore = create<BotStore>((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
       })
       if (response.ok) {
-        set({ runningState: 'stopped', error: null })
+        // Don't set 'stopped' immediately — the backend will report the actual state
+        // (either 'stopped' if no holdings, or 'stopping' while draining).
+        // The polling/stats sync will update runningState from the backend.
+        set({ error: null })
         get().addLog({
           timestamp: new Date().toISOString(),
           level: 'info',
-          message: 'Bot stopped successfully'
+          message: 'Stop requested — draining active holdings'
         })
       } else {
         const error = await response.json()

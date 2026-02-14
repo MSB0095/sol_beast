@@ -2,7 +2,8 @@ import { useBotStore } from '../store/botStore'
 import { Play, Square, Loader2, Shield, Zap } from 'lucide-react'
 
 export default function BotControl() {
-  const { runningState, mode, startBot, stopBot, setMode } = useBotStore()
+  const { runningState, mode, startBot, stopBot, setMode, stats } = useBotStore()
+  const holdingsCount = stats?.current_holdings?.length ?? 0
 
   const isStarting = runningState === 'starting'
   const isStopping = runningState === 'stopping'
@@ -44,7 +45,7 @@ export default function BotControl() {
               {isTransitioning && <span className="status-warning"></span>}
               {isStopped && <span className="status-offline"></span>}
               {isStarting && '[INITIALIZING...]'}
-              {isStopping && '[SHUTTING DOWN...]'}
+              {isStopping && (holdingsCount > 0 ? `[DRAINING ${holdingsCount} HOLDING${holdingsCount !== 1 ? 'S' : ''}...]` : '[SHUTTING DOWN...]')}
               {isRunning && '[ACTIVE]'}
               {isStopped && '[INACTIVE]'}
             </p>
@@ -160,7 +161,7 @@ export default function BotControl() {
           {isStopping ? (
             <>
               <Loader2 size={20} className="animate-spin" />
-              STOPPING...
+              {holdingsCount > 0 ? `DRAINING (${holdingsCount})...` : 'STOPPING...'}
             </>
           ) : (
             <>
@@ -174,7 +175,7 @@ export default function BotControl() {
       {/* Info text */}
       <div className="mt-4 text-xs font-mono" style={{ color: 'var(--theme-text-muted)' }}>
         <p>• START THE BOT TO BEGIN MONITORING AND TRADING</p>
-        <p>• STOP THE BOT TO PAUSE ALL OPERATIONS</p>
+        <p>• STOP DRAINS ALL HOLDINGS VIA TP/SL/TIMEOUT FIRST</p>
         <p>• SWITCH MODE ONLY WHEN BOT IS STOPPED</p>
       </div>
     </div>

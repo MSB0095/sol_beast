@@ -75,13 +75,30 @@ pub async fn monitor_holdings(
         }
 
         let running_state = bot_control.running_state.lock().await;
-        if !matches!(*running_state, crate::api::BotRunningState::Running) { 
+        let is_stopping = matches!(*running_state, crate::api::BotRunningState::Stopping);
+        if !matches!(*running_state, crate::api::BotRunningState::Running) && !is_stopping { 
             drop(running_state);
             continue; 
         }
         drop(running_state);
         
         let holdings_snapshot = { holdings.lock().await.clone() };
+
+        // Graceful drain: if bot is Stopping and no holdings remain, transition to Stopped
+        if is_stopping && holdings_snapshot.is_empty() {
+            let mut rs = bot_control.running_state.lock().await;
+            if matches!(*rs, crate::api::BotRunningState::Stopping) {
+                *rs = crate::api::BotRunningState::Stopped;
+                drop(rs);
+                bot_control.add_log(
+                    "info",
+                    "All holdings drained. Bot stopped.".to_string(),
+                    None
+                ).await;
+                log::info!("Graceful drain complete — all holdings closed. Bot is now Stopped.");
+            }
+            continue;
+        }
 
         for (mint, holding) in holdings_snapshot {
             if holding.amount == 0 { 

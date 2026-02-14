@@ -354,7 +354,7 @@ async fn main() -> Result<(), AppError> {
         current_holdings: vec![],
         uptime_secs: 0,
         last_activity: chrono::Utc::now().to_rfc3339(),
-        running_state: Some("running".to_string()),
+        running_state: Some("stopped".to_string()),
         mode: Some(if is_real { "real" } else { "dry-run" }.to_string()),
     }));
 
@@ -367,14 +367,11 @@ async fn main() -> Result<(), AppError> {
         ws_tx: ws_tx.clone(),
     };
 
-    // Add initial startup log
+    // Add initial startup log — bot starts stopped, user must choose mode and start manually
     bot_control
         .add_log(
             "info",
-            format!(
-                "Bot initialized in {} mode",
-                if is_real { "real" } else { "dry-run" }
-            ),
+            "Bot initialized in stopped state. Choose a mode and start manually.".to_string(),
             Some(format!(
                 "Wallet: {}",
                 if is_real {
@@ -389,21 +386,8 @@ async fn main() -> Result<(), AppError> {
         )
         .await;
 
-    // Set initial bot state to Running (since the bot starts immediately)
-    {
-        let mut state = bot_control.running_state.lock().await;
-        *state = api::BotRunningState::Running;
-    }
-
-    // Set initial mode based on is_real flag
-    {
-        let mut mode = bot_control.mode.lock().await;
-        *mode = if is_real {
-            api::BotMode::Real
-        } else {
-            api::BotMode::DryRun
-        };
-    }
+    // Bot starts in Stopped state — user must manually choose mode and start via the API/dashboard.
+    // running_state is already Stopped from BotControl::new_with_mode.
 
     // Spawn a task to periodically sync holdings to API stats
     let holdings_for_sync = holdings.clone();
@@ -1018,6 +1002,19 @@ async fn handle_new_token(
                  // Lock holdings BRIEFLY — do NOT hold across the slow buy call.
                  // Reserve the slot with in_flight_buys to prevent concurrent over-buying.
                  let skip_buy = {
+                     // Check if bot is running before attempting to buy
+                     if let Some(control) = BOT_CONTROL.get() {
+                         let rs = control.running_state.lock().await;
+                         if !matches!(*rs, api::BotRunningState::Running) {
+                             debug!("Bot not running; skipping buy for {}", mint);
+                             true
+                         } else {
+                             false
+                         }
+                     } else {
+                         true
+                     }
+                 } || {
                      let hg = holdings.lock().await;
                      if hg.contains_key(&mint) {
                          debug!("Already holding {}; skipping duplicate buy", mint);
@@ -1599,6 +1596,23 @@ async fn handle_new_token_from_pumpportal(
         // Refresh price cache timestamp so buyer::buy_token finds a fresh entry
         // and skips the slow multi-commitment RPC re-fetch sequence.
         price_cache.lock().await.put(mint.to_string(), (Instant::now(), _price));
+
+        // Check if bot is running before attempting to buy
+        {
+            if let Some(control) = BOT_CONTROL.get() {
+                let rs = control.running_state.lock().await;
+                if !matches!(*rs, crate::api::BotRunningState::Running) {
+                    debug!("Bot not running; skipping PumpPortal buy for {}", mint);
+                    if sub_was_created && subscribed_idx.is_some() && subscribed_sub_id.is_some() {
+                        let sender = &ws_control_senders[subscribed_idx.unwrap()];
+                        let (u_tx, u_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+                        let _ = sender.send(WsRequest::Unsubscribe { sub_id: subscribed_sub_id.unwrap(), resp: u_tx }).await;
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), u_rx).await;
+                    }
+                    return Ok(());
+                }
+            }
+        }
 
         // Lock holdings BRIEFLY to check — do NOT hold across the slow buy call.
         // Reserve the slot with in_flight_buys to prevent concurrent over-buying.

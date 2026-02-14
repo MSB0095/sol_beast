@@ -59,7 +59,7 @@ pub struct BotControl {
 impl BotControl {
     pub fn new_with_mode(initial_mode: BotMode) -> Self {
         Self {
-            running_state: Arc::new(Mutex::new(BotRunningState::Running)),
+            running_state: Arc::new(Mutex::new(BotRunningState::Stopped)),
             mode: Arc::new(Mutex::new(initial_mode)),
             logs: Arc::new(Mutex::new(Vec::with_capacity(100))),
         }

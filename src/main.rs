@@ -77,7 +77,7 @@ use solana_client::rpc_client::RpcClient;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signature::Signer;
 use solana_sdk::pubkey::Pubkey;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{collections::HashMap, fs, sync::Arc, time::Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Duration;
@@ -159,37 +159,39 @@ async fn main() -> Result<(), AppError> {
     // Shared map of active subscriptions for mints we care about. Value is (wss_sender_index, sub_id)
     let sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>> = Arc::new(Mutex::new(HashMap::new()));
     let (tx, mut rx) = mpsc::channel(1000);
-    let is_real = std::env::args().any(|arg| arg == "--real");
-    // Load real keypair either from path or from JSON in config (optional)
-    // Prefer base64 env var for keypairs to avoid storing keys on disk.
-    let keypair: Option<std::sync::Arc<Keypair>> = if is_real {
-        if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_KEYPAIR_B64") {
-            Some(std::sync::Arc::new(
-                Keypair::try_from(bytes.as_slice())
-                    .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
-            ))
-        } else if let Some(pk_string) = settings.wallet_private_key_string.clone() {
-            let bytes =
-                settings::parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
-            Some(std::sync::Arc::new(
-                Keypair::try_from(bytes.as_slice())
-                    .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
-            ))
-        } else if let Some(j) = settings.wallet_keypair_json.clone() {
-            let bytes: Vec<u8> = serde_json::from_str(&j)?;
-            Some(std::sync::Arc::new(
-                Keypair::try_from(bytes.as_slice())
-                    .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
-            ))
-        } else if let Some(path) = settings.wallet_keypair_path.clone() {
-            let bytes = fs::read(path)?;
-            Some(std::sync::Arc::new(
-                Keypair::try_from(bytes.as_slice())
-                    .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
-            ))
-        } else {
-            return Err(AppError::InvalidKeypair("No wallet keypair configured! Set wallet_keypair_path, wallet_private_key_string, wallet_keypair_json, or SOL_BEAST_KEYPAIR_B64 env var".to_string()));
-        }
+    let is_real_cli = std::env::args().any(|arg| arg == "--real");
+    // Dynamic mode flag — updated by the API when the user toggles mode via
+    // the dashboard. Buy/sell logic reads this each tick instead of the static
+    // CLI bool so the mode switch takes effect immediately.
+    let is_real_flag = Arc::new(AtomicBool::new(is_real_cli));
+    // Always attempt to load a wallet keypair (if configured) so the user can
+    // switch to real mode at runtime via the dashboard without restarting.
+    let keypair: Option<std::sync::Arc<Keypair>> = if let Some(bytes) = settings::load_keypair_from_env_var("SOL_BEAST_KEYPAIR_B64") {
+        Some(std::sync::Arc::new(
+            Keypair::try_from(bytes.as_slice())
+                .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
+        ))
+    } else if let Some(pk_string) = settings.wallet_private_key_string.clone() {
+        let bytes =
+            settings::parse_private_key_string(&pk_string).map_err(AppError::InvalidKeypair)?;
+        Some(std::sync::Arc::new(
+            Keypair::try_from(bytes.as_slice())
+                .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
+        ))
+    } else if let Some(j) = settings.wallet_keypair_json.clone() {
+        let bytes: Vec<u8> = serde_json::from_str(&j)?;
+        Some(std::sync::Arc::new(
+            Keypair::try_from(bytes.as_slice())
+                .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
+        ))
+    } else if let Some(path) = settings.wallet_keypair_path.clone() {
+        let bytes = fs::read(path)?;
+        Some(std::sync::Arc::new(
+            Keypair::try_from(bytes.as_slice())
+                .map_err(|e| AppError::InvalidKeypair(e.to_string()))?,
+        ))
+    } else if is_real_cli {
+        return Err(AppError::InvalidKeypair("No wallet keypair configured! Set wallet_keypair_path, wallet_private_key_string, wallet_keypair_json, or SOL_BEAST_KEYPAIR_B64 env var".to_string()));
     } else {
         None
     };
@@ -221,7 +223,7 @@ async fn main() -> Result<(), AppError> {
     };
 
     // Create bot control early so it can be used by all tasks
-    let initial_mode = if is_real {
+    let initial_mode = if is_real_cli {
         api::BotMode::Real
     } else {
         api::BotMode::DryRun
@@ -324,13 +326,14 @@ async fn main() -> Result<(), AppError> {
     let trades_list_clone_for_monitor = trades_list.clone();
     let bot_control_for_monitor = bot_control.clone();
     let ws_tx_for_monitor = ws_tx.clone();
+    let is_real_flag_for_monitor = is_real_flag.clone();
     
     let monitor_handle = tokio::spawn(async move {
         monitor::monitor_holdings(
             holdings_clone_monitor,
             price_cache_clone_monitor,
             rpc_client_clone,
-            is_real,
+            is_real_flag_for_monitor,
             keypair_clone_monitor,
             simulate_keypair_clone_for_monitor,
             settings_clone_monitor,
@@ -355,7 +358,7 @@ async fn main() -> Result<(), AppError> {
         uptime_secs: 0,
         last_activity: chrono::Utc::now().to_rfc3339(),
         running_state: Some("stopped".to_string()),
-        mode: Some(if is_real { "real" } else { "dry-run" }.to_string()),
+        mode: Some(if is_real_cli { "real" } else { "dry-run" }.to_string()),
     }));
 
     let api_state = ApiState {
@@ -365,6 +368,8 @@ async fn main() -> Result<(), AppError> {
         detected_coins: detected_coins.clone(),
         trades: trades_list.clone(),
         ws_tx: ws_tx.clone(),
+        is_real_flag: is_real_flag.clone(),
+        has_keypair: keypair.is_some(),
     };
 
     // Add initial startup log — bot starts stopped, user must choose mode and start manually
@@ -374,13 +379,14 @@ async fn main() -> Result<(), AppError> {
             "Bot initialized in stopped state. Choose a mode and start manually.".to_string(),
             Some(format!(
                 "Wallet: {}",
-                if is_real {
+                if is_real_cli {
                     keypair
                         .as_ref()
                         .map(|k| k.pubkey().to_string())
                         .unwrap_or_else(|| "None".to_string())
                 } else {
-                    "Simulation mode".to_string()
+                    format!("Simulation mode{}",
+                        if keypair.is_some() { " (keypair loaded, can switch to real)" } else { "" })
                 }
             )),
         )
@@ -493,8 +499,10 @@ async fn main() -> Result<(), AppError> {
         let ws_tx = ws_tx.clone();
         let keypair = keypair.clone();
         let simulate_keypair = simulate_keypair.clone();
+        let is_real_flag = is_real_flag.clone();
 
         tokio::spawn(async move {
+            let is_real = is_real_flag.load(Ordering::Relaxed);
             if let Err(e) = process_message(
                 &msg,
                 &seen,
@@ -1124,6 +1132,7 @@ async fn handle_new_token(
                                        decimals: holding.decimals,
                                        actual_sol_change: holding.buy_cost_sol.map(|c| -c),
                                        tx_fee_sol: None,
+                                       simulated: !is_real,
                                    });
                                    if trades.len() > 200 { trades.truncate(200); }
                                }
@@ -1705,6 +1714,7 @@ async fn handle_new_token_from_pumpportal(
                             decimals: holding.decimals,
                             actual_sol_change: holding.buy_cost_sol.map(|c| -c),
                             tx_fee_sol: None,
+                            simulated: !is_real,
                         },
                     );
                     if trades.len() > 200 { trades.truncate(200); }

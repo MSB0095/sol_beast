@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use tower_http::cors::CorsLayer;
 use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     models::Holding,
@@ -121,6 +121,9 @@ pub struct TradeRecord {
     /// Transaction fee in SOL (gas + priority fee, from on-chain data, real mode only)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_fee_sol: Option<f64>,
+    /// Whether this trade was executed in dry-run (simulated) mode.
+    #[serde(default)]
+    pub simulated: bool,
 }
 
 fn default_trade_decimals() -> u8 { 6 }
@@ -144,6 +147,11 @@ pub struct ApiState {
     pub detected_coins: Arc<Mutex<Vec<DetectedCoin>>>,
     pub trades: Arc<Mutex<Vec<TradeRecord>>>,
     pub ws_tx: broadcast::Sender<String>,
+    /// Shared atomic flag that controls real vs dry-run trading.
+    /// Updated by the mode-toggle API and read by buy/sell logic each tick.
+    pub is_real_flag: Arc<AtomicBool>,
+    /// Whether a wallet keypair was loaded at startup (required for real mode).
+    pub has_keypair: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -448,7 +456,19 @@ async fn set_bot_mode_handler(
     
     let new_mode = match payload.mode.as_str() {
         "dry-run" => BotMode::DryRun,
-        "real" => BotMode::Real,
+        "real" => {
+            if !state.has_keypair {
+                warn!("Attempted to switch to real mode without a loaded keypair");
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "status": "error",
+                        "message": "Cannot switch to real mode: no wallet keypair configured. Set wallet_private_key_string or equivalent in config.toml and restart."
+                    }))
+                );
+            }
+            BotMode::Real
+        }
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -462,12 +482,17 @@ async fn set_bot_mode_handler(
     
     let mut mode = state.bot_control.mode.lock().await;
     *mode = new_mode.clone();
+    drop(mode);
+    
+    // Sync the atomic is_real flag so buy/sell logic picks up the change immediately
+    let is_now_real = matches!(new_mode, BotMode::Real);
+    state.is_real_flag.store(is_now_real, Ordering::SeqCst);
     
     let bot_control = state.bot_control.clone();
-    info!("Bot mode changed to {:?}", new_mode);
+    info!("Bot mode changed to {:?} (is_real={})", new_mode, is_now_real);
     bot_control.add_log(
         "info",
-        format!("Bot mode changed to {:?}", new_mode),
+        format!("Bot mode changed to {:?} — trading will {} use real transactions", new_mode, if is_now_real { "now" } else { "NOT" }),
         None
     ).await;
     

@@ -12,7 +12,7 @@ use solana_sdk::{
     signature::{Keypair},
 };
 use crate::ws::WsRequest;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use once_cell::sync::Lazy;
 use log::error;
 use chrono::Utc;
@@ -23,7 +23,7 @@ pub async fn monitor_holdings(
     holdings: Arc<Mutex<HashMap<String, Holding>>>,
     price_cache: Arc<Mutex<PriceCache>>,
     rpc_client: Arc<RpcClient>,
-    is_real: bool,
+    is_real_flag: Arc<AtomicBool>,
     keypair: Option<Arc<Keypair>>,
     simulate_keypair: Option<Arc<Keypair>>,
     settings: Arc<Settings>,
@@ -106,8 +106,10 @@ pub async fn monitor_holdings(
             let kp = keypair.clone();
             let sim_kp = simulate_keypair.clone();
             let mint_c = mint.clone();
+            let is_real_flag = Arc::clone(&is_real_flag);
 
             tokio::spawn(async move {
+                let is_real = is_real_flag.load(Ordering::Relaxed);
                 // Calculate elapsed FIRST — timeout must be checked before the
                 // potentially slow price fetch to avoid coins stuck past timeout.
                 let elapsed = Utc::now().signed_duration_since(holding.buy_time).num_seconds();
@@ -284,6 +286,7 @@ pub async fn monitor_holdings(
                                 decimals: holding.decimals,
                                 actual_sol_change: sell_result.sol_balance_change,
                                 tx_fee_sol: sell_result.tx_fee_sol,
+                                simulated: !is_real,
                             });
                             if trades.len() > 200 { trades.truncate(200); }
                             drop(trades);
@@ -334,6 +337,7 @@ pub async fn monitor_holdings(
                                     decimals: holding.decimals,
                                     actual_sol_change: None,
                                     tx_fee_sol: None,
+                                    simulated: !is_real,
                                 });
                                 if trades.len() > 200 { trades.truncate(200); }
                                 trades_map.lock().await.remove(&mint_c);

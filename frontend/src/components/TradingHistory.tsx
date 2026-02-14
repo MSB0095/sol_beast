@@ -19,6 +19,7 @@ interface Trade {
   decimals?: number
   actual_sol_change?: number
   tx_fee_sol?: number
+  simulated?: boolean
 }
 
 export default function TradingHistory() {
@@ -213,6 +214,11 @@ export default function TradingHistory() {
                           </>
                         )}
                       </span>
+                      {trade.simulated && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-yellow-900/40 text-yellow-400 border border-yellow-600/40 ml-1">
+                          SIM
+                        </span>
+                      )}
                     </td>
                     
                     <td className="py-3 px-4 text-gray-400 text-xs">

@@ -90,8 +90,9 @@ fn compute_holder_address(owner: &str, mint: &str) -> Result<String, Box<dyn std
     let owner_pk = Pubkey::from_str(owner)?;
     let mint_pk = Pubkey::from_str(mint)?;
     
-    // Use the imported get_associated_token_address function to compute the ATA
-    let holder_addr = get_associated_token_address(&owner_pk, &mint_pk);
+    // All pump.fun tokens now use Token-2022; derive ATA with correct program
+    let token_2022 = Pubkey::from_str(TOKEN_2022_PROGRAM_ID)?;
+    let holder_addr = get_associated_token_address_with_program_id(&owner_pk, &mint_pk, &token_2022);
     Ok(holder_addr.to_string())
 }
 
@@ -139,9 +140,14 @@ use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
 use crate::tx_builder::{build_sell_instruction, SELL_DISCRIMINATOR};
 use crate::idl::load_all_idls;
-use spl_associated_token_account::{get_associated_token_address, instruction::create_associated_token_account_idempotent};
+use spl_associated_token_account::{get_associated_token_address, get_associated_token_address_with_program_id, instruction::create_associated_token_account_idempotent};
 use solana_program::pubkey::Pubkey;
 use spl_token::{self, instruction::close_account};
+
+/// SPL Token program ID (legacy)
+pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/// Token-2022 (Token Extensions) program ID — used by all new pump.fun tokens
+pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 use solana_sdk::{
     signature::{Keypair, Signer},
     transaction::Transaction,
@@ -154,6 +160,41 @@ use std::collections::HashMap;
 use std::time::Duration;
 use crate::idl::SimpleIdl;
 
+
+/// Detect which token program (SPL Token or Token-2022) owns the given mint.
+/// Queries the mint account and inspects the `owner` field.
+/// Defaults to Token-2022 for pump.fun tokens if detection fails.
+pub async fn detect_token_program_for_mint(
+    mint: &str,
+    rpc_client: &Arc<RpcClient>,
+    settings: &Arc<Settings>,
+) -> Pubkey {
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+        "params": [ mint, { "encoding": "base64", "commitment": "confirmed" } ]
+    });
+    match fetch_with_fallback::<Value>(request, "getAccountInfo", rpc_client, settings).await {
+        Ok(resp) => {
+            if let Some(result_val) = resp.result {
+                let account = if let Some(v) = result_val.get("value") { v.clone() } else { result_val };
+                if let Some(owner) = account.get("owner").and_then(|o| o.as_str()) {
+                    if owner == TOKEN_2022_PROGRAM_ID {
+                        debug!("Mint {} is owned by Token-2022", mint);
+                        return Pubkey::from_str(TOKEN_2022_PROGRAM_ID).unwrap();
+                    } else if owner == TOKEN_PROGRAM_ID {
+                        debug!("Mint {} is owned by SPL Token", mint);
+                        return Pubkey::from_str(TOKEN_PROGRAM_ID).unwrap();
+                    } else {
+                        debug!("Mint {} has unknown owner {}, defaulting to Token-2022", mint, owner);
+                    }
+                }
+            }
+        }
+        Err(e) => debug!("Failed to detect token program for {}: {}", mint, e),
+    }
+    // Default to Token-2022 for pump.fun (all new tokens use it)
+    Pubkey::from_str(TOKEN_2022_PROGRAM_ID).unwrap()
+}
 
 /// Fetches transaction details and extracts pump.fun token creation information.
 /// 
@@ -805,7 +846,15 @@ pub async fn fetch_mint_decimals(
                         if let Some(base64_str) = account_obj.get("data").and_then(|d| d.as_array()).and_then(|arr| arr.first()).and_then(|v| v.as_str()) {
                             match Base64Engine.decode(base64_str) {
                                 Ok(decoded) => {
-                                    if let Ok(mint_state) = spl_token::state::Mint::unpack(&decoded) {
+                                    // Token-2022 mints are larger than 82 bytes; try with
+                                    // truncated data first so spl_token::state::Mint::unpack
+                                    // (which requires exactly 82 bytes) can succeed.
+                                    let unpack_slice = if decoded.len() > spl_token::state::Mint::LEN {
+                                        &decoded[..spl_token::state::Mint::LEN]
+                                    } else {
+                                        &decoded
+                                    };
+                                    if let Ok(mint_state) = spl_token::state::Mint::unpack(unpack_slice) {
                                         debug!("Fetched mint decimals for {} at commitment {}: {}", mint, c, mint_state.decimals);
                                         return Ok(mint_state.decimals);
                                     } else {
@@ -893,8 +942,10 @@ pub async fn detect_idl_for_mint(mint: &str, rpc_client: &Arc<RpcClient>, settin
 
 /// Given a list of AccountMeta and known context (mint, user, creator, bonding_curve),
 /// return a list of create_associated_token_account instructions to create missing ATAs.
+/// `token_program_id` specifies which token program the mint belongs to (SPL Token or Token-2022).
 pub async fn build_missing_ata_preinstructions(
     context: &HashMap<String, Pubkey>,
+    token_program_id: &Pubkey,
 ) -> Result<Vec<solana_program::instruction::Instruction>, Box<dyn std::error::Error + Send + Sync>> {
     let mut pre: Vec<solana_program::instruction::Instruction> = Vec::new();
     // For candidate owners, prepare owner->mint pairs to check
@@ -914,8 +965,8 @@ pub async fn build_missing_ata_preinstructions(
         // ALWAYS create ATA instruction (it's idempotent - won't fail if exists)
         // This avoids race conditions on very early sniping
         let payer = context.get("payer").cloned().unwrap_or(*owner);
-        pre.push(create_associated_token_account_idempotent(&payer, owner, mint, &spl_token::id()));
-        debug!("Adding create ATA instruction for owner {} mint {}", owner, mint);
+        pre.push(create_associated_token_account_idempotent(&payer, owner, mint, token_program_id));
+        debug!("Adding create ATA instruction for owner {} mint {} (token_program={})", owner, mint, token_program_id);
     }
     Ok(pre)
 }
@@ -1050,68 +1101,67 @@ pub async fn find_token_account_owned_by_owner(
     rpc_client: &Arc<RpcClient>,
     settings: &Arc<Settings>,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    // SPL Token program id
-    let token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-    // Use getProgramAccountsV2 which supports pagination and avoids large-result errors
-    // on providers like Helius. Request the smallest page possible (limit/pageSize=1).
-    let request = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getProgramAccountsV2",
-        "params": [
-            token_program,
-            {
-                "encoding": "base64",
-                "commitment": "confirmed",
-                "filters": [
-                    { "memcmp": { "offset": 0, "bytes": mint } },
-                    { "memcmp": { "offset": 32, "bytes": owner_pubkey } }
-                ],
-                // Helius accepts `pageSize` for V2 pagination; request a single page entry
-                "pageSize": 1
-            }
-        ]
-    });
+    // Try both Token-2022 and legacy SPL Token programs (pump.fun now uses Token-2022)
+    let token_programs = [TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID];
+    for token_program in &token_programs {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getProgramAccountsV2",
+            "params": [
+                token_program,
+                {
+                    "encoding": "base64",
+                    "commitment": "confirmed",
+                    "filters": [
+                        { "memcmp": { "offset": 0, "bytes": mint } },
+                        { "memcmp": { "offset": 32, "bytes": owner_pubkey } }
+                    ],
+                    "pageSize": 1
+                }
+            ]
+        });
 
-    match fetch_with_fallback::<Value>(request, "getProgramAccountsV2", rpc_client, settings).await {
-        Ok(resp) => {
-            if let Some(result_val) = resp.result {
-                // V2 may return either an array of entries or an object with an `accounts` array.
-                if let Some(arr) = result_val.as_array() {
-                    if !arr.is_empty() {
-                        if let Some(entry) = arr.first() {
-                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
-                                return Ok(Some(pubkey.to_string()));
-                            }
-                        }
-                    }
-                } else if let Some(obj_arr) = result_val.get("accounts").and_then(|v| v.as_array()) {
-                    if !obj_arr.is_empty() {
-                        if let Some(entry) = obj_arr.first() {
-                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
-                                return Ok(Some(pubkey.to_string()));
-                            }
-                        }
-                    }
-                } else if let Some(obj_arr) = result_val.get("value").and_then(|v| v.as_array()) {
-                    if !obj_arr.is_empty() {
-                        if let Some(entry) = obj_arr.first() {
-                            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
-                                return Ok(Some(pubkey.to_string()));
-                            }
-                        }
+        match fetch_with_fallback::<Value>(request, "getProgramAccountsV2", rpc_client, settings).await {
+            Ok(resp) => {
+                if let Some(result_val) = resp.result {
+                    // V2 may return either an array of entries or an object with an `accounts` array.
+                    let found = extract_first_pubkey_from_value(&result_val);
+                    if let Some(pk) = found {
+                        return Ok(Some(pk));
                     }
                 }
             }
-            Ok(None)
-        }
-        Err(e) => {
-            // This is expected for RPCs that don't support getProgramAccounts (e.g., Chainstack)
-            // Not a critical error since we have other fallback methods
-            debug!("getProgramAccountsV2 not supported or failed for mint {} owner {}: {}", mint, owner_pubkey, e);
-            Ok(None)
+            Err(e) => {
+                debug!("getProgramAccountsV2 ({}) failed for mint {} owner {}: {}", token_program, mint, owner_pubkey, e);
+            }
         }
     }
+    Ok(None)
+}
+
+/// Helper to extract the first pubkey from a getProgramAccounts response value.
+fn extract_first_pubkey_from_value(result_val: &Value) -> Option<String> {
+    if let Some(arr) = result_val.as_array() {
+        if let Some(entry) = arr.first() {
+            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                return Some(pubkey.to_string());
+            }
+        }
+    } else if let Some(obj_arr) = result_val.get("accounts").and_then(|v| v.as_array()) {
+        if let Some(entry) = obj_arr.first() {
+            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                return Some(pubkey.to_string());
+            }
+        }
+    } else if let Some(obj_arr) = result_val.get("value").and_then(|v| v.as_array()) {
+        if let Some(entry) = obj_arr.first() {
+            if let Some(pubkey) = entry.get("pubkey").and_then(|p| p.as_str()) {
+                return Some(pubkey.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Query the pump.fun program accounts (server-side) to find a bonding-curve account
@@ -1221,6 +1271,10 @@ pub async fn sell_token(
     let _idls = load_all_idls();
     let creator_opt = fetch_bonding_curve_creator(mint, rpc_client, settings).await.ok().flatten();
     
+    // Detect which token program this mint uses (Token-2022 vs legacy SPL Token)
+    let token_program_id = detect_token_program_for_mint(mint, rpc_client, settings).await;
+    info!("Sell {}: using token program {}", mint, token_program_id);
+    
     // Fetch fee_recipient from Global PDA
     let fee_recipient = fetch_global_fee_recipient(rpc_client, settings).await?;
 
@@ -1248,6 +1302,8 @@ pub async fn sell_token(
         // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
         let fee_program_pubkey = Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ")?;
         context.insert("fee_program".to_string(), fee_program_pubkey);
+        // Add token program so IDL resolves the correct one (Token-2022 vs SPL Token)
+        context.insert("token_program".to_string(), token_program_id);
         let try_idls: Vec<SimpleIdl> = if let Some(idl) = detected_idl_opt { vec![idl] } else { load_all_idls().into_values().collect() };
         for idl in try_idls {
             match idl.build_accounts_for("sell", &context) {
@@ -1284,7 +1340,7 @@ pub async fn sell_token(
             )?
         };
         // Ensure ATA exists for user (sell path may not need it but check)
-        let ata = get_associated_token_address(&user_pubkey, &mint_pk);
+        let ata = get_associated_token_address_with_program_id(&user_pubkey, &mint_pk, &token_program_id);
         match fetch_with_fallback::<Value>(json!({
             "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
             "params": [ ata.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
@@ -1305,9 +1361,9 @@ pub async fn sell_token(
         // After selling, close the ATA to reclaim rent (~0.00203928 SOL)
         // Only close the ATA on the FINAL sell (when position is fully exited)
         if is_final_sell {
-            let ata = get_associated_token_address(&user_pubkey, &mint_pk);
+            let ata = get_associated_token_address_with_program_id(&user_pubkey, &mint_pk, &token_program_id);
             let close_ata_instruction = close_account(
-                &spl_token::id(),           // token program
+                &token_program_id,          // token program (Token-2022 or SPL Token)
                 &ata,                        // account to close
                 &user_pubkey,               // destination for lamports (rent refund)
                 &user_pubkey,               // owner of the account

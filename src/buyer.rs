@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
-    rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback},
+    rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback, detect_token_program_for_mint},
     tx_builder::{BUY_DISCRIMINATOR, build_buy_instruction},
     idl::load_all_idls,
 };
@@ -17,7 +17,7 @@ use solana_sdk::{
 use log::{info, warn, debug};
 use std::str::FromStr;
 use spl_associated_token_account::instruction::create_associated_token_account_idempotent;
-use spl_associated_token_account::get_associated_token_address;
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 use chrono::Utc;
 
 pub async fn buy_token(
@@ -89,6 +89,10 @@ pub async fn buy_token(
     // Fetch fee_recipient from Global PDA (needed for both real and simulate modes)
     let fee_recipient = fetch_global_fee_recipient(rpc_client, settings).await?;
 
+    // Detect which token program this mint uses (Token-2022 vs legacy SPL Token)
+    let token_program_id = detect_token_program_for_mint(mint, rpc_client, settings).await;
+    info!("Buy {}: using token program {}", mint, token_program_id);
+
     if is_real {
         let client = RpcClient::new(&settings.solana_rpc_urls[0]);
         let payer = keypair.ok_or("Keypair required")?;
@@ -116,6 +120,8 @@ pub async fn buy_token(
         }
         // Use actual fee_recipient from bonding curve
         context.insert("fee_recipient".to_string(), fee_recipient);
+        // Add token program so IDL resolves correct one (Token-2022 vs SPL Token)
+        context.insert("token_program".to_string(), token_program_id);
         
         // NOTE: fee_program is invoked via CPI (Cross-Program Invocation) inside pump.fun program
         // It is NOT included in the main instruction accounts list - only in inner instructions
@@ -176,9 +182,9 @@ pub async fn buy_token(
         };
         // ALWAYS create user's ATA when buying (even if exists, instruction will succeed idempotently)
         // This ensures the account exists and we can close it later when selling to reclaim rent
-        let _ata = get_associated_token_address(&payer_pubkey, &mint_pk);
+        let _ata = get_associated_token_address_with_program_id(&payer_pubkey, &mint_pk, &token_program_id);
         let _pre_instructions: Vec<solana_program::instruction::Instruction> = vec![
-            create_associated_token_account_idempotent(&payer_pubkey, &payer_pubkey, &mint_pk, &spl_token::id()),
+            create_associated_token_account_idempotent(&payer_pubkey, &payer_pubkey, &mint_pk, &token_program_id),
         ];        
         // prepare context with payer so ATA creation uses correct funding account
         let mut real_context: HashMap<String, Pubkey> = HashMap::new();
@@ -189,7 +195,7 @@ pub async fn buy_token(
         if let Some(bc) = context.get("bonding_curve") { real_context.insert("bonding_curve".to_string(), *bc); }
         if let Some(cv) = context.get("creator_vault") { real_context.insert("creator_vault".to_string(), *cv); }
         // compute missing ATA pre-instructions for accounts in the instruction
-        let ata_pre = build_missing_ata_preinstructions(&real_context).await?;
+        let ata_pre = build_missing_ata_preinstructions(&real_context, &token_program_id).await?;
         let mut all_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
         for pi in ata_pre.into_iter() { all_instrs.push(pi); }
         all_instrs.push(instruction);
@@ -317,6 +323,8 @@ pub async fn buy_token(
             // Add fee_recipient - pump.fun uses a fixed address
             let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
             context.insert("fee_recipient".to_string(), fee_recipient);
+            // Add token program so IDL resolves the correct one (Token-2022 vs SPL Token)
+            context.insert("token_program".to_string(), token_program_id);
             // NOTE: fee_program is invoked via CPI, not included in main instruction accounts
             // Do NOT add fee_program to context
             match idl.build_accounts_for("buy", &context) {
@@ -365,18 +373,18 @@ pub async fn buy_token(
         // Build pre_instructions for dry-run (ensure ATA exists for sim payer)
         let mut pre_instructions: Vec<solana_program::instruction::Instruction> = Vec::new();
         let mint_pk = Pubkey::from_str(mint)?;
-        let ata = get_associated_token_address(&sim_payer_pubkey, &mint_pk);
+        let ata = get_associated_token_address_with_program_id(&sim_payer_pubkey, &mint_pk, &token_program_id);
         match fetch_with_fallback::<Value>(json!({
             "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
             "params": [ ata.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
         }), "getAccountInfo", rpc_client, settings).await {
             Ok(info) => {
                 if info.result.is_none() {
-                    pre_instructions.push(create_associated_token_account_idempotent(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
+                    pre_instructions.push(create_associated_token_account_idempotent(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &token_program_id));
                 } else if let Some(result_val) = info.result {
                     let val = if let Some(v) = result_val.get("value") { v.clone() } else { result_val.clone() };
                     if val.is_null() {
-                        pre_instructions.push(create_associated_token_account_idempotent(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &spl_token::id()));
+                        pre_instructions.push(create_associated_token_account_idempotent(&sim_payer_pubkey, &sim_payer_pubkey, &mint_pk, &token_program_id));
                     }
                 }
             }

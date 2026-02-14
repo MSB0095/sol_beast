@@ -8,6 +8,7 @@ use std::vec::Vec;
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ASSOCIATED_PROGRAM_PUBKEY: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
 #[derive(Debug)]
@@ -191,8 +192,15 @@ impl SimpleIdl {
                         metas.push(AccountMeta::new_readonly(pk, false));
                     }
                     "token_program" => {
-                        let pk = Pubkey::from_str(TOKEN_PROGRAM_PUBKEY)?;
+                        // Check context first (caller may provide Token-2022 or SPL Token)
+                        let pk = if let Some(tp) = working_context.get("token_program") {
+                            *tp
+                        } else {
+                            // Default to Token-2022 for pump.fun tokens
+                            Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY)?
+                        };
                         metas.push(AccountMeta::new_readonly(pk, false));
+                        working_context.insert(account_name.to_string(), pk);
                     }
                     "associated_token_program" => {
                         let pk = Pubkey::from_str(ASSOCIATED_PROGRAM_PUBKEY)?;
@@ -201,7 +209,11 @@ impl SimpleIdl {
                     // derive associated token account if user + mint present
                     "associated_user" => {
                         if let (Some(user), Some(mint)) = (working_context.get("user"), working_context.get("mint")) {
-                            let ata = spl_associated_token_account::get_associated_token_address(user, mint);
+                            // Use the correct token program for ATA derivation
+                            let token_prog = working_context.get("token_program")
+                                .cloned()
+                                .unwrap_or_else(|| Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap());
+                            let ata = spl_associated_token_account::get_associated_token_address_with_program_id(user, mint, &token_prog);
                             if is_signer {
                                 metas.push(AccountMeta::new(ata, true));
                             } else if is_writable {

@@ -1,6 +1,6 @@
 use borsh::BorshSerialize;
 use solana_program::{instruction::{Instruction, AccountMeta}, pubkey::Pubkey};
-use spl_associated_token_account::get_associated_token_address;
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 use std::str::FromStr;
 use crate::settings::Settings;
 use crate::idl::{load_all_idls, SimpleIdl};
@@ -10,7 +10,7 @@ use log::{debug, warn};
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-// associated token program constant removed (unused)
+const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 // fee_program address from IDL
 const FEE_PROGRAM_PUBKEY: &str = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
 
@@ -146,13 +146,15 @@ pub fn build_buy_instruction(
     }
     
     // fallback: construct best-effort like before
+    // Default to Token-2022 for all pump.fun tokens
+    let token_program_pk = Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY)?;
     let pump_program = *program_id;
     // global PDA
     let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program);
     // bonding_curve PDA
     let (bonding_curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-    // associated_user (ATA)
-    let associated_user = get_associated_token_address(user, &mint_pk);
+    // associated_user (ATA) - use Token-2022 for correct derivation
+    let associated_user = get_associated_token_address_with_program_id(user, &mint_pk, &token_program_pk);
     // event authority PDA
     let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &pump_program);
     // volume accumulators
@@ -165,13 +167,13 @@ pub fn build_buy_instruction(
         AccountMeta::new(*fee_recipient, false),                // 1: fee_recipient (from bonding curve, non-signer)
         AccountMeta::new_readonly(mint_pk, false),              // 2: mint
         AccountMeta::new(bonding_curve_pda, false),             // 3: bonding_curve
-    ];    // Associated bonding curve is a standard ATA for the bonding curve PDA
-    let assoc_bonding = get_associated_token_address(&bonding_curve_pda, &mint_pk);
+    ];    // Associated bonding curve ATA - use Token-2022 for correct derivation
+    let assoc_bonding = get_associated_token_address_with_program_id(&bonding_curve_pda, &mint_pk, &token_program_pk);
     accounts.push(AccountMeta::new(assoc_bonding, false));                 // 4: assoc_bonding
     accounts.push(AccountMeta::new(associated_user, false));               // 5: assoc_user
     accounts.push(AccountMeta::new(*user, true));                          // 6: user (signer)
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(SYSTEM_PROGRAM_PUBKEY)?, false)); // 7: system_program
-    accounts.push(AccountMeta::new_readonly(Pubkey::from_str(TOKEN_PROGRAM_PUBKEY)?, false)); // 8: token_program
+    accounts.push(AccountMeta::new_readonly(token_program_pk, false)); // 8: token_program (Token-2022)
     
     // Creator vault is REQUIRED - we already validated creator exists above
     let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
@@ -258,10 +260,12 @@ pub fn build_sell_instruction(
     }
     
     // fallback best-effort behavior (requires creator)
+    // Default to Token-2022 for all pump.fun tokens
+    let token_program_pk = Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY)?;
     let pump_program = *program_id;
     let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program);
     let (bonding_curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program);
-    let associated_user = get_associated_token_address(user, &mint_pk);
+    let associated_user = get_associated_token_address_with_program_id(user, &mint_pk, &token_program_pk);
     let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &pump_program);
     
     // Build accounts in exact order expected by pump.fun (don't use add_or_merge to avoid deduplication)
@@ -270,8 +274,8 @@ pub fn build_sell_instruction(
         AccountMeta::new(*fee_recipient, false),                  // 1: fee_recipient (from bonding curve)
         AccountMeta::new_readonly(mint_pk, false),                // 2: mint
         AccountMeta::new(bonding_curve_pda, false),               // 3: bonding_curve
-    ];    // Associated bonding curve is a standard ATA for the bonding curve PDA
-    let assoc_bonding = get_associated_token_address(&bonding_curve_pda, &mint_pk);
+    ];    // Associated bonding curve ATA - use Token-2022 for correct derivation
+    let assoc_bonding = get_associated_token_address_with_program_id(&bonding_curve_pda, &mint_pk, &token_program_pk);
     accounts.push(AccountMeta::new(assoc_bonding, false));                   // 4: assoc_bonding
     accounts.push(AccountMeta::new(associated_user, false));                 // 5: assoc_user
     accounts.push(AccountMeta::new(*user, true));                            // 6: user (signer)
@@ -280,7 +284,7 @@ pub fn build_sell_instruction(
     // Creator vault is REQUIRED - we already validated creator exists above
     let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
     accounts.push(AccountMeta::new(creator_vault, false));               // 8: creator_vault
-    accounts.push(AccountMeta::new_readonly(Pubkey::from_str(TOKEN_PROGRAM_PUBKEY)?, false)); // 9: token_program
+    accounts.push(AccountMeta::new_readonly(token_program_pk, false)); // 9: token_program (Token-2022)
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
     let fee_config_pda = Pubkey::from_str("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt")?; // Fee Config

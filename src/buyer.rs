@@ -226,16 +226,31 @@ pub async fn buy_token(
                 3, // max retries
             ).await?;
             info!("Buy transaction sent via Helius Sender: {}", signature);
-            // Query on-chain token accounts to find exact token balance for payer
-            let owner_str = payer_pubkey.to_string();
-            if let Ok(Some(acc)) = crate::rpc::find_token_account_owned_by_owner(mint, &owner_str, rpc_client, settings).await {
-                if let Ok(pk) = Pubkey::from_str(&acc) {
-                    if let Ok(balance) = client.get_token_account_balance(&pk) {
-                        if let Ok(amount_u64) = balance.amount.parse::<u64>() {
-                            final_token_amount_u64 = Some(amount_u64);
+            // Wait for the transaction to be confirmed before querying balance
+            // Helius sender uses skipPreflight=true, so the TX might not be confirmed yet
+            for wait_attempt in 0..8 {
+                let delay_ms = if wait_attempt == 0 { 2000 } else { 1500 };
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                let owner_str = payer_pubkey.to_string();
+                if let Ok(Some(acc)) = crate::rpc::find_token_account_owned_by_owner(mint, &owner_str, rpc_client, settings).await {
+                    if let Ok(pk) = Pubkey::from_str(&acc) {
+                        if let Ok(balance) = client.get_token_account_balance(&pk) {
+                            if let Ok(amount_u64) = balance.amount.parse::<u64>() {
+                                if amount_u64 > 0 {
+                                    final_token_amount_u64 = Some(amount_u64);
+                                    info!("Buy confirmed on-chain for {} after {} ms: {} tokens", mint, delay_ms * (wait_attempt + 1) as u64, amount_u64);
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
+                if wait_attempt < 7 {
+                    debug!("Token balance not yet available for {} (attempt {}/8), retrying...", mint, wait_attempt + 1);
+                }
+            }
+            if final_token_amount_u64.is_none() {
+                warn!("Could not verify buy on-chain for {} after waiting — TX may have failed", mint);
             }
         } else {
             let mut tx = Transaction::new_with_payer(&all_instrs, Some(&payer.pubkey()));
@@ -282,6 +297,12 @@ pub async fn buy_token(
                 triggered_tp_levels: vec![],
                 triggered_sl_levels: vec![],
             });
+        } else if is_real {
+            // Real mode but couldn't confirm buy on-chain — don't record a phantom holding
+            return Err(format!(
+                "Buy TX sent for {} but could not verify tokens on-chain — transaction may have failed or not yet confirmed",
+                mint
+            ).into());
         }
     } else {
         // Dry-run simulation: construct same instruction and simulate it using

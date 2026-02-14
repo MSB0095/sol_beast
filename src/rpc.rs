@@ -1339,23 +1339,62 @@ pub async fn sell_token(
                 settings,
             )?
         };
-        // Ensure ATA exists for user (sell path may not need it but check)
+        // Ensure ATA exists for user — defensively create if missing
         let ata = get_associated_token_address_with_program_id(&user_pubkey, &mint_pk, &token_program_id);
+        let mut ata_pre_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
         match fetch_with_fallback::<Value>(json!({
             "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
             "params": [ ata.to_string(), { "encoding": "base64", "commitment": "confirmed" } ]
         }), "getAccountInfo", rpc_client, settings).await {
             Ok(info) => {
-                if info.result.is_none() {
-                    // create ATA as pre-instruction if real send (simulate will include it too)
+                let account_exists = info.result
+                    .as_ref()
+                    .and_then(|r| r.get("value"))
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+                if !account_exists {
+                    warn!("User ATA {} does not exist for mint {} — adding create_idempotent pre-instruction", ata, mint);
+                    let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                        &user_pubkey,       // funding account
+                        &user_pubkey,       // wallet address
+                        &mint_pk,           // token mint
+                        &token_program_id,  // token program (Token-2022 or SPL)
+                    );
+                    ata_pre_instrs.push(create_ata_ix);
                 }
             }
-            Err(e) => debug!("Failed to check ATA existence for sell {}: {}", ata, e),
+            Err(e) => {
+                debug!("Failed to check ATA existence for sell {}: {} — adding defensive create", ata, e);
+                let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &user_pubkey,
+                    &user_pubkey,
+                    &mint_pk,
+                    &token_program_id,
+                );
+                ata_pre_instrs.push(create_ata_ix);
+            }
         }
+
+        // Pre-sell validation: check that user actually holds tokens for this mint
+        let pre_sell_balance: u64 = if let Ok(Some(acc)) = find_token_account_owned_by_owner(mint, &user_pubkey.to_string(), rpc_client, settings).await {
+            if let Ok(pk) = Pubkey::from_str(&acc) {
+                if let Ok(bal) = client.get_token_account_balance(&pk) {
+                    bal.amount.parse::<u64>().unwrap_or(0)
+                } else { 0 }
+            } else { 0 }
+        } else { 0 };
+        if pre_sell_balance == 0 {
+            return Err(format!(
+                "Cannot sell {} — user holds 0 tokens (ATA: {}). Buy may have failed or not yet confirmed.",
+                mint, ata
+            ).into());
+        }
+        info!("Pre-sell balance for {}: {} base units", mint, pre_sell_balance);
+
         debug!("Sending real sell TX for mint {} amount {} tokens", mint, amount);
-        // For sell, we don't need to create any ATAs - they should already exist from buy
-        // Just build the transaction with sell instruction + close_account
         let mut all_instrs: Vec<solana_program::instruction::Instruction> = Vec::new();
+        // Add ATA creation pre-instruction if needed (idempotent — no-op if already exists)
+        all_instrs.extend(ata_pre_instrs);
         all_instrs.push(instruction);
         
         // After selling, close the ATA to reclaim rent (~0.00203928 SOL)

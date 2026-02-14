@@ -139,7 +139,7 @@ use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
 use crate::tx_builder::{build_sell_instruction, SELL_DISCRIMINATOR};
 use crate::idl::load_all_idls;
-use spl_associated_token_account::{get_associated_token_address, instruction::create_associated_token_account};
+use spl_associated_token_account::{get_associated_token_address, instruction::create_associated_token_account_idempotent};
 use solana_program::pubkey::Pubkey;
 use spl_token::{self, instruction::close_account};
 use solana_sdk::{
@@ -914,7 +914,7 @@ pub async fn build_missing_ata_preinstructions(
         // ALWAYS create ATA instruction (it's idempotent - won't fail if exists)
         // This avoids race conditions on very early sniping
         let payer = context.get("payer").cloned().unwrap_or(*owner);
-        pre.push(create_associated_token_account(&payer, owner, mint, &spl_token::id()));
+        pre.push(create_associated_token_account_idempotent(&payer, owner, mint, &spl_token::id()));
         debug!("Adding create ATA instruction for owner {} mint {}", owner, mint);
     }
     Ok(pre)

@@ -39,7 +39,9 @@ export default function HoldingsPanel() {
   stats.current_holdings.forEach(h => {
     const live = prices[h.mint]
     const currentPrice = live ? live.price : h.buy_price
-    const tokens = h.amount / 1_000_000
+    const decimals = h.decimals || 6
+    const tokenDivisor = Math.pow(10, decimals)
+    const tokens = h.amount / tokenDivisor
     const positionValue = currentPrice * tokens
     const buyCost = h.buy_price * tokens
     totalPositionValueSol += positionValue
@@ -104,7 +106,9 @@ export default function HoldingsPanel() {
                 
                 const liveData = prices[mint]
                 const currentPrice = liveData ? liveData.price : holding.buy_price
-                const tokens = holding.amount / 1_000_000
+                const decimals = holding.decimals || 6
+                const tokenDivisor = Math.pow(10, decimals)
+                const tokens = holding.amount / tokenDivisor
                 // Always compute PnL locally from authoritative buy_price + latest price
                 const buyCost = holding.buy_price * tokens
                 const positionValue = currentPrice * tokens

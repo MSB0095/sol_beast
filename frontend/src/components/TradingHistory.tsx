@@ -16,6 +16,9 @@ interface Trade {
   profit_loss?: number
   profit_loss_percent?: number
   reason?: 'TP' | 'SL' | 'TIMEOUT' | 'MANUAL'
+  decimals?: number
+  actual_sol_change?: number
+  tx_fee_sol?: number
 }
 
 export default function TradingHistory() {
@@ -60,17 +63,19 @@ export default function TradingHistory() {
     })
 
   const exportToCSV = () => {
-    const headers = ['Type', 'Time', 'Symbol', 'Mint', 'Amount SOL', 'Amount Tokens', 'Price', 'P/L', 'P/L %', 'Reason', 'TX']
+    const headers = ['Type', 'Time', 'Symbol', 'Mint', 'Amount SOL', 'On-Chain SOL Change', 'Amount Tokens', 'Price', 'P/L', 'P/L %', 'TX Fee', 'Reason', 'TX']
     const rows = filteredTrades.map(t => [
       t.type,
       t.timestamp,
       t.symbol || '',
       t.mint,
       t.amount_sol,
+      t.actual_sol_change ?? '',
       t.amount_tokens,
       t.price_per_token,
       t.profit_loss || '',
       t.profit_loss_percent || '',
+      t.tx_fee_sol ?? '',
       t.reason || '',
       t.tx_signature || ''
     ])
@@ -175,8 +180,10 @@ export default function TradingHistory() {
                 <th className="text-left py-3 px-4">Time</th>
                 <th className="text-left py-3 px-4">Token</th>
                 <th className="text-right py-3 px-4">Amount (SOL)</th>
+                <th className="text-right py-3 px-4">On-Chain Δ</th>
                 <th className="text-right py-3 px-4">Price/Token</th>
                 <th className="text-right py-3 px-4">P/L</th>
+                <th className="text-right py-3 px-4">Fee</th>
                 <th className="text-center py-3 px-4">Reason</th>
                 <th className="text-center py-3 px-4">TX</th>
               </tr>
@@ -240,6 +247,16 @@ export default function TradingHistory() {
                     </td>
                     
                     <td className="py-3 px-4 text-right font-mono text-xs">
+                      {trade.actual_sol_change !== undefined && trade.actual_sol_change !== null ? (
+                        <span className={trade.actual_sol_change >= 0 ? 'text-green-400' : 'text-red-400'}>
+                          {trade.actual_sol_change >= 0 ? '+' : ''}{trade.actual_sol_change.toFixed(6)}
+                        </span>
+                      ) : (
+                        <span className="text-gray-500 italic">est.</span>
+                      )}
+                    </td>
+                    
+                    <td className="py-3 px-4 text-right font-mono text-xs">
                       {trade.price_per_token ? trade.price_per_token.toFixed(9) : '-'}
                     </td>
                     
@@ -253,6 +270,14 @@ export default function TradingHistory() {
                             {isProfit ? '+' : ''}{trade.profit_loss_percent !== null && trade.profit_loss_percent !== undefined ? trade.profit_loss_percent.toFixed(2) : '0'}%
                           </div>
                         </div>
+                      ) : (
+                        <span className="text-gray-500">-</span>
+                      )}
+                    </td>
+                    
+                    <td className="py-3 px-4 text-right font-mono text-xs">
+                      {trade.tx_fee_sol !== undefined && trade.tx_fee_sol !== null ? (
+                        <span className="text-yellow-400">{trade.tx_fee_sol.toFixed(6)}</span>
                       ) : (
                         <span className="text-gray-500">-</span>
                       )}

@@ -205,6 +205,9 @@ pub async fn buy_token(
             }
         }
         
+        // Record pre-send SOL balance to compute actual cost after the transaction
+        let pre_sol_lamports = client.get_balance(&payer_pubkey)?;
+
         // Choose transaction submission method
         let mut final_token_amount_u64: Option<u64> = None;
         if settings.helius_sender_enabled {
@@ -248,12 +251,23 @@ pub async fn buy_token(
         // If we fetched an on-chain amount, override token_amount returned to be exact
         if let Some(exact) = final_token_amount_u64 {
             info!("Buy complete: on-chain token amount for {} = {} (base units)", mint, exact);
+            // Compute actual SOL cost from on-chain balance delta
+            let post_sol_lamports = client.get_balance(&payer_pubkey).unwrap_or(pre_sol_lamports);
+            let buy_cost_sol = if pre_sol_lamports > post_sol_lamports {
+                (pre_sol_lamports - post_sol_lamports) as f64 / 1_000_000_000.0
+            } else {
+                sol_amount // fallback to intended amount
+            };
+            info!("Buy accounting for {}: pre_sol={} post_sol={} cost={:.9} SOL (intended {:.9} SOL)",
+                  mint, pre_sol_lamports, post_sol_lamports, buy_cost_sol, sol_amount);
             // Use this exact amount for returned holding
             return Ok(Holding {
                 amount: exact,
                 original_amount: exact,
                 buy_price: buy_price_sol,
                 buy_time: Utc::now(),
+                decimals: decimals as u8,
+                buy_cost_sol: Some(buy_cost_sol),
                 metadata: None,
                 onchain_raw: None,
                 onchain: None,
@@ -425,6 +439,8 @@ pub async fn buy_token(
         original_amount: token_amount,
         buy_price: buy_price_sol,
         buy_time: Utc::now(),
+        decimals: decimals as u8,
+        buy_cost_sol: None,
         metadata: None,
         onchain_raw: None,
         onchain: None,

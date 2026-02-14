@@ -19,6 +19,8 @@ export interface Holding {
   amount: number
   buy_price: number
   buy_time: string
+  decimals?: number
+  buy_cost_sol?: number
   metadata?: {
     name?: string
     symbol?: string
@@ -65,6 +67,7 @@ export interface PriceUpdate {
   pnl_sol: number
   buy_price: number
   amount: number
+  decimals?: number
 }
 
 interface BotStore {
@@ -257,7 +260,8 @@ export const useBotStore = create<BotStore>((set, get) => ({
                        profit_percent: msg.profit_percent || 0,
                        pnl_sol: msg.pnl_sol || 0,
                        buy_price: msg.buy_price || 0,
-                       amount: msg.amount || 0
+                       amount: msg.amount || 0,
+                       decimals: msg.decimals
                      }
                    }
                  }))

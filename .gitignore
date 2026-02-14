@@ -9,3 +9,5 @@ node_modules/
 dist/
 .vitepress/dist/
 .vitepress/cache/
+# IDL cache directory
+.idl_cache/

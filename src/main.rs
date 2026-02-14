@@ -6,6 +6,7 @@ mod helius_sender;
 mod idl;
 mod models;
 mod monitor;
+mod onchain_idl;
 mod rpc;
 mod settings;
 mod state;

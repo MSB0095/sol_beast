@@ -3,8 +3,10 @@ use solana_program::{instruction::{Instruction, AccountMeta}, pubkey::Pubkey};
 use spl_associated_token_account::get_associated_token_address;
 use std::str::FromStr;
 use crate::settings::Settings;
-use crate::idl::load_all_idls;
+use crate::idl::{load_all_idls, SimpleIdl};
+use crate::onchain_idl::{get_instruction_discriminator, compute_anchor_discriminator};
 use std::collections::HashMap;
+use log::{debug, warn};
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -26,10 +28,55 @@ pub struct SellArgs {
     pub min_sol_output: u64,
 }
 
-// Discriminators from pumpfun IDL (8 bytes)
+// Discriminators from pumpfun IDL (8 bytes) - DEPRECATED: Use IDL-derived discriminators instead
+// Kept as fallback for backward compatibility when IDL is not available
 // Using plain buy instruction (not buy_exact_sol_in)
-pub const BUY_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
-pub const SELL_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+pub const BUY_DISCRIMINATOR_FALLBACK: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+pub const SELL_DISCRIMINATOR_FALLBACK: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+
+// For backward compatibility exports
+pub const BUY_DISCRIMINATOR: [u8; 8] = BUY_DISCRIMINATOR_FALLBACK;
+pub const SELL_DISCRIMINATOR: [u8; 8] = SELL_DISCRIMINATOR_FALLBACK;
+
+/// Get discriminator for buy instruction, preferring IDL over computed value
+fn get_buy_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
+    if let Some(idl) = idl_opt {
+        match get_instruction_discriminator(idl, "buy") {
+            Ok(disc) => {
+                debug!("Using IDL-derived buy discriminator: {:?}", disc);
+                return disc;
+            }
+            Err(e) => {
+                warn!("Failed to get buy discriminator from IDL: {}, computing from name", e);
+            }
+        }
+    }
+    
+    // Compute discriminator from instruction name
+    let computed = compute_anchor_discriminator("buy");
+    debug!("Using computed buy discriminator: {:?}", computed);
+    computed
+}
+
+/// Get discriminator for sell instruction, preferring IDL over computed value
+fn get_sell_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
+    if let Some(idl) = idl_opt {
+        match get_instruction_discriminator(idl, "sell") {
+            Ok(disc) => {
+                debug!("Using IDL-derived sell discriminator: {:?}", disc);
+                return disc;
+            }
+            Err(e) => {
+                warn!("Failed to get sell discriminator from IDL: {}, computing from name", e);
+            }
+        }
+    }
+    
+    // Compute discriminator from instruction name
+    let computed = compute_anchor_discriminator("sell");
+    debug!("Using computed sell discriminator: {:?}", computed);
+    computed
+}
 
 
 
@@ -45,18 +92,12 @@ pub fn build_buy_instruction(
     _settings: &Settings,
 ) -> Result<Instruction, Box<dyn std::error::Error + Send + Sync>> {
     
-    // For now we only build instruction.data (discriminator + borsh args).
-    // Account list is intentionally left empty as PDAs/account derivation
-    // is environment-specific and handled elsewhere. Keeping a single
-    // builder centralizes encoding so dry-mode simulate and real-mode send
-    // use identical instruction bytes.
     let args = BuyArgs {
         amount,
         max_sol_cost,
         track_volume,
     };
-    let mut data = BUY_DISCRIMINATOR.to_vec();
-    data.extend(borsh::to_vec(&args)?);
+    
     // Try to load IDLs and build accounts from IDL if possible for exactness.
     // Preferred order: pumpfun, pumpfunamm, pumpfunfees
     let idls = load_all_idls();
@@ -64,24 +105,46 @@ pub fn build_buy_instruction(
     let mint_pk = Pubkey::from_str(mint)?;
     context.insert("mint".to_string(), mint_pk);
     context.insert("user".to_string(), *user);
-    if let Some(creator) = creator_pubkey {
-        context.insert("bonding_curve.creator".to_string(), creator);
-    }
+    
+    // Creator is REQUIRED for buy instruction - do not use placeholder
+    let creator = creator_pubkey.ok_or("creator_pubkey is required for buy instruction")?;
+    context.insert("bonding_curve.creator".to_string(), creator);
+    
     // Use provided fee_recipient from bonding curve
     context.insert("fee_recipient".to_string(), *fee_recipient);
     // NOTE: fee_program is NOT in main instruction accounts - only invoked via CPI
     // Do NOT add fee_program to context
 
     let pref = ["pumpfun", "pumpfunamm", "pumpfunfees"];
+    let mut last_error: Option<String> = None;
+    
     for key in pref.iter() {
         if let Some(idl) = idls.get(*key) {
             match idl.build_accounts_for("buy", &context) {
-                Ok(metas) => return Ok(Instruction { program_id: idl.address, accounts: metas, data }),
-                Err(e) => log::debug!("IDL {} build_accounts_for(buy) failed: {}", key, e),
+                Ok(metas) => {
+                    // Get discriminator from IDL
+                    let discriminator = get_buy_discriminator(Some(idl));
+                    let mut data = discriminator.to_vec();
+                    data.extend(borsh::to_vec(&args)?);
+                    
+                    debug!("Built buy instruction with IDL {} ({} accounts)", key, metas.len());
+                    return Ok(Instruction { program_id: idl.address, accounts: metas, data });
+                }
+                Err(e) => {
+                    let err_msg = format!("IDL {} build_accounts_for(buy) failed: {}", key, e);
+                    debug!("{}", err_msg);
+                    last_error = Some(err_msg);
+                }
             }
         }
     }
 
+    // Log detailed error before falling back
+    if let Some(err) = last_error {
+        warn!("All IDL-based builds failed, using fallback. Last error: {}", err);
+        warn!("Context provided: {:?}", context.keys().collect::<Vec<_>>());
+    }
+    
     // fallback: construct best-effort like before
     let pump_program = *program_id;
     // global PDA
@@ -109,15 +172,10 @@ pub fn build_buy_instruction(
     accounts.push(AccountMeta::new(*user, true));                          // 6: user (signer)
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(SYSTEM_PROGRAM_PUBKEY)?, false)); // 7: system_program
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(TOKEN_PROGRAM_PUBKEY)?, false)); // 8: token_program
-    if let Some(creator) = creator_pubkey {
-        let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
-        accounts.push(AccountMeta::new(creator_vault, false));              // 9: creator_vault
-    } else {
-        // Missing creator - build best-effort placeholder so dry-run builders can still produce
-        // a consistent account list. Use Pubkey::default() as a placeholder for the creator_vault.
-        log::debug!("creator_pubkey missing; inserting placeholder creator_vault for best-effort build");
-        accounts.push(AccountMeta::new_readonly(Pubkey::default(), false)); // 9: placeholder creator_vault
-    }
+    
+    // Creator vault is REQUIRED - we already validated creator exists above
+    let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
+    accounts.push(AccountMeta::new(creator_vault, false));              // 9: creator_vault
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
     accounts.push(AccountMeta::new(global_vol_acc, false));                  // 12: global_vol_acc
@@ -127,6 +185,12 @@ pub fn build_buy_instruction(
     accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 14: fee_config
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(FEE_PROGRAM_PUBKEY)?, false)); // 15: fee_program
 
+    // Use fallback discriminator
+    let discriminator = get_buy_discriminator(None);
+    let mut data = discriminator.to_vec();
+    data.extend(borsh::to_vec(&args)?);
+    
+    warn!("Using fallback buy instruction builder (no IDL available)");
     Ok(Instruction { program_id: *program_id, accounts, data })
 }
 
@@ -144,33 +208,55 @@ pub fn build_sell_instruction(
         amount,
         min_sol_output,
     };
-    let mut data = SELL_DISCRIMINATOR.to_vec();
-    data.extend(borsh::to_vec(&args)?);
+    
     // Try to build using IDL if available. Preferred order: pumpfun, pumpfunamm, pumpfunfees
     let idls = load_all_idls();
     let mint_pk = Pubkey::from_str(mint)?;
     let mut context: HashMap<String, Pubkey> = HashMap::new();
     context.insert("mint".to_string(), mint_pk);
     context.insert("user".to_string(), *user);
-    if let Some(creator) = creator_pubkey {
-        context.insert("bonding_curve.creator".to_string(), creator);
-    }
+    
+    // Creator is REQUIRED for sell instruction - do not use placeholder
+    let creator = creator_pubkey.ok_or("creator_pubkey is required for sell instruction")?;
+    context.insert("bonding_curve.creator".to_string(), creator);
+    
     // Use provided fee_recipient from bonding curve
     context.insert("fee_recipient".to_string(), *fee_recipient);
     // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
     let fee_program_pubkey = Pubkey::from_str(FEE_PROGRAM_PUBKEY)
         .map_err(|e| format!("Invalid fee_program pubkey: {}", e))?;
     context.insert("fee_program".to_string(), fee_program_pubkey);
+    
     let pref = ["pumpfun", "pumpfunamm", "pumpfunfees"];
+    let mut last_error: Option<String> = None;
+    
     for key in pref.iter() {
         if let Some(idl) = idls.get(*key) {
             match idl.build_accounts_for("sell", &context) {
-                Ok(metas) => return Ok(Instruction { program_id: idl.address, accounts: metas, data }),
-                Err(e) => log::debug!("IDL {} build_accounts_for(sell) failed: {}", key, e),
+                Ok(metas) => {
+                    // Get discriminator from IDL
+                    let discriminator = get_sell_discriminator(Some(idl));
+                    let mut data = discriminator.to_vec();
+                    data.extend(borsh::to_vec(&args)?);
+                    
+                    debug!("Built sell instruction with IDL {} ({} accounts)", key, metas.len());
+                    return Ok(Instruction { program_id: idl.address, accounts: metas, data });
+                }
+                Err(e) => {
+                    let err_msg = format!("IDL {} build_accounts_for(sell) failed: {}", key, e);
+                    debug!("{}", err_msg);
+                    last_error = Some(err_msg);
+                }
             }
         }
     }
 
+    // Log detailed error before falling back
+    if let Some(err) = last_error {
+        warn!("All IDL-based builds failed, using fallback. Last error: {}", err);
+        warn!("Context provided: {:?}", context.keys().collect::<Vec<_>>());
+    }
+    
     // fallback best-effort behavior (requires creator)
     let pump_program = *program_id;
     let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program);
@@ -190,14 +276,10 @@ pub fn build_sell_instruction(
     accounts.push(AccountMeta::new(associated_user, false));                 // 5: assoc_user
     accounts.push(AccountMeta::new(*user, true));                            // 6: user (signer)
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(SYSTEM_PROGRAM_PUBKEY)?, false)); // 7: system_program
-    if let Some(creator) = creator_pubkey {
-        let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
-        accounts.push(AccountMeta::new(creator_vault, false));               // 8: creator_vault
-    } else {
-        // Missing creator - insert placeholder to preserve account ordering for dry-run
-        log::debug!("creator_pubkey missing for sell; inserting placeholder creator_vault");
-        accounts.push(AccountMeta::new_readonly(Pubkey::default(), false)); // 8: placeholder
-    }
+    
+    // Creator vault is REQUIRED - we already validated creator exists above
+    let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program);
+    accounts.push(AccountMeta::new(creator_vault, false));               // 8: creator_vault
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(TOKEN_PROGRAM_PUBKEY)?, false)); // 9: token_program
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
@@ -205,5 +287,11 @@ pub fn build_sell_instruction(
     accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 12: fee_config
     accounts.push(AccountMeta::new_readonly(Pubkey::from_str(FEE_PROGRAM_PUBKEY)?, false)); // 13: fee_program
 
+    // Use fallback discriminator
+    let discriminator = get_sell_discriminator(None);
+    let mut data = discriminator.to_vec();
+    data.extend(borsh::to_vec(&args)?);
+    
+    warn!("Using fallback sell instruction builder (no IDL available)");
     Ok(Instruction { program_id: *program_id, accounts, data })
 }

@@ -99,11 +99,16 @@ export default function TradingPerformanceWidget() {
         {topTokens.map((token, index) => {
           const isPositive = token.profit >= 0
           const color = isPositive ? 'var(--theme-success, #22c55e)' : 'var(--theme-error, #ef4444)'
+          const rankClasses: Record<number, string> = { 0: 'rank-badge-gold', 1: 'rank-badge-silver', 2: 'rank-badge-bronze' }
+          const rankClass = rankClasses[index] || ''
 
           return (
-            <div key={token.mint} className="group">
-              <div className="flex items-center gap-3 p-3 rounded-lg transition-all duration-300 hover:bg-[var(--glass-bg)]">
-                {/* Token Icon */}
+            <div key={token.mint} className="group stagger-item" style={{ animationDelay: `${index * 0.1}s` }}>
+              <div className={`flex items-center gap-3 p-3 rounded-lg transition-all duration-300 hover:bg-[var(--glass-bg)] ${isPositive ? 'profit-row-shimmer' : ''}`}>
+                {/* Rank Badge */}
+                <div className={`rank-badge ${rankClass}`}>
+                  {index + 1}
+                </div>
                 <div 
                   className="w-11 h-11 rounded-full flex items-center justify-center font-bold text-white relative overflow-hidden group-hover:scale-110 transition-transform"
                   style={{

@@ -348,3 +348,196 @@
     box-shadow: 0 0 10px var(--glow-color);
   }
 }
+
+/* ═══════════════════════════════════════════════════════════ */
+/* FONT FAMILIES FOR DOCS                                      */
+/* ═══════════════════════════════════════════════════════════ */
+
+body {
+  font-family: 'Rajdhani', sans-serif !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4,
+.VPHero .name,
+.VPHero .text {
+  font-family: 'Orbitron', sans-serif !important;
+}
+
+.vp-doc code,
+.vp-doc pre,
+.vp-doc pre code {
+  font-family: 'JetBrains Mono', monospace !important;
+}
+
+.VPHero .tagline {
+  font-family: 'Share Tech Mono', monospace !important;
+}
+
+.VPNavBarTitle .title {
+  font-family: 'Orbitron', sans-serif !important;
+  font-weight: 800 !important;
+  letter-spacing: 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════ */
+/* ENHANCED FEATURE CARDS WITH ANIMATIONS                     */
+/* ═══════════════════════════════════════════════════════════ */
+
+.VPFeature {
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+.VPFeature::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -100%;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--theme-accent), transparent);
+  animation: scan-line-feature 4s linear infinite;
+}
+
+@keyframes scan-line-feature {
+  0% { left: -100%; }
+  100% { left: 200%; }
+}
+
+.VPFeature .icon {
+  font-size: 2em !important;
+  animation: glow-text 3s ease-in-out infinite;
+}
+
+.VPFeature .title {
+  font-family: 'Orbitron', sans-serif !important;
+  font-weight: 700 !important;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.VPFeature .details {
+  font-family: 'Rajdhani', sans-serif !important;
+  font-size: 15px !important;
+}
+
+/* ═══════════════════════════════════════════════════════════ */
+/* HERO SECTION ENHANCED ANIMATIONS                           */
+/* ═══════════════════════════════════════════════════════════ */
+
+.VPHero .name {
+  letter-spacing: 4px !important;
+}
+
+.VPHero .text {
+  text-transform: uppercase !important;
+  letter-spacing: 2px !important;
+  font-weight: 600 !important;
+}
+
+.VPHero .tagline {
+  text-transform: uppercase !important;
+  letter-spacing: 3px !important;
+  font-size: 14px !important;
+  animation: glow-text 3s ease-in-out infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════ */
+/* SIDEBAR ENHANCEMENTS                                        */
+/* ═══════════════════════════════════════════════════════════ */
+
+.VPSidebar .VPSidebarItem .text {
+  font-family: 'Rajdhani', sans-serif !important;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+  transition: all 0.3s ease;
+}
+
+.VPSidebar .VPSidebarItem.is-active > .item > .text {
+  color: var(--theme-accent) !important;
+  text-shadow: 0 0 8px var(--glow-color);
+}
+
+.VPSidebar .VPSidebarItem.is-active > .item {
+  border-left: 3px solid var(--theme-accent) !important;
+  padding-left: 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════ */
+/* CODE BLOCK ENHANCEMENTS                                     */
+/* ═══════════════════════════════════════════════════════════ */
+
+.vp-doc div[class*='language-'] {
+  border: 2px solid var(--theme-accent) !important;
+  box-shadow: 0 0 20px var(--border-glow), inset 0 0 20px rgba(0, 0, 0, 0.5) !important;
+  border-radius: 8px !important;
+  position: relative;
+  overflow: hidden;
+}
+
+.vp-doc div[class*='language-']::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--theme-accent), transparent);
+  animation: scan-line-feature 3s linear infinite;
+}
+
+/* ═══════════════════════════════════════════════════════════ */
+/* TABLE ENHANCEMENTS                                          */
+/* ═══════════════════════════════════════════════════════════ */
+
+.vp-doc table {
+  border: 2px solid var(--theme-accent) !important;
+  box-shadow: 0 0 15px var(--border-glow);
+}
+
+.vp-doc th {
+  font-family: 'Orbitron', sans-serif !important;
+  font-size: 12px !important;
+  text-transform: uppercase !important;
+  letter-spacing: 1px !important;
+}
+
+.vp-doc tr:hover td {
+  background: rgba(0, 255, 65, 0.05) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════ */
+/* CUSTOM BUTTON ANIMATIONS                                    */
+/* ═══════════════════════════════════════════════════════════ */
+
+.VPButton {
+  font-family: 'Orbitron', sans-serif !important;
+  text-transform: uppercase !important;
+  letter-spacing: 2px !important;
+  font-weight: 700 !important;
+  position: relative;
+  overflow: hidden;
+}
+
+.VPButton::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+  animation: btn-shimmer 3s ease-in-out infinite;
+}
+
+@keyframes btn-shimmer {
+  0% { left: -100%; }
+  100% { left: 200%; }
+}

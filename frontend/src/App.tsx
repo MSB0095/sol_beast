@@ -13,6 +13,17 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 import './App.css'
 import useWebSocket from './utils/useWebSocket';
 
+// Generate matrix rain characters for background
+const MATRIX_CHARS = '01アイウエオカキクケコサシスセソタチツテトナニヌネノ◎₿Ξ'
+const matrixColumns = Array.from({ length: 15 }, (_, i) => ({
+  id: i,
+  char: MATRIX_CHARS[Math.floor(Math.random() * MATRIX_CHARS.length)],
+  left: `${(i / 15) * 100 + Math.random() * 4}%`,
+  duration: `${8 + Math.random() * 12}s`,
+  delay: `${Math.random() * 10}s`,
+  size: `${10 + Math.random() * 6}px`,
+}))
+
 function App() {
   const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
@@ -32,8 +43,26 @@ function App() {
 
   return (
     <div className="min-h-screen bg-black transition-colors duration-500 relative overflow-hidden">
+      {/* Matrix rain background characters */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden opacity-[0.07]">
+        {matrixColumns.map(col => (
+          <div
+            key={col.id}
+            className="matrix-char"
+            style={{
+              left: col.left,
+              fontSize: col.size,
+              animationDuration: col.duration,
+              animationDelay: col.delay,
+            }}
+          >
+            {col.char}
+          </div>
+        ))}
+      </div>
+
       {/* Animated electric grid background */}
-      <div className="fixed inset-0 opacity-10 pointer-events-none animate-pulse" style={{
+      <div className="fixed inset-0 opacity-[0.06] pointer-events-none" style={{
         backgroundImage: `linear-gradient(var(--theme-accent) 1px, transparent 1px), linear-gradient(90deg, var(--theme-accent) 1px, transparent 1px)`,
         backgroundSize: '50px 50px',
         animation: 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite'

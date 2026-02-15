@@ -13,6 +13,9 @@ export default defineConfig({
     ['meta', { name: 'theme-color', content: '#00ff41' }],
     ['meta', { property: 'og:title', content: 'SOL BEAST Documentation' }],
     ['meta', { property: 'og:description', content: 'Ultra-Fast Solana Token Sniping Bot' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', { href: 'https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@300;400;500;600;700&family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap', rel: 'stylesheet' }],
   ],
 
   themeConfig: {

@@ -179,18 +179,11 @@ export default function NewCoinsPanel() {
                   <div className="flex items-center gap-2">
                     <DollarSign size={14} className="text-gray-400" />
                     <span className="text-xs font-mono text-gray-400 truncate">
-                      Buy Price: {coin.buy_price != null && coin.buy_price !== undefined ? `${coin.buy_price.toFixed(6)} SOL` : 'N/A'}
+                      Buy Price: {coin.buy_price != null && coin.buy_price !== undefined ? (
+                        <span className="text-sol-purple font-semibold">{coin.buy_price.toFixed(9)} SOL/token</span>
+                      ) : 'N/A'}
                     </span>
                   </div>
-
-                  {coin.buy_price != null && coin.buy_price !== undefined && (
-                    <div className="flex items-center gap-2 pt-2 border-t border-gray-700">
-                      <span className="text-xs text-gray-400">Buy Price:</span>
-                      <span className="text-sm font-semibold text-sol-purple">
-                        {coin.buy_price.toFixed(9)} SOL/token
-                      </span>
-                    </div>
-                  )}
                 </div>
 
                 {/* Mint Address (Bottom) */}

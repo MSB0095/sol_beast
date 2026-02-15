@@ -164,18 +164,19 @@ export default function HoldingsPanel() {
                       {holding.buy_price.toFixed(12)} SOL
                     </td>
                     <td className="py-3 px-4 text-right font-mono text-xs">
-                      {isLive ? (
-                        <span className={pnlClass}>{currentPrice.toFixed(12)} SOL</span>
-                      ) : '-'}
+                      <span className={isLive ? pnlClass : 'text-gray-500'}>
+                        {currentPrice.toFixed(12)} SOL
+                      </span>
+                      {!isLive && <span className="ml-1 text-[10px] text-gray-600" title="Waiting for live price">(buy)</span>}
                     </td>
-                    <td className={`py-3 px-4 text-right font-mono text-xs font-bold ${pnlClass}`}>
-                      {isLive ? `${pnlSign}${pnlPercent.toFixed(2)}%` : '-'}
+                    <td className={`py-3 px-4 text-right font-mono text-xs font-bold ${isLive ? pnlClass : 'text-gray-500'}`}>
+                      {pnlSign}{pnlPercent.toFixed(2)}%
                     </td>
-                    <td className={`py-3 px-4 text-right font-mono text-xs font-bold ${pnlClass}`}>
-                      {isLive ? `${pnlSolSign}${pnlSol.toFixed(9)}` : '-'}
+                    <td className={`py-3 px-4 text-right font-mono text-xs font-bold ${isLive ? pnlClass : 'text-gray-500'}`}>
+                      {pnlSolSign}{pnlSol.toFixed(9)}
                     </td>
                     <td className="py-3 px-4 text-right font-mono text-xs text-blue-400">
-                      {isLive ? `${positionValue.toFixed(9)}` : '-'}
+                      {positionValue.toFixed(9)}
                     </td>
                     <td className="py-3 px-4 text-right font-mono">
                       {tokens.toLocaleString()}

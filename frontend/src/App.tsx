@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useBotStore } from './store/botStore'
 import { useSettingsStore } from './store/settingsStore'
 import Header from './components/Header'
@@ -25,11 +25,25 @@ const matrixColumns = Array.from({ length: 15 }, (_, i) => ({
 }))
 
 function App() {
-  const { initializeConnection, status, mode, runningState, cleanup } = useBotStore()
+  const { initializeConnection, status, mode, runningState, cleanup, stats, prices } = useBotStore()
   const { activeTab, fetchSettings } = useSettingsStore()
 
   // Initialize WebSocket connection
   useWebSocket();
+
+  // Compute live unrealized PnL for sidebar Quick Stats
+  const liveUnrealizedPnl = useMemo(() => {
+    if (!stats?.current_holdings || stats.current_holdings.length === 0) return 0
+    let pnl = 0
+    stats.current_holdings.forEach(h => {
+      const live = prices[h.mint]
+      const curPrice = live ? live.price : h.buy_price
+      const decimals = h.decimals || live?.decimals || 6
+      const tokens = h.amount / Math.pow(10, decimals)
+      pnl += (curPrice - h.buy_price) * tokens
+    })
+    return pnl
+  }, [stats?.current_holdings, prices])
 
   useEffect(() => {
     initializeConnection()
@@ -176,6 +190,24 @@ function App() {
                   <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Mode:</span>
                   <span className={`font-bold uppercase tracking-widest whitespace-nowrap ${mode === 'real' ? 'text-orange-400' : 'text-blue-400'}`}>
                     {mode === 'real' ? '[REAL]' : '[DRY-RUN]'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center gap-3 p-3 bg-black electric-border">
+                  <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Holdings:</span>
+                  <span className="font-bold uppercase tracking-widest whitespace-nowrap text-[var(--theme-info)]">
+                    {stats?.current_holdings?.length || 0}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center gap-3 p-3 bg-black electric-border">
+                  <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Realized P/L:</span>
+                  <span className={`font-bold uppercase tracking-widest whitespace-nowrap ${(stats?.total_profit || 0) >= 0 ? 'text-[var(--theme-success)]' : 'text-[var(--theme-error)]'}`}>
+                    {(stats?.total_profit || 0) >= 0 ? '+' : ''}{(stats?.total_profit || 0).toFixed(4)}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center gap-3 p-3 bg-black electric-border">
+                  <span className="text-[var(--theme-text-secondary)] uppercase tracking-wider whitespace-nowrap">Unrealized:</span>
+                  <span className={`font-bold uppercase tracking-widest whitespace-nowrap ${liveUnrealizedPnl >= 0 ? 'text-[var(--theme-success)]' : 'text-[var(--theme-error)]'}`}>
+                    {liveUnrealizedPnl >= 0 ? '+' : ''}{liveUnrealizedPnl.toFixed(6)}
                   </span>
                 </div>
               </div>

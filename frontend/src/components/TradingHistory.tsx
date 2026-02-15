@@ -261,7 +261,7 @@ export default function TradingHistory() {
                     </td>
                     
                     <td className="py-3 px-4 text-right font-mono">
-                      {trade.amount_sol ? trade.amount_sol.toFixed(4) : '-'}
+                      {trade.amount_sol != null && trade.amount_sol !== undefined ? trade.amount_sol.toFixed(4) : '-'}
                     </td>
                     
                     <td className="py-3 px-4 text-right font-mono text-xs">
@@ -275,7 +275,7 @@ export default function TradingHistory() {
                     </td>
                     
                     <td className="py-3 px-4 text-right font-mono text-xs">
-                      {trade.price_per_token ? trade.price_per_token.toFixed(9) : '-'}
+                      {trade.price_per_token != null && trade.price_per_token !== undefined ? trade.price_per_token.toFixed(9) : '-'}
                     </td>
                     
                     <td className="py-3 px-4 text-right">

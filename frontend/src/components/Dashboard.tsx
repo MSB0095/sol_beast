@@ -5,7 +5,7 @@ import { TrendingUp, TrendingDown, Target, Loader, Wallet, Sparkles } from 'luci
 import TradingPerformanceWidget from './TradingPerformanceWidget'
 
 export default function Dashboard() {
-  const { stats, historicalData, detectedCoins, totalDetectedCoins } = useBotStore()
+  const { stats, historicalData, detectedCoins, totalDetectedCoins, prices } = useBotStore()
   const prevProfitRef = useRef<number>(0)
   const [celebrating, setCelebrating] = useState(false)
   const [sparkles, setSparkles] = useState<{id: number; x: number; y: number}[]>([])
@@ -52,6 +52,26 @@ export default function Dashboard() {
     // The dependency on stats and historicalData will cause re-render when they change
   }, [stats, historicalData])
 
+  // Compute live unrealized PnL from current holdings + WS prices
+  const { unrealizedPnl, unrealizedPnlPercent, totalPositionValue, totalBuyCost } = useMemo(() => {
+    if (!stats?.current_holdings || stats.current_holdings.length === 0) {
+      return { unrealizedPnl: 0, unrealizedPnlPercent: 0, totalPositionValue: 0, totalBuyCost: 0 }
+    }
+    let posVal = 0
+    let buyCost = 0
+    stats.current_holdings.forEach(h => {
+      const live = prices[h.mint]
+      const curPrice = live ? live.price : h.buy_price
+      const decimals = h.decimals || live?.decimals || 6
+      const tokens = h.amount / Math.pow(10, decimals)
+      posVal += curPrice * tokens
+      buyCost += h.buy_price * tokens
+    })
+    const pnl = posVal - buyCost
+    const pct = buyCost > 0 ? ((posVal - buyCost) / buyCost) * 100 : 0
+    return { unrealizedPnl: pnl, unrealizedPnlPercent: pct, totalPositionValue: posVal, totalBuyCost: buyCost }
+  }, [stats?.current_holdings, prices])
+
   if (!stats) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -90,6 +110,11 @@ export default function Dashboard() {
                   style={(stats?.total_profit || 0) >= 0 ? { color: 'var(--theme-success)' } : { color: 'var(--theme-error)', textShadow: '0 0 20px var(--theme-error)' }}>
                 ◎{(stats?.total_profit || 0).toFixed(9)}
               </h3>
+              {stats?.current_holdings && stats.current_holdings.length > 0 && (
+                <p className="text-xs font-mono-tech mt-1" style={{ color: unrealizedPnl >= 0 ? 'var(--theme-success)' : 'var(--theme-error)' }}>
+                  Unrealized: {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(9)} SOL ({unrealizedPnlPercent >= 0 ? '+' : ''}{unrealizedPnlPercent.toFixed(2)}%)
+                </p>
+              )}
             </div>
             {(stats?.total_profit || 0) >= 0 ? (
               <div className={`p-4 rounded-2xl ${celebrating ? 'animate-celebrate' : 'animate-float'}`} style={{ 
@@ -161,6 +186,11 @@ export default function Dashboard() {
               <h3 className="text-3xl sm:text-4xl md:text-5xl font-display font-black" style={{ color: 'var(--theme-info)', textShadow: '0 0 20px var(--theme-info)' }}>
                 {stats?.current_holdings?.length || 0}
               </h3>
+              {totalPositionValue > 0 && (
+                <p className="text-xs font-mono-tech mt-1" style={{ color: 'var(--theme-info)' }}>
+                  Value: ◎{totalPositionValue.toFixed(9)} | Cost: ◎{totalBuyCost.toFixed(9)}
+                </p>
+              )}
               <div className="flex gap-3 mt-3">
                 <span className="badge-success">BUYS: {stats?.total_buys || 0}</span>
                 <span className="badge-error">SELLS: {stats?.total_sells || 0}</span>

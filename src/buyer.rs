@@ -4,8 +4,9 @@ use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
     rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback, detect_token_program_for_mint},
-    tx_builder::{BUY_DISCRIMINATOR, build_buy_instruction},
+    tx_builder::{build_buy_instruction},
     idl::load_all_idls,
+    onchain_idl::get_instruction_discriminator,
 };
 use solana_client::rpc_client::RpcClient;
 use std::{sync::Arc, collections::HashMap};
@@ -148,7 +149,11 @@ pub async fn buy_token(
                     let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
                     let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
                     let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
-                    let mut d = BUY_DISCRIMINATOR.to_vec();
+                    
+                    // Get discriminator from IDL
+                    let discriminator = get_instruction_discriminator(&idl, "buy")
+                        .unwrap_or_else(|_| crate::onchain_idl::compute_anchor_discriminator("buy"));
+                    let mut d = discriminator.to_vec();
                     d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { 
                         amount: token_amount, 
                         max_sol_cost: max_sol_cost_with_slippage, 
@@ -358,8 +363,12 @@ pub async fn buy_token(
                     let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
                     let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
                     let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
+                    
+                    // Get discriminator from IDL
+                    let discriminator = get_instruction_discriminator(&idl, "buy")
+                        .unwrap_or_else(|_| crate::onchain_idl::compute_anchor_discriminator("buy"));
                     instruction_opt = Some(solana_program::instruction::Instruction { program_id, accounts: metas, data: {
-                        let mut d = BUY_DISCRIMINATOR.to_vec();
+                        let mut d = discriminator.to_vec();
                         d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { 
                             amount: token_amount, 
                             max_sol_cost: max_sol_cost_with_slippage, 

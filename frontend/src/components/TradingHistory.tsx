@@ -198,7 +198,6 @@ export default function TradingHistory() {
                   <tr key={`${trade.mint}-${idx}`} className={`border-b border-gray-700 hover:bg-sol-darker transition-all ${
                     !isBuy && isProfit ? 'profit-row-shimmer' : ''
                   } ${!isBuy && !isProfit ? 'loss-row' : ''}`}
-                  style={{ animationDelay: `${idx * 0.03}s` }}
                   >
                     <td className="py-3 px-4">
                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold ${

@@ -14,7 +14,7 @@ export default function Dashboard() {
   useEffect(() => {
     const currentProfit = stats?.total_profit || 0
     const prevProfit = prevProfitRef.current
-    if (currentProfit > prevProfit && prevProfit !== 0 && currentProfit > 0) {
+    if (currentProfit > prevProfit && prevProfit !== 0) {
       setCelebrating(true)
       // Spawn sparkle particles
       const newSparkles = Array.from({ length: 6 }, (_, i) => ({

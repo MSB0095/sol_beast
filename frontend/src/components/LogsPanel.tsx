@@ -90,11 +90,7 @@ export default function LogsPanel() {
             <button
               key={level}
               onClick={() => setFilter(level)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all uppercase tracking-wider ${
-                filter === level
-                  ? ''
-                  : ''
-              }`}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all uppercase tracking-wider"
               style={filter === level ? {
                 backgroundColor: 'var(--theme-button-bg)',
                 color: 'var(--theme-button-text)',

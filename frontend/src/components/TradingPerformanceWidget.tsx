@@ -99,7 +99,8 @@ export default function TradingPerformanceWidget() {
         {topTokens.map((token, index) => {
           const isPositive = token.profit >= 0
           const color = isPositive ? 'var(--theme-success, #22c55e)' : 'var(--theme-error, #ef4444)'
-          const rankClass = index === 0 ? 'rank-badge-gold' : index === 1 ? 'rank-badge-silver' : index === 2 ? 'rank-badge-bronze' : ''
+          const rankClasses: Record<number, string> = { 0: 'rank-badge-gold', 1: 'rank-badge-silver', 2: 'rank-badge-bronze' }
+          const rankClass = rankClasses[index] || ''
 
           return (
             <div key={token.mint} className="group stagger-item" style={{ animationDelay: `${index * 0.1}s` }}>

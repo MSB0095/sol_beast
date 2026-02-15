@@ -1,0 +1,317 @@
+{
+  "address": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+  "version": "0.1.0",
+  "name": "pump_amm",
+  "metadata": {
+    "name": "pump_amm",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Pump.fun AMM / PumpSwap program for post-migration token trading"
+  },
+  "instructions": [
+    {
+      "name": "buy_token_sol",
+      "discriminator": [137, 204, 207, 92, 189, 28, 209, 222],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "globalConfig",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "baseMint",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "quoteMint",
+          "writable": false,
+          "signer": false,
+          "address": "So11111111111111111111111111111111111111112"
+        },
+        {
+          "name": "userBaseTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "userQuoteTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "poolBaseTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "poolQuoteTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "protocolFeeRecipient",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "protocolFeeRecipientTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "baseTokenProgram",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "quoteTokenProgram",
+          "writable": false,
+          "signer": false,
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "systemProgram",
+          "writable": false,
+          "signer": false,
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "associatedTokenProgram",
+          "writable": false,
+          "signer": false,
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "feeConfig",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [102, 101, 101, 95, 99, 111, 110, 102, 105, 103]
+              },
+              {
+                "kind": "const",
+                "value": [8, 69, 129, 47, 183, 209, 59, 181, 95, 57, 101, 197, 175, 108, 72, 63, 71, 99, 10, 248, 192, 23, 232, 86, 128, 244, 31, 115, 156, 57, 245, 136]
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [12, 53, 255, 169, 5, 90, 142, 86, 141, 168, 247, 188, 7, 86, 21, 39, 76, 241, 201, 44, 164, 31, 64, 0, 156, 81, 106, 164, 20, 194, 124, 112]
+            }
+          }
+        },
+        {
+          "name": "feeProgram",
+          "writable": false,
+          "signer": false,
+          "address": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+        },
+        {
+          "name": "coinCreatorVaultAuthority",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [99, 111, 105, 110, 95, 99, 114, 101, 97, 116, 111, 114, 95, 118, 97, 117, 108, 116, 95, 97, 117, 116, 104, 111, 114, 105, 116, 121]
+              }
+            ]
+          }
+        },
+        {
+          "name": "coinCreatorVaultAta",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "eventAuthority",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [95, 95, 101, 118, 101, 110, 116, 95, 97, 117, 116, 104, 111, 114, 105, 116, 121]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "writable": false,
+          "signer": false
+        }
+      ],
+      "args": [
+        { "name": "baseAmountOut", "type": "u64" },
+        { "name": "maxQuoteAmountIn", "type": "u64" }
+      ]
+    },
+    {
+      "name": "sell_token_sol",
+      "discriminator": [149, 39, 222, 155, 76, 2, 29, 195],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "globalConfig",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "baseMint",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "quoteMint",
+          "writable": false,
+          "signer": false,
+          "address": "So11111111111111111111111111111111111111112"
+        },
+        {
+          "name": "userBaseTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "userQuoteTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "poolBaseTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "poolQuoteTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "protocolFeeRecipient",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "protocolFeeRecipientTokenAccount",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "baseTokenProgram",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "quoteTokenProgram",
+          "writable": false,
+          "signer": false,
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "systemProgram",
+          "writable": false,
+          "signer": false,
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "associatedTokenProgram",
+          "writable": false,
+          "signer": false,
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "feeConfig",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [102, 101, 101, 95, 99, 111, 110, 102, 105, 103]
+              },
+              {
+                "kind": "const",
+                "value": [8, 69, 129, 47, 183, 209, 59, 181, 95, 57, 101, 197, 175, 108, 72, 63, 71, 99, 10, 248, 192, 23, 232, 86, 128, 244, 31, 115, 156, 57, 245, 136]
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [12, 53, 255, 169, 5, 90, 142, 86, 141, 168, 247, 188, 7, 86, 21, 39, 76, 241, 201, 44, 164, 31, 64, 0, 156, 81, 106, 164, 20, 194, 124, 112]
+            }
+          }
+        },
+        {
+          "name": "feeProgram",
+          "writable": false,
+          "signer": false,
+          "address": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+        },
+        {
+          "name": "coinCreatorVaultAuthority",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [99, 111, 105, 110, 95, 99, 114, 101, 97, 116, 111, 114, 95, 118, 97, 117, 108, 116, 95, 97, 117, 116, 104, 111, 114, 105, 116, 121]
+              }
+            ]
+          }
+        },
+        {
+          "name": "coinCreatorVaultAta",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "eventAuthority",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [95, 95, 101, 118, 101, 110, 116, 95, 97, 117, 116, 104, 111, 114, 105, 116, 121]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "writable": false,
+          "signer": false
+        }
+      ],
+      "args": [
+        { "name": "baseAmountIn", "type": "u64" },
+        { "name": "minQuoteAmountOut", "type": "u64" }
+      ]
+    }
+  ]
+}

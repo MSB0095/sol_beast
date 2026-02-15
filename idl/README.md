@@ -9,6 +9,16 @@ This directory contains the official IDL (Interface Definition Language) files f
   - Contains instruction definitions for `buy` and `sell` operations
   - Includes complete account metadata and PDA seed derivations
 
+- **pumpfunfees.json**: Pump.fun fee program IDL
+  - Program ID: `pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ`
+  - Contains fee configuration, fee tiers, and fee calculation instructions
+  - Used for fee_config PDA derivation and fee recipient validation
+
+- **pumpfunamm.json**: Pump.fun AMM / PumpSwap program IDL
+  - Program ID: `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA`
+  - Contains `buy_token_sol` and `sell_token_sol` instructions for post-migration token trading
+  - Used when tokens have graduated from bonding curves to AMM pools
+
 ## Source
 
 These IDL files are structured to match the official pump.fun program interface. The IDL format follows the Anchor framework standard with:

@@ -13,6 +13,8 @@ const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 // fee_program address from IDL
 const FEE_PROGRAM_PUBKEY: &str = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
+// fee_config PDA seed constant from pump.fun IDL (32 bytes)
+const FEE_CONFIG_SEED: [u8; 32] = [1, 86, 224, 246, 147, 102, 90, 207, 68, 219, 21, 104, 191, 23, 91, 170, 81, 137, 203, 151, 245, 210, 255, 59, 101, 93, 43, 182, 253, 109, 24, 176];
 
 #[derive(BorshSerialize)]
 pub struct BuyArgs {
@@ -186,9 +188,9 @@ pub fn build_buy_instruction(
     accounts.push(AccountMeta::new(global_vol_acc, false));                  // 12: global_vol_acc
     accounts.push(AccountMeta::new(user_vol_acc, false));                    // 13: user_vol_acc
     let fee_program_pk = Pubkey::from_str(FEE_PROGRAM_PUBKEY)?;
-    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &[1,86,224,246,147,102,90,207,68,219,21,104,191,23,91,170,81,137,203,151,245,210,255,59,101,93,43,182,253,109,24,176]], &fee_program_pk);
+    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], &fee_program_pk);
     accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 14: fee_config
-    accounts.push(AccountMeta::new_readonly(Pubkey::from_str(FEE_PROGRAM_PUBKEY)?, false)); // 15: fee_program
+    accounts.push(AccountMeta::new_readonly(fee_program_pk, false)); // 15: fee_program
 
     // Use fallback discriminator
     let discriminator = get_buy_discriminator(None);
@@ -296,7 +298,7 @@ pub fn build_sell_instruction(
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
     let fee_program_pk = Pubkey::from_str(FEE_PROGRAM_PUBKEY)?;
-    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &[1,86,224,246,147,102,90,207,68,219,21,104,191,23,91,170,81,137,203,151,245,210,255,59,101,93,43,182,253,109,24,176]], &fee_program_pk);
+    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], &fee_program_pk);
     accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 12: fee_config
     accounts.push(AccountMeta::new_readonly(fee_program_pk, false)); // 13: fee_program
 

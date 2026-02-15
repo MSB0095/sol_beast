@@ -143,7 +143,8 @@ use crate::idl::load_all_idls;
 use crate::onchain_idl::get_instruction_discriminator;
 use spl_associated_token_account::{get_associated_token_address, get_associated_token_address_with_program_id, instruction::create_associated_token_account_idempotent};
 use solana_program::pubkey::Pubkey;
-use spl_token::{self, instruction::close_account};
+use solana_program::instruction::AccountMeta;
+use spl_token::{self};
 
 /// SPL Token program ID (legacy)
 pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -1408,13 +1409,19 @@ pub async fn sell_token(
         // Only close the ATA on the FINAL sell (when position is fully exited)
         if is_final_sell {
             let ata = get_associated_token_address_with_program_id(&user_pubkey, &mint_pk, &token_program_id);
-            let close_ata_instruction = close_account(
-                &token_program_id,          // token program (Token-2022 or SPL Token)
-                &ata,                        // account to close
-                &user_pubkey,               // destination for lamports (rent refund)
-                &user_pubkey,               // owner of the account
-                &[],                         // no additional signers needed
-            )?;
+            // Build close_account instruction manually to support both SPL Token
+            // and Token-2022. The spl_token crate's close_account() rejects
+            // Token-2022 program IDs, so we construct the instruction directly.
+            // CloseAccount instruction = discriminator byte 9, no additional data.
+            let close_ata_instruction = solana_program::instruction::Instruction {
+                program_id: token_program_id,
+                accounts: vec![
+                    AccountMeta::new(ata, false),           // account to close
+                    AccountMeta::new(user_pubkey, false),   // destination for lamports
+                    AccountMeta::new_readonly(user_pubkey, true), // owner / authority
+                ],
+                data: vec![9], // TokenInstruction::CloseAccount
+            };
             all_instrs.push(close_ata_instruction);
             info!("Added close_account instruction to reclaim ~0.00203928 SOL rent from ATA {}", ata);
         }

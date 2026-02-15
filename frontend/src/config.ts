@@ -21,10 +21,44 @@ export const API_LOGS_URL = `${API_BASE_URL}/logs`
 export const API_DETECTED_COINS_URL = `${API_BASE_URL}/detected-coins`
 export const API_TRADES_URL = `${API_BASE_URL}/trades`
 export const API_SETTINGS_URL = `${API_BASE_URL}/settings`
-// WebSocket URL derived dynamically from current page location
-const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-const wsHost = typeof window !== 'undefined' ? window.location.host : 'localhost:3000'
-export const WS_URL = getEnv('VITE_WS_URL', `${wsProtocol}//${wsHost}/api/ws`)
+// WebSocket URL — must connect directly to the backend because Vite's dev proxy
+// does NOT reliably forward WebSocket upgrade requests.
+function buildWsUrl(): string {
+  // Allow explicit override via env var
+  const envWs = getEnv('VITE_WS_URL', '')
+  if (envWs) return envWs
+
+  if (typeof window === 'undefined') return 'ws://localhost:8080/api/ws'
+
+  const loc = window.location
+
+  // Production: frontend is served by the same backend (or reverse proxy)
+  // so use the current host directly.
+  if (loc.port === '8080' || loc.port === '') {
+    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${loc.host}/api/ws`
+  }
+
+  // GitHub Codespaces: URLs look like  <name>-<port>.app.github.dev
+  // Replace the frontend port (3000) with the backend port (8080).
+  const csMatch = loc.hostname.match(/^(.+)-(\d+)(\.app\.github\.dev)$/)
+  if (csMatch) {
+    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${csMatch[1]}-8080${csMatch[3]}/api/ws`
+  }
+
+  // Gitpod: URLs look like  <port>-<workspace>.gitpod.io
+  const gpMatch = loc.hostname.match(/^(\d+)-(.+\.gitpod\.io)$/)
+  if (gpMatch) {
+    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//8080-${gpMatch[2]}/api/ws`
+  }
+
+  // Local development: frontend on :3000, backend on :8080
+  return `ws://${loc.hostname}:8080/api/ws`
+}
+
+export const WS_URL = buildWsUrl()
 export const APP_NAME = 'Sol Beast'
 export const APP_VERSION = '1.0.0'
 

@@ -224,68 +224,109 @@ export const useBotStore = create<BotStore>((set, get) => ({
         
         set({ pollInterval: interval as unknown as number })
 
-        // Initialize WebSocket connection
-        try {
-          const ws = new WebSocket(WS_URL)
-          
-          ws.onopen = () => {
-             console.log('WebSocket connected')
-          }
-          
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(event.data)
-              
-              if (msg.type === 'initial') {
-                 set({ 
-                   detectedCoins: msg.detected_coins || [],
-                   totalDetectedCoins: msg.total_detected_coins || (msg.detected_coins || []).length,
-                   stats: {
-                     ...get().stats!,
-                     current_holdings: msg.holdings || []
-                   }
-                  })
-              } else if (msg.type === 'detected-coin') {
-                 set(state => ({
-                   detectedCoins: [msg.coin, ...state.detectedCoins].slice(0, 300),
-                   totalDetectedCoins: msg.total_detected_coins || state.totalDetectedCoins + 1
-                 }))
-              } else if (msg.type === 'price-update') {
-                 set(state => ({
-                   prices: {
-                     ...state.prices,
-                     [msg.mint]: {
-                       price: msg.price,
-                       profit_percent: msg.profit_percent || 0,
-                       pnl_sol: msg.pnl_sol || 0,
-                       buy_price: msg.buy_price || 0,
-                       amount: msg.amount || 0,
-                       decimals: msg.decimals
-                     }
-                   }
-                 }))
-              } else if (msg.type === 'holding-update') {
-                 set(state => ({
-                   stats: {
-                      ...state.stats!,
-                      current_holdings: msg.holdings
-                   }
-                 }))
-              }
-            } catch (e) {
-              console.error('Failed to parse WS message:', e)
+        // Initialize WebSocket connection with auto-reconnect
+        const connectWebSocket = () => {
+          try {
+            // Close any existing connection
+            const existingWs = get().ws
+            if (existingWs && existingWs.readyState !== WebSocket.CLOSED) {
+              existingWs.close()
             }
+
+            const ws = new WebSocket(WS_URL)
+            let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+            
+            ws.onopen = () => {
+               console.log('[WS] Connected to', WS_URL)
+               set({ ws })
+            }
+            
+            ws.onmessage = (event) => {
+              try {
+                const msg = JSON.parse(event.data)
+                
+                if (msg.type === 'initial') {
+                   const currentStats = get().stats
+                   set({ 
+                     detectedCoins: msg.detected_coins || [],
+                     totalDetectedCoins: msg.total_detected_coins || (msg.detected_coins || []).length,
+                     stats: {
+                       total_buys: currentStats?.total_buys ?? 0,
+                       total_sells: currentStats?.total_sells ?? 0,
+                       total_profit: currentStats?.total_profit ?? 0,
+                       uptime_secs: currentStats?.uptime_secs ?? 0,
+                       last_activity: currentStats?.last_activity ?? '',
+                       running_state: currentStats?.running_state,
+                       mode: currentStats?.mode,
+                       ...( currentStats || {} ),
+                       current_holdings: msg.holdings || []
+                     }
+                    })
+                } else if (msg.type === 'detected-coin') {
+                   set(state => ({
+                     detectedCoins: [msg.coin, ...state.detectedCoins].slice(0, 300),
+                     totalDetectedCoins: msg.total_detected_coins || state.totalDetectedCoins + 1
+                   }))
+                } else if (msg.type === 'price-update') {
+                   set(state => ({
+                     prices: {
+                       ...state.prices,
+                       [msg.mint]: {
+                         price: msg.price,
+                         profit_percent: msg.profit_percent || 0,
+                         pnl_sol: msg.pnl_sol || 0,
+                         buy_price: msg.buy_price || 0,
+                         amount: msg.amount || 0,
+                         decimals: msg.decimals
+                       }
+                     }
+                   }))
+                } else if (msg.type === 'holding-update') {
+                   set(state => {
+                     const currentStats = state.stats
+                     return {
+                       stats: {
+                         total_buys: currentStats?.total_buys ?? 0,
+                         total_sells: currentStats?.total_sells ?? 0,
+                         total_profit: currentStats?.total_profit ?? 0,
+                         uptime_secs: currentStats?.uptime_secs ?? 0,
+                         last_activity: currentStats?.last_activity ?? '',
+                         running_state: currentStats?.running_state,
+                         mode: currentStats?.mode,
+                         ...( currentStats || {} ),
+                         current_holdings: msg.holdings
+                       }
+                     }
+                   })
+                }
+              } catch (e) {
+                console.error('[WS] Failed to parse message:', e)
+              }
+            }
+            
+            ws.onclose = (ev) => {
+              console.log('[WS] Disconnected (code=' + ev.code + '). Reconnecting in 2s...')
+              // Auto-reconnect after 2 seconds if the store is still "connected"
+              if (get().status === 'connected') {
+                reconnectTimer = setTimeout(() => {
+                  console.log('[WS] Reconnecting...')
+                  connectWebSocket()
+                }, 2000)
+              }
+            }
+
+            ws.onerror = (e) => {
+              console.error('[WS] Error:', e)
+            }
+            
+            set({ ws })
+          } catch (e) {
+            console.error('[WS] Init failed:', e)
+            // Retry after delay
+            setTimeout(connectWebSocket, 3000)
           }
-          
-          ws.onclose = () => {
-            console.log('WebSocket disconnected')
-            // Reconnection logic could go here if needed, but for now rely on re-init
-          }
-          
-          set({ ws })
-        } catch (e) {
-          console.error('WebSocket init failed:', e)
         }
+        connectWebSocket()
 
       } else {
         set({ status: 'disconnected', error: 'Backend not available' })
@@ -431,9 +472,15 @@ export const useBotStore = create<BotStore>((set, get) => ({
     if (state.pollInterval !== null) {
       clearInterval(state.pollInterval)
     }
+    // Close WebSocket so onclose handler does NOT auto-reconnect
+    if (state.ws && state.ws.readyState !== WebSocket.CLOSED) {
+      state.ws.close()
+    }
     set({ 
       pollInterval: null, 
       status: 'disconnected',
+      ws: null,
+      prices: {},
       historicalData: [],
       lastStatUpdate: 0
     })

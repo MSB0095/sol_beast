@@ -174,7 +174,7 @@ pub struct BotStats {
 }
 
 pub fn create_router(state: ApiState) -> Router {
-    Router::new()
+    let api_routes = Router::new()
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
         .route("/settings", get(get_settings_handler))
@@ -187,7 +187,10 @@ pub fn create_router(state: ApiState) -> Router {
         .route("/detected-coins", get(get_detected_coins_handler))
         .route("/trades", get(get_trades_handler))
         .route("/ws", get(ws_handler))
-        .with_state(state)
+        .with_state(state);
+
+    Router::new()
+        .nest("/api", api_routes)
         .layer(CorsLayer::permissive())
 }
 

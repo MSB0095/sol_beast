@@ -7,8 +7,9 @@ import {
   API_BOT_START_URL,
   API_BOT_STOP_URL,
   API_BOT_MODE_URL,
+  API_DETECTED_COINS_URL,
+  WS_URL,
 } from '../config'
-import { API_DETECTED_COINS_URL } from '../config'
 
 export type BotStatus = 'connected' | 'disconnected' | 'error'
 export type BotRunningState = 'running' | 'stopped' | 'starting' | 'stopping'
@@ -225,9 +226,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
 
         // Initialize WebSocket connection
         try {
-          // Construct WS URL from API_HEALTH_URL (http://host:port/api/health -> ws://host:port/api/ws)
-          const wsUrl = API_HEALTH_URL.replace('http', 'ws').replace('/health', '/ws')
-          const ws = new WebSocket(wsUrl)
+          const ws = new WebSocket(WS_URL)
           
           ws.onopen = () => {
              console.log('WebSocket connected')

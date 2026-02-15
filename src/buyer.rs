@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as Base64Engine, Engine};
 use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
-    rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback, detect_token_program_for_mint},
+    rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_fee_recipient_for_mint, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback, detect_token_program_for_mint},
     tx_builder::{build_buy_instruction},
     idl::load_all_idls,
     onchain_idl::get_instruction_discriminator,
@@ -88,7 +88,12 @@ pub async fn buy_token(
     );
 
     // Fetch fee_recipient from Global PDA (needed for both real and simulate modes)
-    let fee_recipient = fetch_global_fee_recipient(rpc_client, settings).await?;
+    // Check bonding curve state for mayhem mode to get the correct fee recipient
+    let is_mayhem = match fetch_bonding_curve_state(mint, rpc_client, settings).await {
+        Ok(state) => state.is_mayhem_mode,
+        Err(_) => false,
+    };
+    let fee_recipient = fetch_fee_recipient_for_mint(is_mayhem, rpc_client, settings).await?;
 
     // Detect which token program this mint uses (Token-2022 vs legacy SPL Token)
     let token_program_id = detect_token_program_for_mint(mint, rpc_client, settings).await;
@@ -355,8 +360,7 @@ pub async fn buy_token(
                 let (creator_vault, _) = Pubkey::find_program_address(&[b"creator-vault", creator.as_ref()], &pump_program_pk);
                 context.insert("creator_vault".to_string(), creator_vault);
             }
-            // Add fee_recipient - pump.fun uses a fixed address
-            let fee_recipient = Pubkey::from_str("39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg")?;
+            // Add fee_recipient - use the already-fetched authorized fee recipient
             context.insert("fee_recipient".to_string(), fee_recipient);
             // Add token program so IDL resolves the correct one (Token-2022 vs SPL Token)
             context.insert("token_program".to_string(), token_program_id);

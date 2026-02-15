@@ -21,6 +21,7 @@ use std::time::Instant;
 // - token_total_supply: u64
 // - complete: bool (1 byte)
 // - creator: Pubkey (32 bytes)
+// - is_mayhem_mode: bool (1 byte) — added in V3
 #[derive(Debug, PartialEq, Clone)]
 pub struct BondingCurveState {
     pub virtual_token_reserves: u64,
@@ -30,6 +31,7 @@ pub struct BondingCurveState {
     pub token_total_supply: u64,
     pub complete: bool,
     pub creator: Option<Pubkey>,
+    pub is_mayhem_mode: bool,
 }
 
 impl BondingCurveState {
@@ -272,6 +274,7 @@ mod tests {
             token_total_supply: 0,
             complete: false,
             creator: None,
+            is_mayhem_mode: false,
         };
         let price_opt = state.spot_price_sol_per_token();
         assert!(price_opt.is_some(), "spot_price_sol_per_token should not be None");
@@ -308,5 +311,32 @@ mod tests {
         m3.normalize();
         assert_eq!(m3.name.as_deref(), Some("Properties Token"));
         assert_eq!(m3.symbol.as_deref(), Some("PRP"));
+    }
+
+    #[test]
+    fn test_bonding_curve_state_mayhem_mode() {
+        let normal_state = BondingCurveState {
+            virtual_sol_reserves: 30_000_000_000u64,
+            virtual_token_reserves: 1_000_000_000_000u64,
+            real_token_reserves: 0,
+            real_sol_reserves: 0,
+            token_total_supply: 0,
+            complete: false,
+            creator: None,
+            is_mayhem_mode: false,
+        };
+        assert!(!normal_state.is_mayhem_mode, "Standard token should not be in mayhem mode");
+
+        let mayhem_state = BondingCurveState {
+            virtual_sol_reserves: 30_000_000_000u64,
+            virtual_token_reserves: 1_000_000_000_000u64,
+            real_token_reserves: 0,
+            real_sol_reserves: 0,
+            token_total_supply: 0,
+            complete: false,
+            creator: None,
+            is_mayhem_mode: true,
+        };
+        assert!(mayhem_state.is_mayhem_mode, "Mayhem token should be in mayhem mode");
     }
 }

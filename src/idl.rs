@@ -532,4 +532,48 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_bundled_fee_idl_loads() {
+        assert!(
+            std::path::Path::new("idl/pumpfunfees.json").exists(),
+            "Bundled pumpfunfees.json should exist in idl/ directory"
+        );
+        
+        let idls = load_all_idls();
+        assert!(
+            idls.contains_key("pumpfunfees"),
+            "Should load bundled pumpfunfees.json into IDL map"
+        );
+        
+        let idl = idls.get("pumpfunfees").unwrap();
+        let expected_program_id = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
+        assert_eq!(
+            idl.address.to_string(),
+            expected_program_id,
+            "Fee IDL address should match pump.fun fee program ID"
+        );
+    }
+
+    #[test]
+    fn test_bundled_amm_idl_loads() {
+        assert!(
+            std::path::Path::new("idl/pumpfunamm.json").exists(),
+            "Bundled pumpfunamm.json should exist in idl/ directory"
+        );
+        
+        let idls = load_all_idls();
+        assert!(
+            idls.contains_key("pumpfunamm"),
+            "Should load bundled pumpfunamm.json into IDL map"
+        );
+        
+        let idl = idls.get("pumpfunamm").unwrap();
+        let expected_program_id = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+        assert_eq!(
+            idl.address.to_string(),
+            expected_program_id,
+            "AMM IDL address should match PumpSwap AMM program ID"
+        );
+    }
 }

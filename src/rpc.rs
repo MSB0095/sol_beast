@@ -748,11 +748,18 @@ pub async fn fetch_current_price(
     let complete = slice[40] != 0;
 
     // Parse creator (32 bytes after complete bool)
-    // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes)
+    // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) + is_mayhem_mode (1 byte)
     let creator = if slice.len() >= 73 {
         Pubkey::try_from(&slice[41..73]).ok()
     } else {
         None
+    };
+
+    // Parse is_mayhem_mode flag (1 byte after creator, at offset 73)
+    let is_mayhem_mode = if slice.len() >= 74 {
+        slice[73] != 0
+    } else {
+        false
     };
 
     if slice.len() > needed {
@@ -773,6 +780,7 @@ pub async fn fetch_current_price(
         token_total_supply,
         complete,
         creator,
+        is_mayhem_mode,
     };
     // Print parsed on-chain bonding curve info at info level so operators can
     // see the core fields in logs without having to inspect files.
@@ -994,11 +1002,16 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
             const PUMP_CURVE_DISCRIMINATOR: [u8; 8] = [0x17, 0xb7, 0xf8, 0x37, 0x60, 0xd8, 0xac, 0x60];
             if decoded.len() >= 49 && decoded[..8] == PUMP_CURVE_DISCRIMINATOR {
                 let slice = &decoded[8..];
-                // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) = 73 bytes minimum
+                // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) + is_mayhem_mode (1 byte)
                 let creator = if slice.len() >= 73 {
                     Pubkey::try_from(&slice[41..73]).ok()
                 } else {
                     None
+                };
+                let is_mayhem_mode = if slice.len() >= 74 {
+                    slice[73] != 0
+                } else {
+                    false
                 };
                 
                 let state = BondingCurveState {
@@ -1009,6 +1022,7 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
                     token_total_supply: u64::from_le_bytes(slice[32..40].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
                     complete: slice[40] != 0,
                     creator,
+                    is_mayhem_mode,
                 };
                 return Ok(state);
             }
@@ -1017,12 +1031,47 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
     Err("Failed to fetch bonding curve state".into())
 }
 
-/// Fetch the fee_recipient from the Global PDA account
+/// Known authorized fee recipient for standard (non-mayhem) pump.fun tokens.
+/// This is the canonical fee recipient that the pump.fun fee program recognizes.
+const PUMP_FEE_RECIPIENT: &str = "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM";
+
+/// Fetch the fee_recipient for a given mint from the Global PDA account.
+///
+/// The pump.fun program validates fee_recipients via its fee program. The old
+/// `fee_recipient` field at offset 33 (after discriminator) in the Global account
+/// is no longer the authorized one. Instead, authorized recipients are stored in:
+/// - `fee_recipients[7]` array at offset 154 (after discriminator) — for standard tokens
+/// - `reserved_fee_recipient` at offset 475 (after discriminator) — for mayhem mode tokens
+///
 /// Global account layout (after 8-byte discriminator):
-/// - initialized: bool (1 byte)
-/// - authority: Pubkey (32 bytes)
-/// - fee_recipient: Pubkey (32 bytes) ← at offset 8 + 1 + 32 = 41
+///   initialized: bool (1)
+///   authority: Pubkey (32)
+///   fee_recipient: Pubkey (32)              ← legacy/deprecated
+///   initial_virtual_token_reserves: u64 (8)
+///   initial_virtual_sol_reserves: u64 (8)
+///   initial_real_token_reserves: u64 (8)
+///   token_total_supply: u64 (8)
+///   fee_basis_points: u64 (8)
+///   withdraw_authority: Pubkey (32)
+///   enable_migrate: bool (1)
+///   pool_migration_fee: u64 (8)
+///   creator_fee_basis_points: u64 (8)
+///   fee_recipients: [Pubkey; 7] (224)       ← offset 154, authorized recipients
+///   set_creator_authority: Pubkey (32)
+///   admin_set_creator_authority: Pubkey (32)
+///   create_v2_enabled: bool (1)
+///   whitelist_pda: Pubkey (32)
+///   reserved_fee_recipient: Pubkey (32)     ← offset 475, for mayhem mode
+///
+/// If `is_mayhem_mode` is true, the reserved_fee_recipient is returned.
+/// Otherwise, the first non-zero entry from fee_recipients[] is returned.
+/// Falls back to the hardcoded known fee recipient if parsing fails.
 pub async fn fetch_global_fee_recipient(rpc_client: &Arc<RpcClient>, settings: &Arc<Settings>) -> Result<Pubkey, Box<dyn std::error::Error + Send + Sync>> {
+    fetch_fee_recipient_for_mint(false, rpc_client, settings).await
+}
+
+/// Fetch the appropriate fee recipient based on whether the token uses mayhem mode.
+pub async fn fetch_fee_recipient_for_mint(is_mayhem_mode: bool, rpc_client: &Arc<RpcClient>, settings: &Arc<Settings>) -> Result<Pubkey, Box<dyn std::error::Error + Send + Sync>> {
     let pump_program = Pubkey::from_str(&settings.pump_fun_program)?;
     let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &pump_program);
     
@@ -1039,19 +1088,43 @@ pub async fn fetch_global_fee_recipient(rpc_client: &Arc<RpcClient>, settings: &
             
             // Global discriminator
             const GLOBAL_DISCRIMINATOR: [u8; 8] = [0xa7, 0xe8, 0xe8, 0xb1, 0xc8, 0x6c, 0x72, 0x7f];
-            if decoded.len() >= 73 && decoded[..8] == GLOBAL_DISCRIMINATOR {
+            if decoded.len() >= 16 && decoded[..8] == GLOBAL_DISCRIMINATOR {
                 let slice = &decoded[8..];
-                // Layout: initialized (bool, 1 byte) + authority (32 bytes) + fee_recipient (32 bytes)
-                // fee_recipient is at offset 1 + 32 = 33
-                if slice.len() >= 65 {
-                    let fee_recipient = Pubkey::try_from(&slice[33..65])?;
-                    info!("Fetched fee_recipient from Global PDA: {}", fee_recipient);
-                    return Ok(fee_recipient);
+                
+                if is_mayhem_mode {
+                    // For mayhem mode tokens, use reserved_fee_recipient at offset 475
+                    if slice.len() >= 507 {
+                        let reserved = Pubkey::try_from(&slice[475..507])?;
+                        if reserved != Pubkey::default() {
+                            info!("Fetched reserved_fee_recipient (mayhem mode) from Global PDA: {}", reserved);
+                            return Ok(reserved);
+                        }
+                    }
+                    warn!("Mayhem mode requested but reserved_fee_recipient not available, falling back to standard");
+                }
+                
+                // For standard tokens, read from fee_recipients[7] array at offset 154
+                // Use the first non-zero entry
+                if slice.len() >= 378 {
+                    for i in 0..7 {
+                        let start = 154 + i * 32;
+                        let end = start + 32;
+                        if let Ok(recipient) = Pubkey::try_from(&slice[start..end]) {
+                            if recipient != Pubkey::default() {
+                                info!("Fetched fee_recipient from Global PDA fee_recipients[{}]: {}", i, recipient);
+                                return Ok(recipient);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    Err("Failed to fetch fee_recipient from Global account".into())
+    
+    // Fallback to hardcoded known authorized fee recipient
+    let fallback = Pubkey::from_str(PUMP_FEE_RECIPIENT)?;
+    warn!("Using hardcoded fallback fee_recipient: {}", fallback);
+    Ok(fallback)
 }
 
 
@@ -1277,8 +1350,12 @@ pub async fn sell_token(
     let token_program_id = detect_token_program_for_mint(mint, rpc_client, settings).await;
     info!("Sell {}: using token program {}", mint, token_program_id);
     
-    // Fetch fee_recipient from Global PDA
-    let fee_recipient = fetch_global_fee_recipient(rpc_client, settings).await?;
+    // Fetch fee_recipient from Global PDA (mayhem-mode aware)
+    let is_mayhem = match fetch_bonding_curve_state(mint, rpc_client, settings).await {
+        Ok(state) => state.is_mayhem_mode,
+        Err(_) => false,
+    };
+    let fee_recipient = fetch_fee_recipient_for_mint(is_mayhem, rpc_client, settings).await?;
 
     if is_real {
         // Real run: build instruction with the real keypair's pubkey as user (signer)

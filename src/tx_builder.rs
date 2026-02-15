@@ -15,10 +15,11 @@ const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpP
 const FEE_PROGRAM_PUBKEY: &str = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
 
 /// Fee config PDA seed constant from pump.fun program IDL.
-/// This 32-byte seed is used as the second seed for deriving the fee_config PDA
+/// This 32-byte value is the second element in the seeds array used for deriving the fee_config PDA
 /// from the fee program (pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ).
 /// 
 /// The fee_config PDA is derived as: find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], fee_program)
+/// where b"fee_config" is the first seed and FEE_CONFIG_SEED is the second seed in the array.
 /// 
 /// DO NOT modify this value without verifying against the pump.fun program's on-chain
 /// implementation, as incorrect seeds will cause transaction failures with AccountNotInitialized errors.

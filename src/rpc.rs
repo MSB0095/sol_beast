@@ -162,6 +162,20 @@ use std::collections::HashMap;
 use std::time::Duration;
 use crate::idl::SimpleIdl;
 
+/// Bonding curve layout constants (offsets after 8-byte discriminator)
+const BONDING_CURVE_CREATOR_OFFSET: usize = 41; // 5×u64(40) + bool(1)
+const BONDING_CURVE_MAYHEM_OFFSET: usize = 73;  // creator_offset + pubkey(32)
+
+/// Parse the `is_mayhem_mode` flag from bonding curve account data (after discriminator).
+/// The flag is at offset 73 (after 5×u64 + bool + pubkey).
+fn parse_is_mayhem_mode(slice: &[u8]) -> bool {
+    if slice.len() >= BONDING_CURVE_MAYHEM_OFFSET + 1 {
+        slice[BONDING_CURVE_MAYHEM_OFFSET] != 0
+    } else {
+        false
+    }
+}
+
 
 /// Detect which token program (SPL Token or Token-2022) owns the given mint.
 /// Queries the mint account and inspects the `owner` field.
@@ -749,18 +763,13 @@ pub async fn fetch_current_price(
 
     // Parse creator (32 bytes after complete bool)
     // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) + is_mayhem_mode (1 byte)
-    let creator = if slice.len() >= 73 {
-        Pubkey::try_from(&slice[41..73]).ok()
+    let creator = if slice.len() >= BONDING_CURVE_CREATOR_OFFSET + PUBKEY_SIZE {
+        Pubkey::try_from(&slice[BONDING_CURVE_CREATOR_OFFSET..BONDING_CURVE_CREATOR_OFFSET + PUBKEY_SIZE]).ok()
     } else {
         None
     };
 
-    // Parse is_mayhem_mode flag (1 byte after creator, at offset 73)
-    let is_mayhem_mode = if slice.len() >= 74 {
-        slice[73] != 0
-    } else {
-        false
-    };
+    let is_mayhem_mode = parse_is_mayhem_mode(slice);
 
     if slice.len() > needed {
         debug!(
@@ -1003,16 +1012,12 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
             if decoded.len() >= 49 && decoded[..8] == PUMP_CURVE_DISCRIMINATOR {
                 let slice = &decoded[8..];
                 // Layout: 5*u64 (40 bytes) + bool (1 byte) + creator (32 bytes) + is_mayhem_mode (1 byte)
-                let creator = if slice.len() >= 73 {
-                    Pubkey::try_from(&slice[41..73]).ok()
+                let creator = if slice.len() >= BONDING_CURVE_CREATOR_OFFSET + PUBKEY_SIZE {
+                    Pubkey::try_from(&slice[BONDING_CURVE_CREATOR_OFFSET..BONDING_CURVE_CREATOR_OFFSET + PUBKEY_SIZE]).ok()
                 } else {
                     None
                 };
-                let is_mayhem_mode = if slice.len() >= 74 {
-                    slice[73] != 0
-                } else {
-                    false
-                };
+                let is_mayhem_mode = parse_is_mayhem_mode(slice);
                 
                 let state = BondingCurveState {
                     virtual_token_reserves: u64::from_le_bytes(slice[0..8].try_into().map_err(|e: std::array::TryFromSliceError| Box::new(AppError::Conversion(e.to_string())))?),
@@ -1034,6 +1039,22 @@ pub async fn fetch_bonding_curve_state(mint: &str, rpc_client: &Arc<RpcClient>, 
 /// Known authorized fee recipient for standard (non-mayhem) pump.fun tokens.
 /// This is the canonical fee recipient that the pump.fun fee program recognizes.
 const PUMP_FEE_RECIPIENT: &str = "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM";
+
+// Global PDA account layout offsets (after 8-byte discriminator)
+const PUBKEY_SIZE: usize = 32;
+/// Offset of the fee_recipients[7] array in the Global PDA (after discriminator).
+/// Layout: initialized(1) + authority(32) + fee_recipient(32) + 5×u64(40) + 
+/// withdraw_authority(32) + enable_migrate(1) + pool_migration_fee(8) + 
+/// creator_fee_basis_points(8) = 154
+const GLOBAL_FEE_RECIPIENTS_OFFSET: usize = 154;
+/// Number of fee recipients in the fee_recipients array.
+const GLOBAL_FEE_RECIPIENTS_COUNT: usize = 7;
+/// Minimum slice length to read the entire fee_recipients array.
+const GLOBAL_FEE_RECIPIENTS_END: usize = GLOBAL_FEE_RECIPIENTS_OFFSET + GLOBAL_FEE_RECIPIENTS_COUNT * PUBKEY_SIZE;
+/// Offset of reserved_fee_recipient for mayhem mode tokens in the Global PDA.
+const GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET: usize = 475;
+/// Minimum slice length to read reserved_fee_recipient.
+const GLOBAL_RESERVED_FEE_RECIPIENT_END: usize = GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET + PUBKEY_SIZE;
 
 /// Fetch the fee_recipient for a given mint from the Global PDA account.
 ///
@@ -1092,9 +1113,9 @@ pub async fn fetch_fee_recipient_for_mint(is_mayhem_mode: bool, rpc_client: &Arc
                 let slice = &decoded[8..];
                 
                 if is_mayhem_mode {
-                    // For mayhem mode tokens, use reserved_fee_recipient at offset 475
-                    if slice.len() >= 507 {
-                        let reserved = Pubkey::try_from(&slice[475..507])?;
+                    // For mayhem mode tokens, use reserved_fee_recipient
+                    if slice.len() >= GLOBAL_RESERVED_FEE_RECIPIENT_END {
+                        let reserved = Pubkey::try_from(&slice[GLOBAL_RESERVED_FEE_RECIPIENT_OFFSET..GLOBAL_RESERVED_FEE_RECIPIENT_END])?;
                         if reserved != Pubkey::default() {
                             info!("Fetched reserved_fee_recipient (mayhem mode) from Global PDA: {}", reserved);
                             return Ok(reserved);
@@ -1103,12 +1124,12 @@ pub async fn fetch_fee_recipient_for_mint(is_mayhem_mode: bool, rpc_client: &Arc
                     warn!("Mayhem mode requested but reserved_fee_recipient not available, falling back to standard");
                 }
                 
-                // For standard tokens, read from fee_recipients[7] array at offset 154
+                // For standard tokens, read from fee_recipients array
                 // Use the first non-zero entry
-                if slice.len() >= 378 {
-                    for i in 0..7 {
-                        let start = 154 + i * 32;
-                        let end = start + 32;
+                if slice.len() >= GLOBAL_FEE_RECIPIENTS_END {
+                    for i in 0..GLOBAL_FEE_RECIPIENTS_COUNT {
+                        let start = GLOBAL_FEE_RECIPIENTS_OFFSET + i * PUBKEY_SIZE;
+                        let end = start + PUBKEY_SIZE;
                         if let Ok(recipient) = Pubkey::try_from(&slice[start..end]) {
                             if recipient != Pubkey::default() {
                                 info!("Fetched fee_recipient from Global PDA fee_recipients[{}]: {}", i, recipient);

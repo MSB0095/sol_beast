@@ -13,11 +13,8 @@ export default function ConfigurationPanel() {
   const isBotStopped = runningState === 'stopped'
 
   const handleSave = async () => {
-    if (!isBotStopped) {
-      return // Don't save if bot is running
-    }
     await saveSettings(settings)
-    setSuccessMessage('Settings saved successfully!')
+    setSuccessMessage(isBotStopped ? 'Settings saved successfully!' : 'Settings saved — changes take effect on next cycle!')
     setTimeout(() => setSuccessMessage(''), 3000)
   }
 
@@ -375,12 +372,12 @@ export default function ConfigurationPanel() {
       }}>
         <button
           onClick={handleSave}
-          disabled={saving || !isBotStopped}
+          disabled={saving}
           className="flex items-center gap-2 px-6 py-3 rounded-xl disabled:opacity-50 transition-all hover:scale-105"
-          title={!isBotStopped ? 'Stop the bot before saving settings' : ''}
+          title={!isBotStopped ? 'Settings will be applied on next cycle' : ''}
         >
           <Save size={18} />
-          {saving ? 'SAVING...' : isBotStopped ? 'SAVE SETTINGS' : 'STOP BOT TO SAVE'}
+          {saving ? 'SAVING...' : isBotStopped ? 'SAVE SETTINGS' : 'SAVE SETTINGS (LIVE)'}
         </button>
       </div>
     </div>

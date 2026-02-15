@@ -134,6 +134,10 @@ async fn main() -> Result<(), AppError> {
     let settings = Arc::new(Settings::from_file(&config_path)?);
     settings.validate()?;
     
+    // Shared settings mutex: the API writes to this, and running tasks read from it
+    // each tick so config changes from the frontend take effect immediately.
+    let shared_settings: Arc<tokio::sync::Mutex<Settings>> = Arc::new(tokio::sync::Mutex::new(settings.as_ref().clone()));
+    
     let rpc_client = Arc::new(RpcClient::new(settings.solana_rpc_urls[0].clone()));
     // Touch these settings here so they are used by the binary (avoid warnings)
     let price_source_cfg = settings.price_source.clone();
@@ -244,6 +248,7 @@ async fn main() -> Result<(), AppError> {
     let holdings_clone_monitor = holdings.clone();
     let price_cache_clone_monitor = price_cache.clone();
     let settings_clone_monitor = settings.clone();
+    let shared_settings_for_monitor = shared_settings.clone();
     let keypair_clone_monitor = keypair.clone();
     let simulate_keypair_clone = simulate_keypair.clone();
     let trades_map_clone_monitor = trades_map.clone();
@@ -337,6 +342,7 @@ async fn main() -> Result<(), AppError> {
             keypair_clone_monitor,
             simulate_keypair_clone_for_monitor,
             settings_clone_monitor,
+            shared_settings_for_monitor,
             trades_map_clone_monitor,
             ws_control_senders_clone_for_monitor,
             sub_map_clone_for_monitor,
@@ -362,7 +368,7 @@ async fn main() -> Result<(), AppError> {
     }));
 
     let api_state = ApiState {
-        settings: Arc::new(tokio::sync::Mutex::new(settings.as_ref().clone())),
+        settings: shared_settings.clone(),
         stats: api_stats.clone(),
         bot_control: bot_control.clone(),
         detected_coins: detected_coins.clone(),
@@ -489,7 +495,9 @@ async fn main() -> Result<(), AppError> {
         let in_flight_buys = in_flight_buys.clone();
         let rpc_client = rpc_client.clone();
         let price_cache = price_cache.clone();
-        let settings = settings.clone();
+        // Hot-reload: take a fresh snapshot of settings from the shared mutex
+        // so config changes from the frontend take effect immediately.
+        let settings = Arc::new(shared_settings.lock().await.clone());
         let ws_control_senders = ws_control_senders.clone();
         let next_wss_sender = next_wss_sender.clone();
         let trades_map = trades_map.clone();

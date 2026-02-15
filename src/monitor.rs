@@ -26,7 +26,8 @@ pub async fn monitor_holdings(
     is_real_flag: Arc<AtomicBool>,
     keypair: Option<Arc<Keypair>>,
     simulate_keypair: Option<Arc<Keypair>>,
-    settings: Arc<Settings>,
+    _initial_settings: Arc<Settings>,
+    shared_settings: Arc<tokio::sync::Mutex<Settings>>,
     trades_map: Arc<Mutex<HashMap<String, BuyRecord>>>,
     ws_control_senders: Arc<Vec<mpsc::Sender<WsRequest>>>,
     sub_map: Arc<Mutex<HashMap<String, (usize, u64)>>>,
@@ -43,6 +44,10 @@ pub async fn monitor_holdings(
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        
+        // Hot-reload: take a fresh snapshot of settings from the shared mutex
+        // so config changes from the frontend take effect immediately.
+        let settings = Arc::new(shared_settings.lock().await.clone());
         
         while let Ok(msg) = remove_rx.try_recv() {
             let (is_done_only, mint_to_rem) = if msg.starts_with("DONE:") {

@@ -231,19 +231,11 @@ async fn update_settings_handler(
     
     let bot_control = state.bot_control.clone();
     
-    // Check if bot is stopped before allowing settings changes
+    // Settings can now be changed while the bot is running (hot-reload).
+    // The running bot reads from the shared settings mutex each tick,
+    // so changes take effect on the next cycle.
     let running_state = state.bot_control.running_state.lock().await;
-    if *running_state != BotRunningState::Stopped {
-        warn!("{}", ERROR_BOT_MUST_BE_STOPPED);
-        bot_control.add_log("warn", ERROR_BOT_MUST_BE_STOPPED.to_string(), None).await;
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "error",
-                "message": ERROR_BOT_MUST_BE_STOPPED
-            }))
-        );
-    }
+    let is_running = *running_state != BotRunningState::Stopped;
     drop(running_state);
     
     let mut current_settings = state.settings.lock().await;
@@ -299,14 +291,19 @@ async fn update_settings_handler(
         );
     }
     
-    info!("Settings updated and saved successfully.");
-    bot_control.add_log("info", "Settings updated and saved successfully".to_string(), None).await;
+    if is_running {
+        info!("Settings updated while bot is running — changes take effect on next cycle.");
+        bot_control.add_log("info", "Settings updated while running — changes take effect on next cycle".to_string(), None).await;
+    } else {
+        info!("Settings updated and saved successfully.");
+        bot_control.add_log("info", "Settings updated and saved successfully".to_string(), None).await;
+    }
     
     (
         StatusCode::OK,
         Json(json!({
             "status": "success",
-            "message": "Settings updated successfully"
+            "message": if is_running { "Settings updated (live reload)" } else { "Settings updated successfully" }
         }))
     )
 }

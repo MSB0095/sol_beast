@@ -433,12 +433,12 @@ mod tests {
         let idls = load_all_idls();
         
         if let Some(idl) = idls.get("pumpfun") {
-            // Create a deterministic test context
+            // Create a deterministic test context with valid Solana pubkeys
             let mut context = HashMap::new();
-            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap());
+            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111111").unwrap());
             context.insert("user".to_string(), Pubkey::from_str("11111111111111111111111111111111").unwrap());
-            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("11111111111111111111111111111112").unwrap());
-            context.insert("feeRecipient".to_string(), Pubkey::from_str("11111111111111111111111111111113").unwrap());
+            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("CKu6dsG7HutDdWZkrjQRL75T1NsYKQc4Qh6TRD67Rr4q").unwrap());
+            context.insert("feeRecipient".to_string(), Pubkey::from_str("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin").unwrap());
             
             // Try to build accounts for buy instruction
             let result = idl.build_accounts_for("buy", &context);
@@ -467,12 +467,12 @@ mod tests {
         let idls = load_all_idls();
         
         if let Some(idl) = idls.get("pumpfun") {
-            // Create a deterministic test context
+            // Create a deterministic test context with valid Solana pubkeys
             let mut context = HashMap::new();
-            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap());
+            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111111").unwrap());
             context.insert("user".to_string(), Pubkey::from_str("11111111111111111111111111111111").unwrap());
-            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("11111111111111111111111111111112").unwrap());
-            context.insert("feeRecipient".to_string(), Pubkey::from_str("11111111111111111111111111111113").unwrap());
+            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("CKu6dsG7HutDdWZkrjQRL75T1NsYKQc4Qh6TRD67Rr4q").unwrap());
+            context.insert("feeRecipient".to_string(), Pubkey::from_str("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin").unwrap());
             context.insert("feeProgram".to_string(), Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ").unwrap());
             
             // Try to build accounts for sell instruction

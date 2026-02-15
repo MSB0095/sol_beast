@@ -288,6 +288,15 @@ mod tests {
         // Verify deterministic computation
         let disc2 = compute_anchor_discriminator("buy");
         assert_eq!(disc, disc2);
+        
+        // Known discriminators from pump.fun IDL
+        let buy_disc = compute_anchor_discriminator("buy");
+        let expected_buy: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+        assert_eq!(buy_disc, expected_buy, "Buy discriminator should match IDL");
+        
+        let sell_disc = compute_anchor_discriminator("sell");
+        let expected_sell: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+        assert_eq!(sell_disc, expected_sell, "Sell discriminator should match IDL");
     }
 
     #[test]

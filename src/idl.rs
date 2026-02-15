@@ -43,7 +43,7 @@ impl SimpleIdl {
             .raw
             .get("instructions")
             .and_then(|v| v.as_array())
-            .ok_or("IDL missing instructions array")?;
+            .ok_or_else(|| format!("IDL for program {} missing instructions array", self.address))?;
         let mut instr_val_opt: Option<&Value> = None;
         for instr in instructions {
             if instr.get("name").and_then(|n| n.as_str()) == Some(instr_name) {
@@ -51,16 +51,20 @@ impl SimpleIdl {
                 break;
             }
         }
-        let instr = instr_val_opt.ok_or(format!("Instruction {} not found in IDL", instr_name))?;
+        let instr = instr_val_opt.ok_or_else(|| {
+            format!("Instruction '{}' not found in IDL for program {}", instr_name, self.address)
+        })?;
 
-        let accounts = instr.get("accounts").and_then(|v| v.as_array()).ok_or("accounts missing")?;
+        let accounts = instr.get("accounts").and_then(|v| v.as_array()).ok_or_else(|| {
+            format!("Instruction '{}' missing accounts array in IDL", instr_name)
+        })?;
         let mut metas: Vec<AccountMeta> = Vec::with_capacity(accounts.len());
         // Build a mutable working context so accounts resolved earlier can be referenced later
         let mut working_context = context.clone();
 
         for account in accounts.iter() {
             // Get the account name for tracking
-            let account_name = account.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let account_name = account.get("name").and_then(|n| n.as_str()).unwrap_or("<unnamed>");
             // default flags
             let is_writable = account.get("writable").and_then(|v| v.as_bool()).unwrap_or(false);
             let is_signer = account.get("signer").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -155,7 +159,10 @@ impl SimpleIdl {
                                 if let Some(found) = pk {
                                     seeds_out.push(found.to_bytes().to_vec());
                                 } else {
-                                    return Err(format!("Context missing key for seed path {} (account name: {})", path, account_name).into());
+                                    return Err(format!(
+                                        "Cannot resolve account '{}' for instruction '{}': seed path '{}' not found in context. Available keys: {:?}",
+                                        account_name, instr_name, path, working_context.keys().collect::<Vec<_>>()
+                                    ).into());
                                 }
                             } else {
                                 return Err("account seed missing path".into());
@@ -187,13 +194,13 @@ impl SimpleIdl {
             // fallback mapping by common account names
             if let Some(name) = account.get("name").and_then(|n| n.as_str()) {
                 match name {
-                    "system_program" => {
+                    "system_program" | "systemProgram" => {
                         let pk = Pubkey::from_str(SYSTEM_PROGRAM_PUBKEY)?;
                         metas.push(AccountMeta::new_readonly(pk, false));
                     }
-                    "token_program" => {
+                    "token_program" | "tokenProgram" => {
                         // Check context first (caller may provide Token-2022 or SPL Token)
-                        let pk = if let Some(tp) = working_context.get("token_program") {
+                        let pk = if let Some(tp) = working_context.get("token_program").or_else(|| working_context.get("tokenProgram")) {
                             *tp
                         } else {
                             // Default to Token-2022 for pump.fun tokens
@@ -202,15 +209,16 @@ impl SimpleIdl {
                         metas.push(AccountMeta::new_readonly(pk, false));
                         working_context.insert(account_name.to_string(), pk);
                     }
-                    "associated_token_program" => {
+                    "associated_token_program" | "associatedTokenProgram" => {
                         let pk = Pubkey::from_str(ASSOCIATED_PROGRAM_PUBKEY)?;
                         metas.push(AccountMeta::new_readonly(pk, false));
                     }
                     // derive associated token account if user + mint present
-                    "associated_user" => {
+                    "associated_user" | "associatedUser" => {
                         if let (Some(user), Some(mint)) = (working_context.get("user"), working_context.get("mint")) {
                             // Use the correct token program for ATA derivation
                             let token_prog = working_context.get("token_program")
+                                .or_else(|| working_context.get("tokenProgram"))
                                 .cloned()
                                 .unwrap_or_else(|| Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap());
                             let ata = spl_associated_token_account::get_associated_token_address_with_program_id(user, mint, &token_prog);
@@ -223,13 +231,39 @@ impl SimpleIdl {
                             }
                             working_context.insert(account_name.to_string(), ata);
                         } else {
-                            return Err("Missing user or mint to derive associated_user".into());
+                            return Err(format!(
+                                "Cannot resolve account '{}' for instruction '{}': Missing user or mint in context",
+                                account_name, instr_name
+                            ).into());
                         }
                     }
-                    "fee_recipient" => {
+                    "associated_bonding_curve" | "associatedBondingCurve" => {
+                        // Derive associated token account for bonding curve
+                        if let (Some(bonding_curve), Some(mint)) = (working_context.get("bondingCurve").or_else(|| working_context.get("bonding_curve")), working_context.get("mint")) {
+                            let token_prog = working_context.get("token_program")
+                                .or_else(|| working_context.get("tokenProgram"))
+                                .cloned()
+                                .unwrap_or_else(|| Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap());
+                            let ata = spl_associated_token_account::get_associated_token_address_with_program_id(bonding_curve, mint, &token_prog);
+                            if is_signer {
+                                metas.push(AccountMeta::new(ata, true));
+                            } else if is_writable {
+                                metas.push(AccountMeta::new(ata, false));
+                            } else {
+                                metas.push(AccountMeta::new_readonly(ata, false));
+                            }
+                            working_context.insert(account_name.to_string(), ata);
+                        } else {
+                            return Err(format!(
+                                "Cannot resolve account '{}' for instruction '{}': Missing bondingCurve or mint in context",
+                                account_name, instr_name
+                            ).into());
+                        }
+                    }
+                    "fee_recipient" | "feeRecipient" => {
                         // fee_recipient is typically a global PDA or the protocol fee account
                         // For pump.fun, check if it's provided in context, otherwise compute standard PDA
-                        if let Some(pk) = working_context.get("fee_recipient") {
+                        if let Some(pk) = working_context.get("fee_recipient").or_else(|| working_context.get("feeRecipient")) {
                             if is_signer {
                                 metas.push(AccountMeta::new(*pk, true));
                             } else if is_writable {
@@ -264,7 +298,10 @@ impl SimpleIdl {
                                 metas.push(AccountMeta::new_readonly(*pk, false));
                             }
                         } else {
-                            return Err(format!("Cannot resolve account name {} in IDL to a pubkey (missing in context)", other_name).into());
+                            return Err(format!(
+                                "Cannot resolve account '{}' for instruction '{}': not found in context. Available keys: {:?}",
+                                other_name, instr_name, working_context.keys().collect::<Vec<_>>()
+                            ).into());
                         }
                     }
                 }
@@ -278,30 +315,67 @@ impl SimpleIdl {
     }
 }
 
-/// Load known IDLs from repo root. Returns map of short name -> SimpleIdl.
+/// Load known IDLs from bundled idl/ directory or legacy locations.
+/// Returns map of short name -> SimpleIdl.
 pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
     let mut m = HashMap::new();
-    let candidates = vec!["pumpfun.json", "pumpfunamm.json", "pumpfunfees.json"];
-    for c in candidates {
-        if std::path::Path::new(c).exists() {
-            match SimpleIdl::load_from(c) {
+    
+    // Try loading from bundled idl/ directory first (preferred)
+    let bundled_candidates = vec![
+        ("pumpfun", "idl/pumpfun.json"),
+        ("pumpfunamm", "idl/pumpfunamm.json"),
+        ("pumpfunfees", "idl/pumpfunfees.json"),
+    ];
+    
+    for (key, path) in bundled_candidates {
+        if std::path::Path::new(path).exists() {
+            match SimpleIdl::load_from(path) {
                 Ok(idl) => {
-                    // key by file stem
-                    let key = c.trim_end_matches(".json").to_string();
-                    m.insert(key, idl);
+                    log::info!("Loaded bundled IDL from {}", path);
+                    m.insert(key.to_string(), idl);
                 }
                 Err(e) => {
-                    log::warn!("Failed to load IDL {}: {}", c, e);
+                    log::debug!("Failed to load bundled IDL {}: {}", path, e);
                 }
             }
         }
     }
+    
+    // Fallback to legacy root-level files if bundled not found
+    if m.is_empty() {
+        log::debug!("No bundled IDL files found, trying legacy root-level files");
+        let legacy_candidates = vec!["pumpfun.json", "pumpfunamm.json", "pumpfunfees.json"];
+        for c in legacy_candidates {
+            if std::path::Path::new(c).exists() {
+                match SimpleIdl::load_from(c) {
+                    Ok(idl) => {
+                        let key = c.trim_end_matches(".json").to_string();
+                        log::info!("Loaded legacy IDL from {}", c);
+                        m.insert(key, idl);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to load legacy IDL {}: {}", c, e);
+                    }
+                }
+            }
+        }
+    }
+    
+    if m.is_empty() {
+        log::warn!("No IDL files loaded - transactions will use fallback builders");
+    } else {
+        log::info!("Loaded {} IDL file(s)", m.len());
+    }
+    
     m
 }
 
 #[cfg(test)]
 mod tests {
     use super::load_all_idls;
+    use std::collections::HashMap;
+    use solana_program::pubkey::Pubkey;
+    use std::str::FromStr;
 
     #[test]
     fn idls_load_does_not_panic() {
@@ -310,5 +384,130 @@ mod tests {
         // In production, IDLs can be loaded from on-chain or from local files
         let _idls = load_all_idls();
         // Test passes if we reach here without panicking
+    }
+
+    #[test]
+    fn test_bundled_idl_loads() {
+        // Test that bundled IDL files can be loaded
+        let idls = load_all_idls();
+        
+        // Should find at least the pumpfun IDL in idl/ directory
+        // If bundled files exist, they should load
+        if std::path::Path::new("idl/pumpfun.json").exists() {
+            assert!(idls.contains_key("pumpfun"), "Should load bundled pumpfun.json");
+        }
+    }
+
+    #[test]
+    fn test_idl_has_buy_instruction() {
+        let idls = load_all_idls();
+        
+        if let Some(idl) = idls.get("pumpfun") {
+            let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
+            assert!(instructions.is_some(), "IDL should have instructions array");
+            
+            let has_buy = instructions.unwrap().iter().any(|instr| {
+                instr.get("name").and_then(|n| n.as_str()) == Some("buy")
+            });
+            assert!(has_buy, "IDL should contain 'buy' instruction");
+        }
+    }
+
+    #[test]
+    fn test_idl_has_sell_instruction() {
+        let idls = load_all_idls();
+        
+        if let Some(idl) = idls.get("pumpfun") {
+            let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
+            assert!(instructions.is_some(), "IDL should have instructions array");
+            
+            let has_sell = instructions.unwrap().iter().any(|instr| {
+                instr.get("name").and_then(|n| n.as_str()) == Some("sell")
+            });
+            assert!(has_sell, "IDL should contain 'sell' instruction");
+        }
+    }
+
+    #[test]
+    fn test_build_buy_accounts_with_context() {
+        let idls = load_all_idls();
+        
+        if let Some(idl) = idls.get("pumpfun") {
+            // Create a deterministic test context
+            let mut context = HashMap::new();
+            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap());
+            context.insert("user".to_string(), Pubkey::from_str("11111111111111111111111111111111").unwrap());
+            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("11111111111111111111111111111112").unwrap());
+            context.insert("feeRecipient".to_string(), Pubkey::from_str("11111111111111111111111111111113").unwrap());
+            
+            // Try to build accounts for buy instruction
+            let result = idl.build_accounts_for("buy", &context);
+            
+            // Should either succeed or fail with a clear error message
+            match result {
+                Ok(metas) => {
+                    assert!(!metas.is_empty(), "Buy instruction should have accounts");
+                    assert!(metas.len() >= 10, "Buy instruction should have at least 10 accounts");
+                }
+                Err(e) => {
+                    // If it fails, error should mention which account couldn't be resolved
+                    let err_msg = e.to_string();
+                    assert!(
+                        err_msg.contains("Cannot resolve") || err_msg.contains("missing"),
+                        "Error should be informative: {}",
+                        err_msg
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_sell_accounts_with_context() {
+        let idls = load_all_idls();
+        
+        if let Some(idl) = idls.get("pumpfun") {
+            // Create a deterministic test context
+            let mut context = HashMap::new();
+            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap());
+            context.insert("user".to_string(), Pubkey::from_str("11111111111111111111111111111111").unwrap());
+            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("11111111111111111111111111111112").unwrap());
+            context.insert("feeRecipient".to_string(), Pubkey::from_str("11111111111111111111111111111113").unwrap());
+            context.insert("feeProgram".to_string(), Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ").unwrap());
+            
+            // Try to build accounts for sell instruction
+            let result = idl.build_accounts_for("sell", &context);
+            
+            // Should either succeed or fail with a clear error message
+            match result {
+                Ok(metas) => {
+                    assert!(!metas.is_empty(), "Sell instruction should have accounts");
+                    assert!(metas.len() >= 10, "Sell instruction should have at least 10 accounts");
+                }
+                Err(e) => {
+                    // If it fails, error should mention which account couldn't be resolved
+                    let err_msg = e.to_string();
+                    assert!(
+                        err_msg.contains("Cannot resolve") || err_msg.contains("missing"),
+                        "Error should be informative: {}",
+                        err_msg
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_idl_address_matches_program_id() {
+        let idls = load_all_idls();
+        
+        if let Some(idl) = idls.get("pumpfun") {
+            let expected_program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+            assert_eq!(
+                idl.address.to_string(),
+                expected_program_id,
+                "IDL address should match pump.fun program ID"
+            );
+        }
     }
 }

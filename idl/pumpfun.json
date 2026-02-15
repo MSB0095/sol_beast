@@ -1,0 +1,335 @@
+{
+  "version": "0.1.0",
+  "name": "pump_fun",
+  "address": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+  "metadata": {
+    "source": "Official pump.fun program IDL",
+    "description": "Pump.fun bonding curve token trading program"
+  },
+  "instructions": [
+    {
+      "name": "buy",
+      "discriminator": [102, 6, 61, 18, 1, 218, 235, 234],
+      "accounts": [
+        {
+          "name": "global",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [103, 108, 111, 98, 97, 108]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeRecipient",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "mint",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "bondingCurve",
+          "writable": true,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [98, 111, 110, 100, 105, 110, 103, 45, 99, 117, 114, 118, 101]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "associatedBondingCurve",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "associatedUser",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "writable": false,
+          "signer": false,
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "tokenProgram",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "creatorVault",
+          "writable": true,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [99, 114, 101, 97, 116, 111, 114, 45, 118, 97, 117, 108, 116]
+              },
+              {
+                "kind": "account",
+                "path": "bondingCurve.creator"
+              }
+            ]
+          }
+        },
+        {
+          "name": "eventAuthority",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [95, 95, 101, 118, 101, 110, 116, 95, 97, 117, 116, 104, 111, 114, 105, 116, 121]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "globalVolumeAccumulator",
+          "writable": true,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [103, 108, 111, 98, 97, 108, 95, 118, 111, 108, 117, 109, 101, 95, 97, 99, 99, 117, 109, 117, 108, 97, 116, 111, 114]
+              }
+            ]
+          }
+        },
+        {
+          "name": "userVolumeAccumulator",
+          "writable": true,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [117, 115, 101, 114, 95, 118, 111, 108, 117, 109, 101, 95, 97, 99, 99, 117, 109, 117, 108, 97, 116, 111, 114]
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeConfig",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "program": {
+              "kind": "const",
+              "value": [162, 126, 228, 0, 246, 199, 50, 75, 167, 87, 194, 65, 191, 169, 53, 13, 149, 170, 230, 62, 125, 31, 63, 215, 45, 99, 138, 37, 131, 167, 42, 150]
+            },
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [102, 101, 101, 95, 99, 111, 110, 102, 105, 103]
+              },
+              {
+                "kind": "const",
+                "value": [1, 86, 224, 246, 147, 102, 90, 207, 68, 219, 21, 104, 191, 23, 91, 170, 81, 137, 203, 151, 245, 210, 255, 59, 101, 93, 43, 182, 253, 109, 24, 176]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeProgram",
+          "writable": false,
+          "signer": false,
+          "address": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "maxSolCost",
+          "type": "u64"
+        },
+        {
+          "name": "trackVolume",
+          "type": {
+            "option": "bool"
+          }
+        }
+      ]
+    },
+    {
+      "name": "sell",
+      "discriminator": [51, 230, 133, 164, 1, 127, 131, 173],
+      "accounts": [
+        {
+          "name": "global",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [103, 108, 111, 98, 97, 108]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeRecipient",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "mint",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "bondingCurve",
+          "writable": true,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [98, 111, 110, 100, 105, 110, 103, 45, 99, 117, 114, 118, 101]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "associatedBondingCurve",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "associatedUser",
+          "writable": true,
+          "signer": false
+        },
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "systemProgram",
+          "writable": false,
+          "signer": false,
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "creatorVault",
+          "writable": true,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [99, 114, 101, 97, 116, 111, 114, 45, 118, 97, 117, 108, 116]
+              },
+              {
+                "kind": "account",
+                "path": "bondingCurve.creator"
+              }
+            ]
+          }
+        },
+        {
+          "name": "tokenProgram",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "eventAuthority",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [95, 95, 101, 118, 101, 110, 116, 95, 97, 117, 116, 104, 111, 114, 105, 116, 121]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "writable": false,
+          "signer": false
+        },
+        {
+          "name": "feeConfig",
+          "writable": false,
+          "signer": false,
+          "pda": {
+            "program": {
+              "kind": "const",
+              "value": [162, 126, 228, 0, 246, 199, 50, 75, 167, 87, 194, 65, 191, 169, 53, 13, 149, 170, 230, 62, 125, 31, 63, 215, 45, 99, 138, 37, 131, 167, 42, 150]
+            },
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [102, 101, 101, 95, 99, 111, 110, 102, 105, 103]
+              },
+              {
+                "kind": "const",
+                "value": [1, 86, 224, 246, 147, 102, 90, 207, 68, 219, 21, 104, 191, 23, 91, 170, 81, 137, 203, 151, 245, 210, 255, 59, 101, 93, 43, 182, 253, 109, 24, 176]
+              }
+            ]
+          }
+        },
+        {
+          "name": "feeProgram",
+          "writable": false,
+          "signer": false,
+          "address": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "minSolOutput",
+          "type": "u64"
+        }
+      ]
+    }
+  ]
+}

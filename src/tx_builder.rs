@@ -295,9 +295,10 @@ pub fn build_sell_instruction(
     accounts.push(AccountMeta::new_readonly(token_program_pk, false)); // 9: token_program (Token-2022)
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
-    let fee_config_pda = Pubkey::from_str("8Wf5TiAheLUqBrKXeYg2JtAFFMWtKdG2BSFgqUcPVwTt")?; // Fee Config
+    let fee_program_pk = Pubkey::from_str(FEE_PROGRAM_PUBKEY)?;
+    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &[1,86,224,246,147,102,90,207,68,219,21,104,191,23,91,170,81,137,203,151,245,210,255,59,101,93,43,182,253,109,24,176]], &fee_program_pk);
     accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 12: fee_config
-    accounts.push(AccountMeta::new_readonly(Pubkey::from_str(FEE_PROGRAM_PUBKEY)?, false)); // 13: fee_program
+    accounts.push(AccountMeta::new_readonly(fee_program_pk, false)); // 13: fee_program
 
     // Use fallback discriminator
     let discriminator = get_sell_discriminator(None);

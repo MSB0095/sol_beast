@@ -13,7 +13,15 @@ const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 // fee_program address from IDL
 const FEE_PROGRAM_PUBKEY: &str = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
-// fee_config PDA seed constant from pump.fun IDL (32 bytes)
+
+/// Fee config PDA seed constant from pump.fun program IDL.
+/// This 32-byte seed is used as the second seed for deriving the fee_config PDA
+/// from the fee program (pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ).
+/// 
+/// The fee_config PDA is derived as: find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], fee_program)
+/// 
+/// DO NOT modify this value without verifying against the pump.fun program's on-chain
+/// implementation, as incorrect seeds will cause transaction failures with AccountNotInitialized errors.
 const FEE_CONFIG_SEED: [u8; 32] = [1, 86, 224, 246, 147, 102, 90, 207, 68, 219, 21, 104, 191, 23, 91, 170, 81, 137, 203, 151, 245, 210, 255, 59, 101, 93, 43, 182, 253, 109, 24, 176];
 
 #[derive(BorshSerialize)]
@@ -78,6 +86,20 @@ fn get_sell_discriminator(idl_opt: Option<&SimpleIdl>) -> [u8; 8] {
     let computed = compute_anchor_discriminator("sell");
     debug!("Using computed sell discriminator: {:?}", computed);
     computed
+}
+
+/// Derives the fee_config PDA for pump.fun transactions.
+/// This PDA is required by both buy and sell instructions.
+/// 
+/// # Returns
+/// The derived fee_config PDA public key
+/// 
+/// # Errors
+/// Returns an error if the FEE_PROGRAM_PUBKEY cannot be parsed
+fn derive_fee_config_pda() -> Result<Pubkey, Box<dyn std::error::Error + Send + Sync>> {
+    let fee_program_pk = Pubkey::from_str(FEE_PROGRAM_PUBKEY)?;
+    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], &fee_program_pk);
+    Ok(fee_config_pda)
 }
 
 
@@ -187,10 +209,8 @@ pub fn build_buy_instruction(
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
     accounts.push(AccountMeta::new(global_vol_acc, false));                  // 12: global_vol_acc
     accounts.push(AccountMeta::new(user_vol_acc, false));                    // 13: user_vol_acc
-    let fee_program_pk = Pubkey::from_str(FEE_PROGRAM_PUBKEY)?;
-    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], &fee_program_pk);
-    accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 14: fee_config
-    accounts.push(AccountMeta::new_readonly(fee_program_pk, false)); // 15: fee_program
+    accounts.push(AccountMeta::new_readonly(derive_fee_config_pda()?, false)); // 14: fee_config
+    accounts.push(AccountMeta::new_readonly(Pubkey::from_str(FEE_PROGRAM_PUBKEY)?, false)); // 15: fee_program
 
     // Use fallback discriminator
     let discriminator = get_buy_discriminator(None);
@@ -297,10 +317,8 @@ pub fn build_sell_instruction(
     accounts.push(AccountMeta::new_readonly(token_program_pk, false)); // 9: token_program (Token-2022)
     accounts.push(AccountMeta::new_readonly(event_authority, false));        // 10: event_authority
     accounts.push(AccountMeta::new_readonly(*program_id, false));            // 11: program
-    let fee_program_pk = Pubkey::from_str(FEE_PROGRAM_PUBKEY)?;
-    let (fee_config_pda, _) = Pubkey::find_program_address(&[b"fee_config", &FEE_CONFIG_SEED], &fee_program_pk);
-    accounts.push(AccountMeta::new_readonly(fee_config_pda, false));         // 12: fee_config
-    accounts.push(AccountMeta::new_readonly(fee_program_pk, false)); // 13: fee_program
+    accounts.push(AccountMeta::new_readonly(derive_fee_config_pda()?, false)); // 12: fee_config
+    accounts.push(AccountMeta::new_readonly(Pubkey::from_str(FEE_PROGRAM_PUBKEY)?, false)); // 13: fee_program
 
     // Use fallback discriminator
     let discriminator = get_sell_discriminator(None);

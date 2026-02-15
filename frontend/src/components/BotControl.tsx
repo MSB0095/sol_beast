@@ -24,7 +24,7 @@ export default function BotControl() {
   }
 
   return (
-    <div className="cyber-card p-6">
+    <div className="cyber-card cyber-card-flow p-6">
       <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Bot Control</h3>
       
       {/* Status indicator */}

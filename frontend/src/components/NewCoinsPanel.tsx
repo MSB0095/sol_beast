@@ -69,11 +69,17 @@ export default function NewCoinsPanel() {
             <button
               key={status}
               onClick={() => setFilter(status)}
-              className={`px-4 py-2 rounded-lg transition-colors capitalize ${
-                filter === status
-                  ? 'bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow'
-                  : 'bg-sol-darker text-gray-400 hover:bg-gray-700'
-              }`}
+              className="px-4 py-2 rounded-lg transition-all uppercase tracking-wider font-semibold"
+              style={filter === status ? {
+                backgroundColor: 'var(--theme-button-bg)',
+                color: 'var(--theme-button-text)',
+                border: '2px solid var(--theme-accent)',
+                boxShadow: '0 0 15px var(--glow-color)'
+              } : {
+                backgroundColor: 'var(--theme-bg-secondary)',
+                color: 'var(--theme-text-muted)',
+                border: '2px solid transparent'
+              }}
             >
               {status} {status === 'all' ? `(${coins.length})` : `(${coins.filter(c => c.status === status).length})`}
             </button>
@@ -86,7 +92,8 @@ export default function NewCoinsPanel() {
         {filteredCoins.map((coin) => (
           <div 
             key={coin.mint} 
-            className="card-enhanced rounded-xl p-6 hover:border-sol-purple transition-colors"
+            className="cyber-card rounded-xl p-6 hover:border-[var(--theme-accent)] transition-all stagger-item"
+            style={{ animationDelay: `${filteredCoins.indexOf(coin) * 0.05}s` }}
           >
             <div className="flex gap-4">
               {/* Token Image */}

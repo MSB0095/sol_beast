@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useBotStore } from '../store/botStore'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts'
+import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Area, AreaChart } from 'recharts'
 import { TrendingUp, TrendingDown, Target, Loader, Wallet, Sparkles } from 'lucide-react'
 import TradingPerformanceWidget from './TradingPerformanceWidget'
 
@@ -199,34 +199,47 @@ export default function Dashboard() {
         <div className="glass-card p-6 rounded-2xl animate-slide-in-left lg:col-span-2">
           <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Profit Over Time</h3>
           <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={chartData.length > 0 ? chartData : [{ time: 0, profit: 0, trades: 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--theme-accent)" opacity={0.1} />
+            <AreaChart data={chartData.length > 0 ? chartData : [{ time: 0, profit: 0, trades: 0 }]}>
+              <defs>
+                <linearGradient id="profitGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--theme-accent)" stopOpacity={0.3}/>
+                  <stop offset="95%" stopColor="var(--theme-accent)" stopOpacity={0.02}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--theme-accent)" opacity={0.08} />
               <XAxis 
                 dataKey="time" 
                 stroke="var(--theme-text-secondary)"
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 11, fontFamily: 'JetBrains Mono' }}
               />
-              <YAxis stroke="var(--theme-text-secondary)" />
+              <YAxis stroke="var(--theme-text-secondary)" tick={{ fontSize: 11, fontFamily: 'JetBrains Mono' }} />
               <Tooltip 
                 contentStyle={{ 
-                  backgroundColor: 'var(--theme-bg-secondary)', 
-                  border: '1px solid var(--theme-accent)', 
+                  backgroundColor: 'var(--theme-bg-card)', 
+                  border: '2px solid var(--theme-accent)', 
                   borderRadius: '0.75rem',
-                  backdropFilter: 'blur(12px)'
+                  backdropFilter: 'blur(12px)',
+                  fontFamily: 'JetBrains Mono',
+                  fontSize: '12px',
+                  boxShadow: '0 0 20px var(--glow-color)'
                 }}
-                cursor={{ stroke: 'var(--theme-accent)' }}
-                formatter={(value: any) => value.toFixed(9)}
+                cursor={{ stroke: 'var(--theme-accent)', strokeDasharray: '4 4' }}
+                formatter={(value: any) => [value.toFixed(9) + ' SOL', 'Profit']}
                 labelFormatter={(label) => `Point ${label}`}
               />
-              <Line 
+              <Area 
                 type="monotone" 
                 dataKey="profit" 
                 stroke="var(--theme-accent)" 
-                strokeWidth={3} 
+                strokeWidth={2.5} 
+                fill="url(#profitGradient)"
                 dot={false}
-                isAnimationActive={false}
+                activeDot={{ r: 6, fill: 'var(--theme-accent)', stroke: 'var(--theme-bg-card)', strokeWidth: 2, style: { filter: 'drop-shadow(0 0 8px var(--theme-accent))' } }}
+                isAnimationActive={true}
+                animationDuration={1500}
+                animationEasing="ease-in-out"
               />
-            </LineChart>
+            </AreaChart>
           </ResponsiveContainer>
         </div>
 
@@ -241,23 +254,39 @@ export default function Dashboard() {
         <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Trade Activity</h3>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={chartData.length > 0 ? chartData : [{ time: 0, profit: 0, trades: 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--theme-accent)" opacity={0.1} />
+              <defs>
+                <linearGradient id="barGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="var(--theme-accent)" stopOpacity={0.9}/>
+                  <stop offset="100%" stopColor="var(--theme-accent)" stopOpacity={0.3}/>
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--theme-accent)" opacity={0.08} />
               <XAxis 
                 dataKey="time" 
                 stroke="var(--theme-text-secondary)"
-                tick={{ fontSize: 12 }}
+                tick={{ fontSize: 11, fontFamily: 'JetBrains Mono' }}
               />
-              <YAxis stroke="var(--theme-text-secondary)" />
+              <YAxis stroke="var(--theme-text-secondary)" tick={{ fontSize: 11, fontFamily: 'JetBrains Mono' }} />
               <Tooltip 
                 contentStyle={{ 
-                  backgroundColor: 'var(--theme-bg-secondary)', 
-                  border: '1px solid var(--theme-accent)', 
+                  backgroundColor: 'var(--theme-bg-card)', 
+                  border: '2px solid var(--theme-accent)', 
                   borderRadius: '0.75rem',
-                  backdropFilter: 'blur(12px)'
+                  backdropFilter: 'blur(12px)',
+                  fontFamily: 'JetBrains Mono',
+                  fontSize: '12px',
+                  boxShadow: '0 0 20px var(--glow-color)'
                 }}
                 labelFormatter={(label) => `Point ${label}`}
               />
-              <Bar dataKey="trades" fill="var(--theme-accent)" radius={[8, 8, 0, 0]} isAnimationActive={false} />
+              <Bar 
+                dataKey="trades" 
+                fill="url(#barGradient)" 
+                radius={[8, 8, 0, 0]} 
+                isAnimationActive={true}
+                animationDuration={1200}
+                animationEasing="ease-out"
+              />
             </BarChart>
           </ResponsiveContainer>
       </div>

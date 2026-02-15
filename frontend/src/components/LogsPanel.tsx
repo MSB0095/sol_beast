@@ -90,11 +90,21 @@ export default function LogsPanel() {
             <button
               key={level}
               onClick={() => setFilter(level)}
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all uppercase tracking-wider ${
                 filter === level
-                  ? 'bg-gradient-to-r from-sol-purple to-sol-cyan text-white shadow-glow'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  ? ''
+                  : ''
               }`}
+              style={filter === level ? {
+                backgroundColor: 'var(--theme-button-bg)',
+                color: 'var(--theme-button-text)',
+                border: '2px solid var(--theme-accent)',
+                boxShadow: '0 0 15px var(--glow-color)'
+              } : {
+                backgroundColor: 'var(--theme-bg-secondary)',
+                color: 'var(--theme-text-muted)',
+                border: '2px solid transparent'
+              }}
             >
               {level === 'all' ? 'All' : level.charAt(0).toUpperCase() + level.slice(1)}
               {level !== 'all' && (

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Coins, ExternalLink, TrendingUp, Clock, User, DollarSign } from 'lucide-react'
-import { API_DETECTED_COINS_URL } from '../config'
+import { useBotStore } from '../store/botStore'
 
 interface DetectedCoin {
   mint: string
@@ -16,35 +16,9 @@ interface DetectedCoin {
 }
 
 export default function NewCoinsPanel() {
-  const [coins, setCoins] = useState<DetectedCoin[]>([])
+  const { detectedCoins: storeCoins } = useBotStore()
+  const coins = storeCoins as DetectedCoin[]
   const [filter, setFilter] = useState<'all' | 'detected' | 'bought' | 'skipped'>('all')
-
-  useEffect(() => {
-    const fetchCoins = async () => {
-      try {
-        const response = await fetch(API_DETECTED_COINS_URL)
-        if (response.ok) {
-          const data = await response.json()
-          console.debug('Detected coins response:', data)
-          // API returns { coins: [...], total: N }
-          if (data && Array.isArray(data.coins)) {
-            setCoins(data.coins)
-          } else if (Array.isArray(data)) {
-            setCoins(data)
-          }
-        }
-      } catch (error) {
-        console.error('Failed to fetch detected coins:', error)
-      }
-    }
-    
-    // Fetch immediately
-    fetchCoins()
-    
-    // Poll every 2 seconds
-    const interval = setInterval(fetchCoins, 2000)
-    return () => clearInterval(interval)
-  }, [])
 
   const filteredCoins = filter === 'all' 
     ? coins 

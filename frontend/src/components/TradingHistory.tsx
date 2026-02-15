@@ -193,19 +193,28 @@ export default function TradingHistory() {
               {filteredTrades.map((trade, idx) => {
                 const isProfit = (trade.profit_loss || 0) >= 0
                 const isBuy = trade.type === 'buy'
+                const isFailed = trade.reason?.startsWith('FAILED:')
 
                 return (
                   <tr key={`${trade.mint}-${idx}`} className={`border-b border-gray-700 hover:bg-sol-darker transition-all ${
+                    isFailed ? 'opacity-60' :
                     !isBuy && isProfit ? 'profit-row-shimmer' : ''
-                  } ${!isBuy && !isProfit ? 'loss-row' : ''}`}
+                  } ${!isFailed && !isBuy && !isProfit ? 'loss-row' : ''}`}
                   >
                     <td className="py-3 px-4">
                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold ${
-                        isBuy 
+                        isFailed
+                          ? 'bg-orange-900/30 text-orange-400'
+                          : isBuy 
                           ? 'bg-green-900/30 text-green-400' 
                           : 'bg-red-900/30 text-red-400'
                       }`}>
-                        {isBuy ? (
+                        {isFailed ? (
+                          <>
+                            <TrendingUp size={12} />
+                            FAILED
+                          </>
+                        ) : isBuy ? (
                           <>
                             <TrendingUp size={12} />
                             BUY
@@ -295,13 +304,15 @@ export default function TradingHistory() {
                     <td className="py-3 px-4 text-center">
                       {trade.reason && (
                         <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                          trade.reason === 'TP' 
+                          trade.reason.startsWith('FAILED:')
+                            ? 'bg-orange-900/30 text-orange-400'
+                            : trade.reason === 'TP' || trade.reason.startsWith('TP')
                             ? 'bg-green-900/30 text-green-400' 
-                            : trade.reason === 'SL'
+                            : trade.reason === 'SL' || trade.reason.startsWith('SL')
                             ? 'bg-red-900/30 text-red-400'
                             : 'bg-gray-700 text-gray-400'
-                        }`}>
-                          {trade.reason}
+                        }`} title={trade.reason}>
+                          {trade.reason.startsWith('FAILED:') ? 'FAILED' : trade.reason}
                         </span>
                       )}
                     </td>

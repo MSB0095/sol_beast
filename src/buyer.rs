@@ -239,8 +239,8 @@ pub async fn buy_token(
             info!("Buy transaction sent via Helius Sender: {}", signature);
             // Wait for the transaction to be confirmed before querying balance
             // Helius sender uses skipPreflight=true, so the TX might not be confirmed yet
-            for wait_attempt in 0..8 {
-                let delay_ms = if wait_attempt == 0 { 2000 } else { 1500 };
+            for wait_attempt in 0..12 {
+                let delay_ms = if wait_attempt == 0 { 2500 } else { 2000 };
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                 let owner_str = payer_pubkey.to_string();
                 if let Ok(Some(acc)) = crate::rpc::find_token_account_owned_by_owner(mint, &owner_str, rpc_client, settings).await {
@@ -256,8 +256,8 @@ pub async fn buy_token(
                         }
                     }
                 }
-                if wait_attempt < 7 {
-                    debug!("Token balance not yet available for {} (attempt {}/8), retrying...", mint, wait_attempt + 1);
+                if wait_attempt < 11 {
+                    debug!("Token balance not yet available for {} (attempt {}/12), retrying...", mint, wait_attempt + 1);
                 }
             }
             if final_token_amount_u64.is_none() {

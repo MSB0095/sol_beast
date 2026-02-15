@@ -1147,6 +1147,39 @@ async fn handle_new_token(
                                in_flight_buys.fetch_sub(1, Ordering::SeqCst);
                                log::warn!("Failed to buy {}: {}", mint, e);
                                bot_log!("warn", format!("Failed to buy token {}", mint), format!("{}", e));
+
+                               // Record failed buy attempt so it appears in Trading History
+                               {
+                                   let mut trades = trades_list.lock().await;
+                                   trades.insert(0, api::TradeRecord {
+                                       mint: mint.clone(),
+                                       symbol: offchain_meta.as_ref().and_then(|o| o.symbol.clone()),
+                                       name: offchain_meta.as_ref().and_then(|o| o.name.clone()),
+                                       image: offchain_meta.as_ref().and_then(|o| o.image.clone()),
+                                       trade_type: "buy".to_string(),
+                                       timestamp: chrono::Utc::now().to_rfc3339(),
+                                       tx_signature: None,
+                                       amount_sol: settings.buy_amount,
+                                       amount_tokens: 0.0,
+                                       price_per_token: 0.0,
+                                       profit_loss: None,
+                                       profit_loss_percent: None,
+                                       reason: Some(format!("FAILED: {}", e)),
+                                       decimals: settings.default_token_decimals,
+                                       actual_sol_change: None,
+                                       tx_fee_sol: None,
+                                       simulated: !is_real,
+                                   });
+                                   if trades.len() > 200 { trades.truncate(200); }
+                               }
+
+                               // Update detected coin status to buy_failed
+                               {
+                                   let mut coins = detected_coins.lock().await;
+                                   if let Some(coin) = coins.iter_mut().find(|c| c.mint == mint) {
+                                       coin.status = "buy_failed".to_string();
+                                   }
+                               }
                           }
                       }
                  }
@@ -1764,6 +1797,40 @@ async fn handle_new_token_from_pumpportal(
                 in_flight_buys.fetch_sub(1, Ordering::SeqCst);
                 log::warn!("Failed to buy {} (pumpportal fast-path): {}", mint, e);
                 bot_log!("warn", format!("Failed to buy token {}", mint), format!("{}", e));
+
+                // Record failed buy attempt so it appears in Trading History
+                {
+                    let mut trades = trades_list.lock().await;
+                    trades.insert(0, api::TradeRecord {
+                        mint: mint.to_string(),
+                        symbol: offchain_meta_opt.as_ref().and_then(|o| o.symbol.clone()),
+                        name: offchain_meta_opt.as_ref().and_then(|o| o.name.clone()),
+                        image: offchain_meta_opt.as_ref().and_then(|o| o.image.clone()),
+                        trade_type: "buy".to_string(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        tx_signature: None,
+                        amount_sol: settings.buy_amount,
+                        amount_tokens: 0.0,
+                        price_per_token: 0.0,
+                        profit_loss: None,
+                        profit_loss_percent: None,
+                        reason: Some(format!("FAILED: {}", e)),
+                        decimals: settings.default_token_decimals,
+                        actual_sol_change: None,
+                        tx_fee_sol: None,
+                        simulated: !is_real,
+                    });
+                    if trades.len() > 200 { trades.truncate(200); }
+                }
+
+                // Update detected coin status to buy_failed
+                {
+                    let mut coins = detected_coins.lock().await;
+                    if let Some(coin) = coins.iter_mut().find(|c| c.mint == mint) {
+                        coin.status = "buy_failed".to_string();
+                    }
+                }
+
                 // If we created a subscription and didn't buy, unsubscribe to free slot
                 if sub_was_created && subscribed_idx.is_some() && subscribed_sub_id.is_some() {
                     let sender = &ws_control_senders[subscribed_idx.unwrap()];

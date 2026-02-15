@@ -5,13 +5,19 @@ use solana_program::instruction::AccountMeta;
 use solana_program::pubkey::Pubkey;
 use std::str::FromStr;
 use std::vec::Vec;
+use once_cell::sync::Lazy;
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
 const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ASSOCIATED_PROGRAM_PUBKEY: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
-#[derive(Debug)]
+/// Global cache for loaded IDLs to avoid reloading on every call
+static IDL_CACHE: Lazy<HashMap<String, SimpleIdl>> = Lazy::new(|| {
+    load_idls_internal()
+});
+
+#[derive(Debug, Clone)]
 pub struct SimpleIdl {
     pub address: Pubkey,
     pub raw: Value,
@@ -315,9 +321,8 @@ impl SimpleIdl {
     }
 }
 
-/// Load known IDLs from bundled idl/ directory or legacy locations.
-/// Returns map of short name -> SimpleIdl.
-pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
+/// Internal function that performs the actual IDL loading
+fn load_idls_internal() -> HashMap<String, SimpleIdl> {
     let mut m = HashMap::new();
     
     // Try loading from bundled idl/ directory first (preferred)
@@ -370,6 +375,14 @@ pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
     m
 }
 
+/// Load known IDLs from bundled idl/ directory or legacy locations.
+/// Returns map of short name -> SimpleIdl.
+/// This function uses a static cache to avoid reloading IDLs on every call.
+pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
+    // Clone from the static cache - SimpleIdl is cheaply cloneable
+    IDL_CACHE.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::load_all_idls;
@@ -388,44 +401,53 @@ mod tests {
 
     #[test]
     fn test_bundled_idl_loads() {
-        // Test that bundled IDL files can be loaded
-        let idls = load_all_idls();
+        // Pumpfun IDL is bundled in-repo and must be present in CI
+        assert!(
+            std::path::Path::new("idl/pumpfun.json").exists(),
+            "Bundled pumpfun.json should exist in idl/ directory"
+        );
         
-        // Should find at least the pumpfun IDL in idl/ directory
-        // If bundled files exist, they should load
-        if std::path::Path::new("idl/pumpfun.json").exists() {
-            assert!(idls.contains_key("pumpfun"), "Should load bundled pumpfun.json");
-        }
+        let idls = load_all_idls();
+        assert!(
+            idls.contains_key("pumpfun"),
+            "Should load bundled pumpfun.json into IDL map"
+        );
     }
 
     #[test]
     fn test_idl_has_buy_instruction() {
         let idls = load_all_idls();
         
-        if let Some(idl) = idls.get("pumpfun") {
-            let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
-            assert!(instructions.is_some(), "IDL should have instructions array");
-            
-            let has_buy = instructions.unwrap().iter().any(|instr| {
-                instr.get("name").and_then(|n| n.as_str()) == Some("buy")
-            });
-            assert!(has_buy, "IDL should contain 'buy' instruction");
-        }
+        // Pumpfun IDL must be present; fail fast if it is missing
+        let idl = idls
+            .get("pumpfun")
+            .expect("pumpfun IDL should be loaded for buy instruction test");
+        
+        let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
+        assert!(instructions.is_some(), "IDL should have instructions array");
+        
+        let has_buy = instructions.unwrap().iter().any(|instr| {
+            instr.get("name").and_then(|n| n.as_str()) == Some("buy")
+        });
+        assert!(has_buy, "IDL should contain 'buy' instruction");
     }
 
     #[test]
     fn test_idl_has_sell_instruction() {
         let idls = load_all_idls();
         
-        if let Some(idl) = idls.get("pumpfun") {
-            let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
-            assert!(instructions.is_some(), "IDL should have instructions array");
-            
-            let has_sell = instructions.unwrap().iter().any(|instr| {
-                instr.get("name").and_then(|n| n.as_str()) == Some("sell")
-            });
-            assert!(has_sell, "IDL should contain 'sell' instruction");
-        }
+        // Pumpfun IDL must be present; fail fast if it is missing
+        let idl = idls
+            .get("pumpfun")
+            .expect("pumpfun IDL should be loaded for sell instruction test");
+        
+        let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
+        assert!(instructions.is_some(), "IDL should have instructions array");
+        
+        let has_sell = instructions.unwrap().iter().any(|instr| {
+            instr.get("name").and_then(|n| n.as_str()) == Some("sell")
+        });
+        assert!(has_sell, "IDL should contain 'sell' instruction");
     }
 
     #[test]

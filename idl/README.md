@@ -37,5 +37,5 @@ The IDL format includes:
 ## Notes
 
 - The IDL loader prioritizes bundled files in this directory over legacy root-level files
-- If IDL files are not found, the system falls back to on-chain IDL fetching
+- If IDL files are not found, the loader returns no IDLs; any on-chain IDL fetching must be performed explicitly by the caller
 - All transactions should be built using these official IDL definitions to ensure compatibility

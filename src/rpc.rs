@@ -1290,7 +1290,10 @@ pub async fn sell_token(
         let mut context: HashMap<String, Pubkey> = HashMap::new();
         context.insert("mint".to_string(), mint_pk);
         context.insert("user".to_string(), user_pubkey);
-        if let Some(c) = creator_opt { context.insert("bonding_curve.creator".to_string(), c); }
+        if let Some(c) = creator_opt { 
+            context.insert("bonding_curve.creator".to_string(), c); 
+            context.insert("bondingCurve.creator".to_string(), c); 
+        }
         let pump_program_pk = Pubkey::from_str(&settings.pump_fun_program)?;
         let (curve_pda_fallback, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program_pk);
         context.insert("bonding_curve".to_string(), curve_pda_fallback);

@@ -110,7 +110,10 @@ pub async fn buy_token(
         let mut context: HashMap<String, Pubkey> = HashMap::new();
         context.insert("mint".to_string(), mint_pk);
         context.insert("user".to_string(), payer_pubkey);
-        if let Some(c) = creator_opt { context.insert("bonding_curve.creator".to_string(), c); }
+        if let Some(c) = creator_opt { 
+            context.insert("bonding_curve.creator".to_string(), c); 
+            context.insert("bondingCurve.creator".to_string(), c); 
+        }
         // bonding_curve PDA using configured pump program as fallback
         let pump_program_pk = Pubkey::from_str(&settings.pump_fun_program)?;
         let (curve_pda_fallback, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program_pk);
@@ -196,7 +199,10 @@ pub async fn buy_token(
         real_context.insert("mint".to_string(), mint_pk);
         real_context.insert("user".to_string(), payer_pubkey);
         real_context.insert("payer".to_string(), payer_pubkey);
-        if let Some(c) = creator_opt { real_context.insert("bonding_curve.creator".to_string(), c); }
+        if let Some(c) = creator_opt { 
+            real_context.insert("bonding_curve.creator".to_string(), c); 
+            real_context.insert("bondingCurve.creator".to_string(), c); 
+        }
         if let Some(bc) = context.get("bonding_curve") { real_context.insert("bonding_curve".to_string(), *bc); }
         if let Some(cv) = context.get("creator_vault") { real_context.insert("creator_vault".to_string(), *cv); }
         // compute missing ATA pre-instructions for accounts in the instruction
@@ -336,7 +342,10 @@ pub async fn buy_token(
             let mut context: HashMap<String, Pubkey> = HashMap::new();
             context.insert("mint".to_string(), mint_pk);
             context.insert("user".to_string(), sim_payer_pubkey);
-            if let Some(c) = creator_opt { context.insert("bonding_curve.creator".to_string(), c); }
+            if let Some(c) = creator_opt { 
+                context.insert("bonding_curve.creator".to_string(), c); 
+                context.insert("bondingCurve.creator".to_string(), c); 
+            }
             // Add bonding_curve PDA
             let pump_program_pk = Pubkey::from_str(&settings.pump_fun_program)?;
             let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program_pk);

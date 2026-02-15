@@ -55,10 +55,10 @@ export default function HoldingsPanel() {
   return (
     <div className="space-y-4">
       {/* Live Aggregate PnL Banner */}
-      <div className="card-enhanced rounded-xl p-4">
+      <div className={`card-enhanced rounded-xl p-4 ${totalPnlSol > 0.000000001 ? 'profit-glow' : ''}`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            {totalPnlSol > 0 ? <TrendingUp className="text-green-400" size={24} /> :
+            {totalPnlSol > 0 ? <TrendingUp className="text-green-400 breathing-dot" size={24} /> :
              totalPnlSol < 0 ? <TrendingDown className="text-red-400" size={24} /> :
              <Minus className="text-gray-500" size={24} />}
             <div>
@@ -121,7 +121,7 @@ export default function HoldingsPanel() {
                 const isLive = !!liveData
 
                 return (
-                  <tr key={mint} className={`border-b border-gray-700/50 hover:bg-sol-darker/50 transition-all ${isLive ? '' : 'opacity-70'}`}>
+                  <tr key={mint} className={`border-b border-gray-700/50 hover:bg-sol-darker/50 transition-all ${isLive ? '' : 'opacity-70'} ${isLive && pnlPercent > 0.01 ? 'profit-row-shimmer' : ''} ${isLive && pnlPercent < -0.01 ? 'loss-row' : ''}`}>
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         {image ? (

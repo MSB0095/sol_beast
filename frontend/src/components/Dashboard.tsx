@@ -1,11 +1,35 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useBotStore } from '../store/botStore'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts'
-import { TrendingUp, TrendingDown, Target, Loader, Wallet } from 'lucide-react'
+import { TrendingUp, TrendingDown, Target, Loader, Wallet, Sparkles } from 'lucide-react'
 import TradingPerformanceWidget from './TradingPerformanceWidget'
 
 export default function Dashboard() {
   const { stats, historicalData, detectedCoins, totalDetectedCoins } = useBotStore()
+  const prevProfitRef = useRef<number>(0)
+  const [celebrating, setCelebrating] = useState(false)
+  const [sparkles, setSparkles] = useState<{id: number; x: number; y: number}[]>([])
+
+  // Detect profit changes for celebration animation
+  useEffect(() => {
+    const currentProfit = stats?.total_profit || 0
+    const prevProfit = prevProfitRef.current
+    if (currentProfit > prevProfit && prevProfit !== 0 && currentProfit > 0) {
+      setCelebrating(true)
+      // Spawn sparkle particles
+      const newSparkles = Array.from({ length: 6 }, (_, i) => ({
+        id: Date.now() + i,
+        x: Math.random() * 100,
+        y: Math.random() * 100,
+      }))
+      setSparkles(newSparkles)
+      setTimeout(() => {
+        setCelebrating(false)
+        setSparkles([])
+      }, 2000)
+    }
+    prevProfitRef.current = currentProfit
+  }, [stats?.total_profit])
 
   // Generate chart data from historical data
   const chartData = useMemo(() => {
@@ -41,7 +65,11 @@ export default function Dashboard() {
     <div className="space-y-6">
       {/* Key Metrics with Visual Backgrounds */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
-        <div className="stat-card animate-fade-in-up relative overflow-hidden" style={{ animationDelay: '0.1s' }}>
+        <div className={`stat-card animate-fade-in-up relative overflow-hidden ${celebrating ? 'animate-celebrate profit-glow' : ''}`} style={{ animationDelay: '0.1s' }}>
+          {/* Sparkle particles on profit celebration */}
+          {sparkles.map(s => (
+            <div key={s.id} className="sparkle-particle" style={{ left: `${s.x}%`, top: `${s.y}%` }} />
+          ))}
           {/* Background image */}
           <div 
             className="absolute inset-0 opacity-10 blur-sm"
@@ -56,17 +84,18 @@ export default function Dashboard() {
               <p className="font-mono-tech text-[10px] sm:text-xs mb-2 sm:mb-3 uppercase tracking-widest flex items-center gap-2" style={{ color: 'var(--theme-text-secondary)' }}>
                 <span className="icon-[tabler--coin] inline-block w-4 h-4"></span>
                 Total Profit
+                {celebrating && <Sparkles size={14} className="animate-spin" style={{ color: 'var(--theme-accent)' }} />}
               </p>
-              <h3 className={`text-3xl sm:text-4xl md:text-5xl font-display font-black break-all ${(stats?.total_profit || 0) >= 0 ? 'glow-text' : ''}`} 
+              <h3 className={`text-3xl sm:text-4xl md:text-5xl font-display font-black break-all ${celebrating ? 'animate-profit-number' : ''} ${(stats?.total_profit || 0) >= 0 ? 'glow-text' : ''}`} 
                   style={(stats?.total_profit || 0) >= 0 ? { color: 'var(--theme-success)' } : { color: 'var(--theme-error)', textShadow: '0 0 20px var(--theme-error)' }}>
                 ◎{(stats?.total_profit || 0).toFixed(9)}
               </h3>
             </div>
             {(stats?.total_profit || 0) >= 0 ? (
-              <div className="p-4 rounded-2xl animate-float" style={{ 
+              <div className={`p-4 rounded-2xl ${celebrating ? 'animate-celebrate' : 'animate-float'}`} style={{ 
                 background: 'var(--glass-bg)',
                 border: '2px solid var(--theme-success)',
-                boxShadow: '0 0 30px var(--theme-success)'
+                boxShadow: celebrating ? '0 0 50px var(--theme-success), 0 0 100px var(--theme-success)' : '0 0 30px var(--theme-success)'
               }}>
                 <TrendingUp size={40} style={{ color: 'var(--theme-success)' }} />
               </div>
@@ -237,23 +266,23 @@ export default function Dashboard() {
       <div className="cyber-card p-6">
         <h3 className="font-display text-lg font-black mb-5 glow-text uppercase tracking-wider">Bot Information</h3>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono-tech">
-          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
-            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Buys Executed</p>
-            <p className="text-3xl font-black glow-text">{stats?.total_buys || 0}</p>
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform animate-glow-breathe">
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest font-mono-tech">Buys Executed</p>
+            <p className="text-3xl font-black glow-text font-display">{stats?.total_buys || 0}</p>
           </div>
-          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
-            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Sells Executed</p>
-            <p className="text-3xl font-black glow-text">{stats?.total_sells || 0}</p>
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform animate-glow-breathe" style={{ animationDelay: '1s' }}>
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest font-mono-tech">Sells Executed</p>
+            <p className="text-3xl font-black glow-text font-display">{stats?.total_sells || 0}</p>
           </div>
-          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
-            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Win Rate</p>
-            <p className="text-3xl font-black glow-text">
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform animate-glow-breathe" style={{ animationDelay: '2s' }}>
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest font-mono-tech">Win Rate</p>
+            <p className="text-3xl font-black glow-text font-display">
               {stats?.total_buys && stats.total_buys > 0 ? Math.round((stats.total_sells / stats.total_buys) * 100) : 0}%
             </p>
           </div>
-          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform">
-            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest">Uptime</p>
-            <p className="text-3xl font-black glow-text">
+          <div className="p-4 bg-black electric-border group hover:scale-105 transition-transform animate-glow-breathe" style={{ animationDelay: '3s' }}>
+            <p className="text-[var(--theme-text-secondary)] text-[10px] mb-3 uppercase tracking-widest font-mono-tech">Uptime</p>
+            <p className="text-3xl font-black glow-text font-display">
               {stats?.uptime_secs ? (stats.uptime_secs / 3600).toFixed(1) : 0}h
             </p>
           </div>

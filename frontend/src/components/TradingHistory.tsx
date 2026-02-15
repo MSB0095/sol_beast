@@ -195,7 +195,11 @@ export default function TradingHistory() {
                 const isBuy = trade.type === 'buy'
 
                 return (
-                  <tr key={`${trade.mint}-${idx}`} className="border-b border-gray-700 hover:bg-sol-darker transition-colors">
+                  <tr key={`${trade.mint}-${idx}`} className={`border-b border-gray-700 hover:bg-sol-darker transition-all ${
+                    !isBuy && isProfit ? 'profit-row-shimmer' : ''
+                  } ${!isBuy && !isProfit ? 'loss-row' : ''}`}
+                  style={{ animationDelay: `${idx * 0.03}s` }}
+                  >
                     <td className="py-3 px-4">
                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold ${
                         isBuy 
@@ -268,7 +272,7 @@ export default function TradingHistory() {
                     
                     <td className="py-3 px-4 text-right">
                       {trade.profit_loss !== undefined && trade.profit_loss !== null ? (
-                        <div>
+                        <div className={isProfit ? 'animate-profit-number' : ''}>
                           <div className={`font-semibold ${isProfit ? 'text-green-400' : 'text-red-400'}`}>
                             {isProfit ? '+' : ''}{trade.profit_loss.toFixed(4)} SOL
                           </div>

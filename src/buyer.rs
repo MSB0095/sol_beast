@@ -4,8 +4,9 @@ use crate::{
     models::{Holding, PriceCache},
     settings::Settings,
     rpc::{fetch_current_price, fetch_bonding_curve_state, fetch_global_fee_recipient, detect_idl_for_mint, fetch_bonding_curve_creator, build_missing_ata_preinstructions, fetch_with_fallback, detect_token_program_for_mint},
-    tx_builder::{BUY_DISCRIMINATOR, build_buy_instruction},
+    tx_builder::{build_buy_instruction},
     idl::load_all_idls,
+    onchain_idl::get_instruction_discriminator,
 };
 use solana_client::rpc_client::RpcClient;
 use std::{sync::Arc, collections::HashMap};
@@ -109,7 +110,10 @@ pub async fn buy_token(
         let mut context: HashMap<String, Pubkey> = HashMap::new();
         context.insert("mint".to_string(), mint_pk);
         context.insert("user".to_string(), payer_pubkey);
-        if let Some(c) = creator_opt { context.insert("bonding_curve.creator".to_string(), c); }
+        if let Some(c) = creator_opt { 
+            context.insert("bonding_curve.creator".to_string(), c); 
+            context.insert("bondingCurve.creator".to_string(), c); 
+        }
         // bonding_curve PDA using configured pump program as fallback
         let pump_program_pk = Pubkey::from_str(&settings.pump_fun_program)?;
         let (curve_pda_fallback, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program_pk);
@@ -148,7 +152,11 @@ pub async fn buy_token(
                     let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
                     let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
                     let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
-                    let mut d = BUY_DISCRIMINATOR.to_vec();
+                    
+                    // Get discriminator from IDL
+                    let discriminator = get_instruction_discriminator(&idl, "buy")
+                        .unwrap_or_else(|_| crate::onchain_idl::compute_anchor_discriminator("buy"));
+                    let mut d = discriminator.to_vec();
                     d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { 
                         amount: token_amount, 
                         max_sol_cost: max_sol_cost_with_slippage, 
@@ -191,7 +199,10 @@ pub async fn buy_token(
         real_context.insert("mint".to_string(), mint_pk);
         real_context.insert("user".to_string(), payer_pubkey);
         real_context.insert("payer".to_string(), payer_pubkey);
-        if let Some(c) = creator_opt { real_context.insert("bonding_curve.creator".to_string(), c); }
+        if let Some(c) = creator_opt { 
+            real_context.insert("bonding_curve.creator".to_string(), c); 
+            real_context.insert("bondingCurve.creator".to_string(), c); 
+        }
         if let Some(bc) = context.get("bonding_curve") { real_context.insert("bonding_curve".to_string(), *bc); }
         if let Some(cv) = context.get("creator_vault") { real_context.insert("creator_vault".to_string(), *cv); }
         // compute missing ATA pre-instructions for accounts in the instruction
@@ -331,7 +342,10 @@ pub async fn buy_token(
             let mut context: HashMap<String, Pubkey> = HashMap::new();
             context.insert("mint".to_string(), mint_pk);
             context.insert("user".to_string(), sim_payer_pubkey);
-            if let Some(c) = creator_opt { context.insert("bonding_curve.creator".to_string(), c); }
+            if let Some(c) = creator_opt { 
+                context.insert("bonding_curve.creator".to_string(), c); 
+                context.insert("bondingCurve.creator".to_string(), c); 
+            }
             // Add bonding_curve PDA
             let pump_program_pk = Pubkey::from_str(&settings.pump_fun_program)?;
             let (curve_pda, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program_pk);
@@ -358,8 +372,12 @@ pub async fn buy_token(
                     let base_cost_lamports = (sol_amount * 1_000_000_000.0) as u64;
                     let slippage_multiplier = 1.0 + (settings.slippage_bps as f64 / 10000.0);
                     let max_sol_cost_with_slippage = (base_cost_lamports as f64 * slippage_multiplier) as u64;
+                    
+                    // Get discriminator from IDL
+                    let discriminator = get_instruction_discriminator(&idl, "buy")
+                        .unwrap_or_else(|_| crate::onchain_idl::compute_anchor_discriminator("buy"));
                     instruction_opt = Some(solana_program::instruction::Instruction { program_id, accounts: metas, data: {
-                        let mut d = BUY_DISCRIMINATOR.to_vec();
+                        let mut d = discriminator.to_vec();
                         d.extend(borsh::to_vec(&crate::tx_builder::BuyArgs { 
                             amount: token_amount, 
                             max_sol_cost: max_sol_cost_with_slippage, 

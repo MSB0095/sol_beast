@@ -138,8 +138,9 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
-use crate::tx_builder::{build_sell_instruction, SELL_DISCRIMINATOR};
+use crate::tx_builder::{build_sell_instruction};
 use crate::idl::load_all_idls;
+use crate::onchain_idl::get_instruction_discriminator;
 use spl_associated_token_account::{get_associated_token_address, get_associated_token_address_with_program_id, instruction::create_associated_token_account_idempotent};
 use solana_program::pubkey::Pubkey;
 use spl_token::{self, instruction::close_account};
@@ -1289,7 +1290,10 @@ pub async fn sell_token(
         let mut context: HashMap<String, Pubkey> = HashMap::new();
         context.insert("mint".to_string(), mint_pk);
         context.insert("user".to_string(), user_pubkey);
-        if let Some(c) = creator_opt { context.insert("bonding_curve.creator".to_string(), c); }
+        if let Some(c) = creator_opt { 
+            context.insert("bonding_curve.creator".to_string(), c); 
+            context.insert("bondingCurve.creator".to_string(), c); 
+        }
         let pump_program_pk = Pubkey::from_str(&settings.pump_fun_program)?;
         let (curve_pda_fallback, _) = Pubkey::find_program_address(&[b"bonding-curve", mint_pk.as_ref()], &pump_program_pk);
         context.insert("bonding_curve".to_string(), curve_pda_fallback);
@@ -1308,7 +1312,10 @@ pub async fn sell_token(
         for idl in try_idls {
             match idl.build_accounts_for("sell", &context) {
                 Ok(metas) => {
-                    let mut d = SELL_DISCRIMINATOR.to_vec();
+                    // Get discriminator from IDL
+                    let discriminator = get_instruction_discriminator(&idl, "sell")
+                        .unwrap_or_else(|_| crate::onchain_idl::compute_anchor_discriminator("sell"));
+                    let mut d = discriminator.to_vec();
                     // Calculate min_sol_output: (base_units / 10^decimals) * SOL_per_token * 1e9 lamports
                     let min_sol_output = ((amount as f64 / token_divisor) * current_price * 1_000_000_000.0) as u64;
                     // Apply slippage tolerance (reduce minimum by slippage percentage)

@@ -108,12 +108,15 @@ pub fn build_buy_instruction(
     
     // Creator is REQUIRED for buy instruction - do not use placeholder
     let creator = creator_pubkey.ok_or("creator_pubkey is required for buy instruction")?;
+    // Support both snake_case and camelCase for compatibility
     context.insert("bonding_curve.creator".to_string(), creator);
+    context.insert("bondingCurve.creator".to_string(), creator);
     
     // Use provided fee_recipient from bonding curve
     context.insert("fee_recipient".to_string(), *fee_recipient);
-    // NOTE: fee_program is NOT in main instruction accounts - only invoked via CPI
-    // Do NOT add fee_program to context
+    context.insert("feeRecipient".to_string(), *fee_recipient);
+    // NOTE: The pump.fun IDL lists `feeProgram` as a required account for `buy`,
+    // but its address is supplied directly by the IDL, so it should not be added to `context`.
 
     let pref = ["pumpfun", "pumpfunamm", "pumpfunfees"];
     let mut last_error: Option<String> = None;
@@ -220,14 +223,19 @@ pub fn build_sell_instruction(
     
     // Creator is REQUIRED for sell instruction - do not use placeholder
     let creator = creator_pubkey.ok_or("creator_pubkey is required for sell instruction")?;
+    // Support both snake_case and camelCase for compatibility
     context.insert("bonding_curve.creator".to_string(), creator);
+    context.insert("bondingCurve.creator".to_string(), creator);
     
     // Use provided fee_recipient from bonding curve
     context.insert("fee_recipient".to_string(), *fee_recipient);
-    // Add fee_program - for SELL it IS included in the main instruction accounts (unlike buy)
+    context.insert("feeRecipient".to_string(), *fee_recipient);
+    // NOTE: The pump.fun IDL includes `feeProgram` in both buy and sell instructions.
+    // For sell, we add it to the context here so the IDL resolver can use it.
     let fee_program_pubkey = Pubkey::from_str(FEE_PROGRAM_PUBKEY)
         .map_err(|e| format!("Invalid fee_program pubkey: {}", e))?;
     context.insert("fee_program".to_string(), fee_program_pubkey);
+    context.insert("feeProgram".to_string(), fee_program_pubkey);
     
     let pref = ["pumpfun", "pumpfunamm", "pumpfunfees"];
     let mut last_error: Option<String> = None;

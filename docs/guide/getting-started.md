@@ -232,6 +232,6 @@ Now that you're up and running:
 ::: info Need Help?
 - Check the [FAQ](/guide/faq)
 - Visit [Troubleshooting](/guide/troubleshooting)
-- Join our [Discord](https://discord.gg/solbeast)
+- Join our [Discord](https://discord.gg/ZwyMw3HaDp)
 - Open an [Issue](https://github.com/MSB0095/sol_beast/issues)
 :::

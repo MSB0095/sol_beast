@@ -1143,6 +1143,10 @@ async fn handle_new_token(
                                        simulated: !is_real,
                                    });
                                    if trades.len() > 200 { trades.truncate(200); }
+                                   // Broadcast new trade over WebSocket for real-time frontend updates
+                                   if let Ok(json) = serde_json::to_value(&trades[0]) {
+                                       let _ = ws_tx.send(serde_json::json!({"type": "new-trade", "trade": json}).to_string());
+                                   }
                                }
                                
                                trades_map.lock().await.insert(mint.clone(), buy_record);
@@ -1179,6 +1183,10 @@ async fn handle_new_token(
                                        simulated: !is_real,
                                    });
                                    if trades.len() > 200 { trades.truncate(200); }
+                                   // Broadcast new trade over WebSocket for real-time frontend updates
+                                   if let Ok(json) = serde_json::to_value(&trades[0]) {
+                                       let _ = ws_tx.send(serde_json::json!({"type": "new-trade", "trade": json}).to_string());
+                                   }
                                }
 
                                // Update detected coin status to buy_failed
@@ -1759,6 +1767,10 @@ async fn handle_new_token_from_pumpportal(
                         },
                     );
                     if trades.len() > 200 { trades.truncate(200); }
+                    // Broadcast new trade over WebSocket for real-time frontend updates
+                    if let Ok(json) = serde_json::to_value(&trades[0]) {
+                        let _ = ws_tx.send(serde_json::json!({"type": "new-trade", "trade": json}).to_string());
+                    }
                 }
 
                 trades_map.lock().await.insert(mint.to_string(), buy_record);
@@ -1829,6 +1841,10 @@ async fn handle_new_token_from_pumpportal(
                         simulated: !is_real,
                     });
                     if trades.len() > 200 { trades.truncate(200); }
+                    // Broadcast new trade over WebSocket for real-time frontend updates
+                    if let Ok(json) = serde_json::to_value(&trades[0]) {
+                        let _ = ws_tx.send(serde_json::json!({"type": "new-trade", "trade": json}).to_string());
+                    }
                 }
 
                 // Update detected coin status to buy_failed

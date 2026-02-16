@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { TrendingUp, TrendingDown } from 'lucide-react'
 import { API_TRADES_URL } from '../config'
 
@@ -18,23 +18,26 @@ interface Trade {
 
 export default function TradingPerformanceWidget() {
   const [trades, setTrades] = useState<Trade[]>([])
+  const fetchIdRef = useRef(0)
+
+  const fetchTrades = useCallback(async () => {
+    const id = ++fetchIdRef.current
+    try {
+      const response = await fetch(API_TRADES_URL)
+      if (response.ok && id === fetchIdRef.current) {
+        const data: Trade[] = await response.json()
+        setTrades(data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch trades:', error)
+    }
+  }, [])
 
   useEffect(() => {
-    const fetchTrades = async () => {
-      try {
-        const response = await fetch(API_TRADES_URL)
-        if (response.ok) {
-          const data: Trade[] = await response.json()
-          setTrades(data)
-        }
-      } catch (error) {
-        console.error('Failed to fetch trades:', error)
-      }
-    }
     fetchTrades()
-    const interval = setInterval(fetchTrades, 3000)
+    const interval = setInterval(fetchTrades, 5000)
     return () => clearInterval(interval)
-  }, [])
+  }, [fetchTrades])
 
   // Aggregate PnL per token from sell trades
   const tokenPnL = new Map<string, { symbol: string; name: string; image?: string; profit: number; pctSum: number; count: number }>()

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { TrendingUp, TrendingDown, ExternalLink, Search, Filter, Download } from 'lucide-react'
-import { API_TRADES_URL } from '../config'
+import { API_TRADES_URL, WS_URL } from '../config'
 
 interface Trade {
   mint: string
@@ -28,25 +28,90 @@ export default function TradingHistory() {
   const [searchTerm, setSearchTerm] = useState('')
   const [sortBy, setSortBy] = useState<'time' | 'profit'>('time')
 
-  useEffect(() => {
-    const fetchTrades = async () => {
-      try {
-        const response = await fetch(API_TRADES_URL)
-        if (response.ok) {
-          const data = await response.json()
-          setTrades(data)
-        }
-      } catch (error) {
+  // Ref to track the latest fetch — prevents stale responses from overwriting fresh data
+  const fetchIdRef = useRef(0)
+
+  const fetchTrades = useCallback(async () => {
+    const id = ++fetchIdRef.current
+    const controller = new AbortController()
+    try {
+      const response = await fetch(API_TRADES_URL, { signal: controller.signal })
+      // Only apply if this is still the most recent request
+      if (response.ok && id === fetchIdRef.current) {
+        const data = await response.json()
+        setTrades(data)
+      }
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') {
         console.error('Failed to fetch trades:', error)
       }
     }
-    
+  }, [])
+
+  useEffect(() => {
     // Fetch immediately
     fetchTrades()
-    
-    // Poll every 100ms for near-instant updates
-    const interval = setInterval(fetchTrades, 100)
+
+    // Poll every 5s as a fallback (WebSocket handles real-time)
+    const interval = setInterval(fetchTrades, 5000)
     return () => clearInterval(interval)
+  }, [fetchTrades])
+
+  // Listen for real-time trade pushes over the shared WebSocket
+  useEffect(() => {
+    // We piggyback on the existing WS managed by botStore.
+    // Listen for 'new-trade' messages on a dedicated connection to avoid
+    // coupling tightly to another store's lifecycle.
+    let ws: WebSocket | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let unmounted = false
+
+    const connect = () => {
+      if (unmounted) return
+      try {
+        ws = new WebSocket(WS_URL)
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data)
+            if (msg.type === 'new-trade' && msg.trade) {
+              setTrades(prev => {
+                // Prepend the new trade, dedup by mint+timestamp+type
+                const isDup = prev.some(
+                  t => t.mint === msg.trade.mint &&
+                       t.timestamp === msg.trade.timestamp &&
+                       t.type === msg.trade.type
+                )
+                if (isDup) return prev
+                return [msg.trade, ...prev].slice(0, 200)
+              })
+            } else if (msg.type === 'initial' && msg.trades) {
+              // If the server sends trades in the initial payload, use them
+              setTrades(msg.trades)
+            }
+          } catch { /* ignore parse errors */ }
+        }
+        ws.onclose = () => {
+          if (!unmounted) {
+            reconnectTimer = setTimeout(connect, 3000)
+          }
+        }
+        ws.onerror = () => {
+          ws?.close()
+        }
+      } catch {
+        if (!unmounted) {
+          reconnectTimer = setTimeout(connect, 3000)
+        }
+      }
+    }
+
+    connect()
+
+    return () => {
+      unmounted = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      if (ws) ws.close()
+    }
   }, [])
 
   const filteredTrades = trades

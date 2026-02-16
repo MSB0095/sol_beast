@@ -557,11 +557,13 @@ async fn handle_socket(socket: WebSocket, state: ApiState) {
     let initial_data = {
         let coins = state.detected_coins.lock().await;
         let holdings = state.stats.lock().await.current_holdings.clone();
+        let trades = state.trades.lock().await;
         let total = crate::TOTAL_DETECTED_COINS.load(Ordering::Relaxed);
         json!({
             "type": "initial",
             "detected_coins": coins.clone(),
             "holdings": holdings,
+            "trades": trades.clone(),
             "total_detected_coins": total,
         }).to_string()
     };

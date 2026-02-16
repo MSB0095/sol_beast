@@ -311,6 +311,10 @@ pub async fn monitor_holdings(
                                 simulated: !is_real,
                             });
                             if trades.len() > 200 { trades.truncate(200); }
+                            // Broadcast new trade over WebSocket for real-time frontend updates
+                            if let Ok(json) = serde_json::to_value(&trades[0]) {
+                                let _ = ws_tx.send(serde_json::json!({"type": "new-trade", "trade": json}).to_string());
+                            }
                             drop(trades);
 
                             if is_final_sell {
@@ -362,6 +366,10 @@ pub async fn monitor_holdings(
                                     simulated: !is_real,
                                 });
                                 if trades.len() > 200 { trades.truncate(200); }
+                                // Broadcast new trade over WebSocket for real-time frontend updates
+                                if let Ok(json) = serde_json::to_value(&trades[0]) {
+                                    let _ = ws_tx.send(serde_json::json!({"type": "new-trade", "trade": json}).to_string());
+                                }
                                 trades_map.lock().await.remove(&mint_c);
                             } else {
                                 let _ = remove_tx.send(format!("DONE:{}", mint_c)).await;

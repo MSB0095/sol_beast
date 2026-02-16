@@ -186,5 +186,5 @@ Ready to get started? Check out:
 ---
 
 ::: tip Need Help?
-Join our [Discord community](https://discord.gg/solbeast) or [open an issue](https://github.com/MSB0095/sol_beast/issues) on GitHub.
+Join our [Discord community](https://discord.gg/ZwyMw3HaDp) or [open an issue](https://github.com/MSB0095/sol_beast/issues) on GitHub.
 :::

@@ -81,7 +81,7 @@ export default defineConfig({
 
     socialLinks: [
       { icon: 'github', link: 'https://github.com/MSB0095/sol_beast' },
-      { icon: 'discord', link: 'https://discord.gg/solbeast' },
+      { icon: 'discord', link: 'https://discord.gg/ZwyMw3HaDp' },
       { icon: 'twitter', link: 'https://x.com/Sol__Beast' }
     ],
 

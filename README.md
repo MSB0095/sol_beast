@@ -467,7 +467,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Documentation**: [Full Docs](docs/README.md)
 - **GitHub**: [https://github.com/MSB0095/sol_beast](https://github.com/MSB0095/sol_beast)
 - **Issues**: [Report a bug](https://github.com/MSB0095/sol_beast/issues)
-- **Discord**: [Join Community](https://discord.gg/solbeast) *(Coming Soon)*
+- **Discord**: [Join Community](https://discord.gg/ZwyMw3HaDp) *(Coming Soon)*
 - **Twitter**: [@Sol__Beast](https://x.com/Sol__Beast)
 
 ---

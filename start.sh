@@ -115,8 +115,30 @@ main() {
     # Start services
     echo -e "${BLUE}Starting backend...${NC}"
     start_backend
-    sleep 2
-    echo -e "${GREEN}✓ Backend started${NC}"
+    
+    # Wait for the backend to actually be listening before starting the frontend.
+    # Release builds can take 60+ seconds; without this the frontend proxy floods
+    # the console with ECONNREFUSED errors.
+    echo -e "${YELLOW}⏳ Waiting for backend to be ready on port 8080 (compiling release build)...${NC}"
+    local waited=0
+    local max_wait=300  # 5 minutes max
+    while [ $waited -lt $max_wait ]; do
+        if curl -s --max-time 2 http://localhost:8080/api/health >/dev/null 2>&1; then
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+        # Show a progress dot every 15 seconds
+        if [ $((waited % 15)) -eq 0 ]; then
+            echo -e "${YELLOW}   ...still compiling (${waited}s elapsed)${NC}"
+        fi
+    done
+    
+    if [ $waited -ge $max_wait ]; then
+        echo -e "${RED}✗ Backend failed to start within ${max_wait}s. Check logs.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Backend started (took ~${waited}s)${NC}"
     echo ""
     
     echo -e "${BLUE}Starting frontend...${NC}"

@@ -1,0 +1,179 @@
+# SOL BEAST 2.0 default configuration.
+# This file is embedded in the binary. Layer on top with config.toml,
+# environment variables (BEAST_SECTION__KEY=value) and CLI flags.
+config_version = 2
+
+[runtime]
+mode = "radar"            # off | radar | canary | live
+real = false              # live sending also requires the --real CLI flag
+require_cli_real = true
+data_dir = "./data"
+
+[wallet]
+keypair_path = "./keypair.json"
+cold_address = ""
+require_0600 = true
+
+[rpc]
+urls = ["https://api.mainnet-beta.solana.com"]
+ws_urls = ["wss://api.mainnet-beta.solana.com/"]
+commitment = "confirmed"
+timeout_ms = 5000
+max_retries = 2
+jupiter_quote_url = "https://lite-api.jup.ag/swap/v1"
+jupiter_swap_instructions_url = "https://lite-api.jup.ag/swap/v1"
+
+[jito]
+enabled = false
+block_engine_urls = [
+  "https://amsterdam.mainnet.block-engine.jito.wtf",
+  "https://frankfurt.mainnet.block-engine.jito.wtf",
+  "https://london.mainnet.block-engine.jito.wtf",
+  "https://ny.mainnet.block-engine.jito.wtf",
+  "https://slc.mainnet.block-engine.jito.wtf",
+  "https://singapore.mainnet.block-engine.jito.wtf",
+  "https://tokyo.mainnet.block-engine.jito.wtf",
+]
+tip_floor_url = "https://bundles.jito.wtf/api/v1/bundles/tip_floor"
+tip_accounts = []
+tip_percentile = 75
+send_regions = 2
+requests_per_second = 1
+leader_window = 2
+bundle_only = true
+
+[risk]
+balance_floor_lamports = 50_000_000
+max_inflight_bundles = 6
+max_inflight_per_strategy = 3
+max_attempts_per_min = 60
+daily_landed_cost_cap_lamports = 100_000_000
+max_model_error_bps = 50
+max_feed_lag_ms = 2000
+max_slot_lag = 3
+max_clock_skew_ms = 250
+max_consecutive_failures = 25
+unexpected_balance_delta_lamports = 1000
+kill_switch_file = "./STOP"
+
+[api]
+enabled = true
+bind = "127.0.0.1:8081"
+allow_remote = false
+allowed_origins = []
+rate_limit_per_sec = 20
+read_rate_limit_per_sec = 60
+body_limit_bytes = 65536
+# Serve a built frontend from the API (single process, no Vite dev server).
+# static_dir = "frontend/dist"
+
+[storage]
+path = "./data/beast.sqlite3"
+retention_days = 30
+feed_retention_days = 7
+
+[log]
+level = "info"
+json = false
+
+[guard]
+enabled = true
+mode = "lite"             # lite (last-leg min-out) | program (on-chain assertion)
+program_id = ""
+min_profit_lamports = 10_000
+
+[venues]
+disabled = []
+quote_only = []
+jupiter_quote_url = "https://lite-api.jup.ag/swap/v1/quote"
+jupiter_swap_instructions_url = "https://lite-api.jup.ag/swap/v1/swap-instructions"
+max_accounts = 48
+restrict_intermediate_tokens = true
+
+[rent]
+enabled = true
+batch_size = 20
+include_token_2022 = true
+dust_burn = false
+dust_threshold_usd = 1.0
+min_recovered_lamports = 10_000
+
+[strategies.cross_dex_arb]
+mode = "radar"
+min_net_lamports = 20_000
+max_notional_lamports = 50_000_000_000
+max_price_impact_bps = 80
+tip_alpha_initial = 0.5
+tip_cap_lamports = 2_000_000
+max_attempts_per_min = 30
+daily_cost_cap_lamports = 50_000_000
+max_inflight = 2
+ttl_slots = 2
+start_mints = ["So11111111111111111111111111111111111111112"]
+venues = []
+pair_allowlist = []
+pair_denylist = []
+
+[strategies.triangular_arb]
+mode = "off"
+min_net_lamports = 30_000
+max_notional_lamports = 25_000_000_000
+max_price_impact_bps = 60
+tip_alpha_initial = 0.5
+tip_cap_lamports = 2_000_000
+max_attempts_per_min = 15
+daily_cost_cap_lamports = 30_000_000
+max_inflight = 1
+ttl_slots = 2
+start_mints = ["So11111111111111111111111111111111111111112"]
+venues = []
+pair_allowlist = []
+pair_denylist = []
+
+[strategies.lst_arb]
+mode = "radar"
+min_net_lamports = 50_000
+max_notional_lamports = 50_000_000_000
+max_price_impact_bps = 40
+tip_alpha_initial = 0.5
+tip_cap_lamports = 2_000_000
+max_attempts_per_min = 10
+daily_cost_cap_lamports = 30_000_000
+max_inflight = 1
+ttl_slots = 3
+start_mints = ["So11111111111111111111111111111111111111112"]
+venues = []
+pair_allowlist = []
+pair_denylist = []
+
+[strategies.stable_arb]
+mode = "off"
+min_net_lamports = 100_000
+max_notional_lamports = 100_000_000_000
+max_price_impact_bps = 20
+tip_alpha_initial = 0.5
+tip_cap_lamports = 2_000_000
+max_attempts_per_min = 10
+daily_cost_cap_lamports = 30_000_000
+max_inflight = 1
+ttl_slots = 3
+start_mints = ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+venues = []
+pair_allowlist = []
+pair_denylist = []
+
+[strategies.rent_reclaim]
+mode = "radar"
+min_net_lamports = 0
+max_notional_lamports = 0
+max_price_impact_bps = 0
+tip_alpha_initial = 0.5
+tip_cap_lamports = 0
+max_attempts_per_min = 6
+daily_cost_cap_lamports = 5_000_000
+max_inflight = 1
+ttl_slots = 10
+start_mints = []
+venues = []
+pair_allowlist = []
+pair_denylist = []

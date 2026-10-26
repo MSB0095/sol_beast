@@ -2,7 +2,7 @@
 /// Configurable 1% dev fee on every buy and sell transaction.
 /// This fee can be enabled or disabled via config.toml (default: enabled).
 #[allow(deprecated)]
-use solana_program::{pubkey::Pubkey, instruction::Instruction, system_instruction};
+use solana_program::{instruction::Instruction, pubkey::Pubkey, system_instruction};
 use std::str::FromStr;
 
 // HARDCODED: Dev wallet address and fee percentage
@@ -13,14 +13,17 @@ const DEV_FEE_PERCENT: f64 = 1.0;
 
 /// Get the dev wallet public key (hardcoded)
 pub fn get_dev_wallet() -> Result<Pubkey, Box<dyn std::error::Error + Send + Sync>> {
-    Pubkey::from_str(DEV_WALLET)
-        .map_err(|e| format!("Invalid dev wallet: {}", e).into())
+    Pubkey::from_str(DEV_WALLET).map_err(|e| format!("Invalid dev wallet: {}", e).into())
 }
 
 /// Calculate dev fee from SOL amount (in lamports) — always 1%
 pub fn calculate_dev_fee(amount_lamports: u64) -> u64 {
     let fee = ((amount_lamports as f64) * (DEV_FEE_PERCENT / 100.0)).round() as u64;
-    if fee == 0 { 1 } else { fee }
+    if fee == 0 {
+        1
+    } else {
+        fee
+    }
 }
 
 /// Add dev fee instruction to a list of instructions if enabled.
@@ -40,17 +43,14 @@ pub fn add_dev_fee_to_instructions(
     let dev_wallet = get_dev_wallet()?;
     let fee_amount = calculate_dev_fee(transaction_amount_lamports);
 
-    let transfer_instruction = system_instruction::transfer(
-        payer,
-        &dev_wallet,
-        fee_amount,
-    );
+    let transfer_instruction = system_instruction::transfer(payer, &dev_wallet, fee_amount);
 
     // Add transfer instruction at the beginning (before main operations)
     instructions.insert(0, transfer_instruction);
 
-    log::info!("Added dev fee instruction: {} lamports ({} SOL) - {}% of {} lamports", 
-        fee_amount, 
+    log::info!(
+        "Added dev fee instruction: {} lamports ({} SOL) - {}% of {} lamports",
+        fee_amount,
         fee_amount as f64 / 1_000_000_000.0,
         DEV_FEE_PERCENT,
         transaction_amount_lamports

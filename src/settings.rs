@@ -1,7 +1,7 @@
 use crate::error::AppError;
-use serde::{Deserialize, Serialize};
 use base64::engine::general_purpose::STANDARD as Base64Engine;
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use std::env;
 
 /// A single take-profit level: when profit reaches `trigger_percent`, sell `sell_percent`% of the original position.
@@ -19,11 +19,17 @@ pub struct SlLevel {
 }
 
 fn default_tp_levels() -> Vec<TpLevel> {
-    vec![TpLevel { trigger_percent: 30.0, sell_percent: 100.0 }]
+    vec![TpLevel {
+        trigger_percent: 30.0,
+        sell_percent: 100.0,
+    }]
 }
 
 fn default_sl_levels() -> Vec<SlLevel> {
-    vec![SlLevel { trigger_percent: -20.0, sell_percent: 100.0 }]
+    vec![SlLevel {
+        trigger_percent: -20.0,
+        sell_percent: 100.0,
+    }]
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -113,22 +119,18 @@ pub struct Settings {
     /// Dev fee configuration: controls whether 1% developer fee is applied to transactions
     #[serde(default = "default_dev_fee_enabled")]
     pub dev_fee_enabled: bool,
-    /// Enable fetching IDLs from on-chain (Anchor-style IDL accounts)
-    #[serde(default = "default_use_onchain_idl")]
-    pub use_onchain_idl: bool,
-    /// Optional: Override IDL account pubkeys for specific programs (program_id -> idl_account)
-    #[serde(default)]
-    pub idl_account_overrides: std::collections::HashMap<String, String>,
 }
 
-fn default_token_decimals() -> u8 { 6 }
-fn default_dev_fee_enabled() -> bool { true }
-fn default_use_onchain_idl() -> bool { true }
+fn default_token_decimals() -> u8 {
+    6
+}
+fn default_dev_fee_enabled() -> bool {
+    false
+}
 
 impl Settings {
     pub fn from_file(path: &str) -> Result<Self, AppError> {
-        let builder = config::Config::builder()
-            .add_source(config::File::with_name(path));
+        let builder = config::Config::builder().add_source(config::File::with_name(path));
         let cfg = builder.build()?;
         Ok(cfg.try_deserialize()?)
     }
@@ -253,16 +255,11 @@ impl Settings {
             self.simulate_wallet_keypair_json = other.simulate_wallet_keypair_json.clone();
         }
         if other.simulate_wallet_private_key_string != self.simulate_wallet_private_key_string {
-            self.simulate_wallet_private_key_string = other.simulate_wallet_private_key_string.clone();
+            self.simulate_wallet_private_key_string =
+                other.simulate_wallet_private_key_string.clone();
         }
         if other.dev_fee_enabled != self.dev_fee_enabled {
             self.dev_fee_enabled = other.dev_fee_enabled;
-        }
-        if other.use_onchain_idl != self.use_onchain_idl {
-            self.use_onchain_idl = other.use_onchain_idl;
-        }
-        if other.idl_account_overrides != self.idl_account_overrides {
-            self.idl_account_overrides = other.idl_account_overrides.clone();
         }
     }
 
@@ -270,44 +267,70 @@ impl Settings {
     pub fn validate(&self) -> Result<(), AppError> {
         // Validate TP levels
         if self.tp_levels.is_empty() {
-            return Err(AppError::Validation("At least one TP level is required".to_string()));
+            return Err(AppError::Validation(
+                "At least one TP level is required".to_string(),
+            ));
         }
         if self.tp_levels.len() > 4 {
-            return Err(AppError::Validation("Maximum 4 TP levels allowed".to_string()));
+            return Err(AppError::Validation(
+                "Maximum 4 TP levels allowed".to_string(),
+            ));
         }
         let mut tp_sell_sum = 0.0;
         for (i, level) in self.tp_levels.iter().enumerate() {
             if level.trigger_percent <= 0.0 {
-                return Err(AppError::Validation(format!("TP level {} trigger_percent must be > 0", i + 1)));
+                return Err(AppError::Validation(format!(
+                    "TP level {} trigger_percent must be > 0",
+                    i + 1
+                )));
             }
             if level.sell_percent <= 0.0 || level.sell_percent > 100.0 {
-                return Err(AppError::Validation(format!("TP level {} sell_percent must be between 0 and 100", i + 1)));
+                return Err(AppError::Validation(format!(
+                    "TP level {} sell_percent must be between 0 and 100",
+                    i + 1
+                )));
             }
             tp_sell_sum += level.sell_percent;
         }
         if tp_sell_sum > 100.0 + f64::EPSILON {
-            return Err(AppError::Validation(format!("TP levels sell_percent sum ({:.1}%) must be <= 100%", tp_sell_sum)));
+            return Err(AppError::Validation(format!(
+                "TP levels sell_percent sum ({:.1}%) must be <= 100%",
+                tp_sell_sum
+            )));
         }
 
         // Validate SL levels
         if self.sl_levels.is_empty() {
-            return Err(AppError::Validation("At least one SL level is required".to_string()));
+            return Err(AppError::Validation(
+                "At least one SL level is required".to_string(),
+            ));
         }
         if self.sl_levels.len() > 4 {
-            return Err(AppError::Validation("Maximum 4 SL levels allowed".to_string()));
+            return Err(AppError::Validation(
+                "Maximum 4 SL levels allowed".to_string(),
+            ));
         }
         let mut sl_sell_sum = 0.0;
         for (i, level) in self.sl_levels.iter().enumerate() {
             if level.trigger_percent >= 0.0 {
-                return Err(AppError::Validation(format!("SL level {} trigger_percent must be < 0", i + 1)));
+                return Err(AppError::Validation(format!(
+                    "SL level {} trigger_percent must be < 0",
+                    i + 1
+                )));
             }
             if level.sell_percent <= 0.0 || level.sell_percent > 100.0 {
-                return Err(AppError::Validation(format!("SL level {} sell_percent must be between 0 and 100", i + 1)));
+                return Err(AppError::Validation(format!(
+                    "SL level {} sell_percent must be between 0 and 100",
+                    i + 1
+                )));
             }
             sl_sell_sum += level.sell_percent;
         }
         if sl_sell_sum > 100.0 + f64::EPSILON {
-            return Err(AppError::Validation(format!("SL levels sell_percent sum ({:.1}%) must be <= 100%", sl_sell_sum)));
+            return Err(AppError::Validation(format!(
+                "SL levels sell_percent sum ({:.1}%) must be <= 100%",
+                sl_sell_sum
+            )));
         }
 
         if self.buy_amount <= 0.0 {
@@ -317,13 +340,19 @@ impl Settings {
             return Err(AppError::Validation("timeout_secs must be > 0".to_string()));
         }
         if self.cache_capacity == 0 {
-            return Err(AppError::Validation("cache_capacity must be > 0".to_string()));
+            return Err(AppError::Validation(
+                "cache_capacity must be > 0".to_string(),
+            ));
         }
         if self.max_holded_coins == 0 {
-            return Err(AppError::Validation("max_holded_coins must be > 0".to_string()));
+            return Err(AppError::Validation(
+                "max_holded_coins must be > 0".to_string(),
+            ));
         }
         if self.max_liquidity_sol < self.min_liquidity_sol {
-            return Err(AppError::Validation("max_liquidity_sol must be >= min_liquidity_sol".to_string()));
+            return Err(AppError::Validation(
+                "max_liquidity_sol must be >= min_liquidity_sol".to_string(),
+            ));
         }
         Ok(())
     }
@@ -347,62 +376,113 @@ pub fn load_keypair_from_env_var(var: &str) -> Option<Vec<u8>> {
 
 /// Parse a private key string in various formats:
 /// - Base58 (standard Solana format, 88 chars)
-/// - JSON array string like "[1,2,3,...]" 
+/// - JSON array string like "[1,2,3,...]"
 /// - Comma-separated bytes like "1,2,3,..."
 pub fn parse_private_key_string(s: &str) -> Result<Vec<u8>, String> {
     let trimmed = s.trim();
-    
+
     // Try base58 first (most common format)
     if trimmed.len() >= 80 && !trimmed.starts_with('[') && !trimmed.contains(',') {
         return bs58::decode(trimmed)
             .into_vec()
             .map_err(|e| format!("Base58 decode failed: {}", e));
     }
-    
+
     // Try JSON array format: [1,2,3,...]
     if trimmed.starts_with('[') {
         return serde_json::from_str::<Vec<u8>>(trimmed)
             .map_err(|e| format!("JSON parse failed: {}", e));
     }
-    
+
     // Try comma-separated format: 1,2,3,...
     if trimmed.contains(',') {
-        let parts: Result<Vec<u8>, _> = trimmed
-            .split(',')
-            .map(|s| s.trim().parse::<u8>())
-            .collect();
+        let parts: Result<Vec<u8>, _> =
+            trimmed.split(',').map(|s| s.trim().parse::<u8>()).collect();
         return parts.map_err(|e| format!("CSV parse failed: {}", e));
     }
-    
-    Err("Unrecognized private key format. Expected: base58, JSON array, or comma-separated bytes".to_string())
+
+    Err(
+        "Unrecognized private key format. Expected: base58, JSON array, or comma-separated bytes"
+            .to_string(),
+    )
 }
 
-fn default_bonding_curve_strict() -> bool { false }
-fn default_bonding_curve_log_debounce_secs() -> u64 { 300 }
-fn default_buy_amount() -> f64 { 0.1 }
-fn default_price_source() -> String { "wss".to_string() }
-fn default_rotate_rpc() -> bool { true }
-fn default_rpc_rotate_interval_secs() -> u64 { 60 }
-fn default_max_holded_coins() -> usize { 100 }
-fn default_max_subs_per_wss() -> usize { 4 }
-fn default_sub_ttl_secs() -> u64 { 900 }
-fn default_wss_subscribe_timeout_secs() -> u64 { 6 }
-fn default_max_create_to_buy_secs() -> u64 { 6 }
-fn default_min_tokens_threshold() -> u64 { 1_000_000 }
-fn default_max_sol_per_token() -> f64 { 0.0001 }
-fn default_slippage_bps() -> u64 { 500 }
-fn default_enable_safer_sniping() -> bool { false }
-fn default_min_liquidity_sol() -> f64 { 0.0 }
-fn default_max_liquidity_sol() -> f64 { 100.0 }
-fn default_helius_sender_endpoint() -> String { "https://sender.helius-rpc.com/fast".to_string() }
-fn default_helius_min_tip_sol() -> f64 { 0.001 }
-fn default_helius_priority_fee_multiplier() -> f64 { 1.2 }
-fn default_helius_use_dynamic_tips() -> bool { true }
-fn default_helius_confirm_timeout_secs() -> u64 { 15 }
-fn default_pumpportal_enabled() -> bool { false }
-fn default_pumpportal_wss() -> Vec<String> { vec!["wss://pumpportal.fun/api/data".to_string()] }
+fn default_bonding_curve_strict() -> bool {
+    false
+}
+fn default_bonding_curve_log_debounce_secs() -> u64 {
+    300
+}
+fn default_buy_amount() -> f64 {
+    0.1
+}
+fn default_price_source() -> String {
+    "wss".to_string()
+}
+fn default_rotate_rpc() -> bool {
+    true
+}
+fn default_rpc_rotate_interval_secs() -> u64 {
+    60
+}
+fn default_max_holded_coins() -> usize {
+    100
+}
+fn default_max_subs_per_wss() -> usize {
+    4
+}
+fn default_sub_ttl_secs() -> u64 {
+    900
+}
+fn default_wss_subscribe_timeout_secs() -> u64 {
+    6
+}
+fn default_max_create_to_buy_secs() -> u64 {
+    6
+}
+fn default_min_tokens_threshold() -> u64 {
+    1_000_000
+}
+fn default_max_sol_per_token() -> f64 {
+    0.0001
+}
+fn default_slippage_bps() -> u64 {
+    500
+}
+fn default_enable_safer_sniping() -> bool {
+    false
+}
+fn default_min_liquidity_sol() -> f64 {
+    0.0
+}
+fn default_max_liquidity_sol() -> f64 {
+    100.0
+}
+fn default_helius_sender_endpoint() -> String {
+    "https://sender.helius-rpc.com/fast".to_string()
+}
+fn default_helius_min_tip_sol() -> f64 {
+    0.001
+}
+fn default_helius_priority_fee_multiplier() -> f64 {
+    1.2
+}
+fn default_helius_use_dynamic_tips() -> bool {
+    true
+}
+fn default_helius_confirm_timeout_secs() -> u64 {
+    15
+}
+fn default_pumpportal_enabled() -> bool {
+    false
+}
+fn default_pumpportal_wss() -> Vec<String> {
+    vec!["wss://pumpportal.fun/api/data".to_string()]
+}
 
-fn default_detected_coins_max() -> usize { 300 }
+fn default_detected_coins_max() -> usize {
+    300
+}
 
 impl Settings {
     /// Get the effective minimum tip amount based on routing mode

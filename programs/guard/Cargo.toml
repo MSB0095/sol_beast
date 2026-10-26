@@ -1,0 +1,17 @@
+[package]
+name = "beast-guard"
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "On-chain final-balance profit guard for SOL BEAST bundles"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "2.3"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

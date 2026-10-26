@@ -119,11 +119,11 @@ main() {
     # Wait for the backend to actually be listening before starting the frontend.
     # Release builds can take 60+ seconds; without this the frontend proxy floods
     # the console with ECONNREFUSED errors.
-    echo -e "${YELLOW}⏳ Waiting for backend to be ready on port 8080 (compiling release build)...${NC}"
+    echo -e "${YELLOW}⏳ Waiting for backend to be ready on port 8081 (compiling release build)...${NC}"
     local waited=0
     local max_wait=300  # 5 minutes max
     while [ $waited -lt $max_wait ]; do
-        if curl -s --max-time 2 http://localhost:8080/api/health >/dev/null 2>&1; then
+        if curl -s --max-time 2 http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
             break
         fi
         sleep 3
@@ -153,8 +153,8 @@ main() {
     echo -e "${BLUE}════════════════════════════════════${NC}"
     echo ""
     echo -e "${GREEN}Frontend:  http://localhost:3000${NC}"
-    echo -e "${GREEN}Backend:   http://localhost:8080${NC}"
-    echo -e "${GREEN}API:       http://localhost:8080/api${NC}"
+    echo -e "${GREEN}Backend:   http://127.0.0.1:8081${NC}"
+    echo -e "${GREEN}API:       http://127.0.0.1:8081/v1${NC}"
     echo ""
     
     if [ "$OS" = "macos" ] || [ "$OS" = "windows" ]; then

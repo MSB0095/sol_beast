@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 FRONTEND_PORT=3000
-BACKEND_PORT=8080
+BACKEND_PORT=8081
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Functions
@@ -79,7 +79,7 @@ setup_frontend() {
     
     if [ ! -d "node_modules" ]; then
         print_info "Installing npm dependencies..."
-        npm install --legacy-peer-deps --ignore-scripts
+        npm ci
         print_success "Frontend dependencies installed"
     else
         print_success "Frontend dependencies already installed"
@@ -97,7 +97,7 @@ setup_backend() {
     fi
     
     print_info "Checking Rust dependencies..."
-    cargo check
+    cargo check --workspace
     print_success "Backend dependencies verified"
 }
 
@@ -105,7 +105,7 @@ build_backend() {
     print_header "Building Backend (Release)"
     
     print_info "This may take 2-5 minutes on first build..."
-    cargo build --release
+    cargo build --release -p beast-cli
     print_success "Backend built successfully"
 }
 
@@ -135,11 +135,11 @@ display_startup_info() {
     
     echo -e "${GREEN}Frontend URL:${NC} http://localhost:${FRONTEND_PORT}"
     echo -e "${GREEN}Backend URL:${NC} http://localhost:${BACKEND_PORT}"
-    echo -e "${GREEN}API Base:${NC} http://localhost:${BACKEND_PORT}/api"
+    echo -e "${GREEN}API Base:${NC} http://127.0.0.1:${BACKEND_PORT}/v1"
     echo ""
     echo -e "${YELLOW}Terminal Commands:${NC}"
     echo "  Frontend: npm run dev (in frontend/)"
-    echo "  Backend:  cargo run --release"
+    echo "  Backend:  cargo run --release -p beast-cli -- run"
     echo ""
 }
 
@@ -152,7 +152,7 @@ start_backend() {
     
     cd "$SCRIPT_DIR"
     export RUST_LOG=info
-    exec cargo run --release
+    exec cargo run --release -p beast-cli -- run
 }
 
 start_frontend() {

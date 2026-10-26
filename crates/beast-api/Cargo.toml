@@ -1,0 +1,27 @@
+[package]
+name = "beast-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hardened local HTTP API for SOL BEAST"
+
+[dependencies]
+axum = "0.7"
+beast-core = { path = "../beast-core" }
+beast-dex = { path = "../beast-dex" }
+beast-exec = { path = "../beast-exec" }
+beast-feed = { path = "../beast-feed" }
+beast-store = { path = "../beast-store" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+thiserror.workspace = true
+tower = "0.5"
+tower-http.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile.workspace = true

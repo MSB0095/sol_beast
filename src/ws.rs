@@ -4,15 +4,9 @@ use futures_util::{stream::StreamExt, SinkExt};
 use log::{debug, error, info, warn};
 use lru::LruCache;
 use serde_json::{json, Value};
-use solana_client::rpc_client::RpcClient;
 use solana_program::pubkey::Pubkey;
-use std::{
-    collections::HashMap,
-    str::FromStr,
-    sync::Arc,
-    time::Instant,
-};
-use tokio::sync::{mpsc, Mutex, oneshot};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[derive(Debug)]
@@ -39,6 +33,7 @@ pub struct WsHealth {
     pub is_healthy: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ws(
     wss_url: &str,
     tx: mpsc::Sender<String>,
@@ -48,7 +43,6 @@ pub async fn run_ws(
     price_cache: Arc<Mutex<PriceCache>>,
     mut control_rx: mpsc::Receiver<WsRequest>,
     settings: Arc<Settings>,
-    rpc_client: Arc<RpcClient>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ---------- outer re-connect loop ----------
     loop {
@@ -57,8 +51,7 @@ pub async fn run_ws(
 
         debug!(
             "WSS {} connected (max_create_to_buy_secs={})",
-            wss_url,
-            settings.max_create_to_buy_secs
+            wss_url, settings.max_create_to_buy_secs
         );
 
         // pump.fun program logs
@@ -118,7 +111,8 @@ pub async fn run_ws(
         let mut req_id_counter: i64 = 1000;
         let mut active_sub_count: usize = 0;
         let mut subid_to_mint: HashMap<u64, (String, Instant, String)> = HashMap::new();
-        let mut pending_sub: HashMap<i64, (oneshot::Sender<Result<u64, String>>, Instant)> = HashMap::new();
+        let mut pending_sub: HashMap<i64, (oneshot::Sender<Result<u64, String>>, Instant)> =
+            HashMap::new();
         let mut recent_timeouts: usize = 0;
         let mut last_successful_sub: Option<Instant> = None;
 
@@ -352,7 +346,7 @@ pub async fn run_ws(
                         WsRequest::GetHealth { resp } => {
                             // Check if connection is healthy based on recent activity
                             let is_healthy = recent_timeouts < 3 && (
-                                last_successful_sub.is_none() || 
+                                last_successful_sub.is_none() ||
                                 last_successful_sub.map(|t| t.elapsed().as_secs() < 300).unwrap_or(false)
                             );
                             let _ = resp.send(WsHealth {
@@ -369,7 +363,7 @@ pub async fn run_ws(
                                 let _ = resp.send(Err(format!("WSS connection degraded (timeouts={})", recent_timeouts)));
                                 continue;
                             }
-                            
+
                             if active_sub_count >= settings.max_subs_per_wss {
                                 let _ = resp.send(Err(format!(
                                     "max subscriptions reached on this WSS ({})",
@@ -429,7 +423,7 @@ pub async fn run_ws(
                 // ---------- periodic TTL clean-up ----------
                 _ = tokio::time::sleep(std::time::Duration::from_secs(settings.sub_ttl_secs.min(30))) => {
                     let now = Instant::now();
-                    
+
                     // Clean up timed-out pending subscription requests
                     let timed_out_pending: Vec<i64> = pending_sub
                         .iter()
@@ -441,12 +435,12 @@ pub async fn run_ws(
                             }
                         })
                         .collect();
-                    
+
                     if !timed_out_pending.is_empty() {
                         recent_timeouts = recent_timeouts.saturating_add(timed_out_pending.len());
                         warn!("WSS {} timing out {} subscriptions (recent_timeouts={})", wss_url, timed_out_pending.len(), recent_timeouts);
                     }
-                    
+
                     for req_id in timed_out_pending {
                         if let Some((sender, _)) = pending_sub.remove(&req_id) {
                             // Decrement active count since this subscription never completed
@@ -457,7 +451,7 @@ pub async fn run_ws(
                             debug!("Cleaned up timed-out pending subscription req_id={} (active={}/{})", req_id, active_sub_count, settings.max_subs_per_wss);
                         }
                     }
-                    
+
                     // Clean up stale active subscriptions based on TTL
                     let to_remove: Vec<u64> = subid_to_mint
                         .iter()

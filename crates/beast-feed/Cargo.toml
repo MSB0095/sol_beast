@@ -1,0 +1,21 @@
+[package]
+name = "beast-feed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fail-closed Solana pool discovery and refresh feed for SOL BEAST"
+
+[dependencies]
+beast-core = { path = "../beast-core" }
+beast-dex = { path = "../beast-dex" }
+beast-rpc = { path = "../beast-rpc" }
+chrono.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

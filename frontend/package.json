@@ -11,21 +11,12 @@
     "postinstall": "echo 'Dependencies installed successfully'"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.98.4",
-    "axios": "^1.6.7",
-    "bs58": "^6.0.0",
-    "class-variance-authority": "^0.7.0",
-    "clsx": "^2.0.0",
-    "flyonui": "^2.4.1",
     "lucide-react": "^0.344.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "recharts": "^2.10.3",
-    "tailwind-merge": "^2.2.2",
-    "zustand": "^4.4.1"
+    "recharts": "^2.10.3"
   },
   "devDependencies": {
-    "@types/http-proxy": "^1.17.17",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
@@ -34,12 +25,8 @@
     "autoprefixer": "^10.4.16",
     "eslint": "^8.56.0",
     "eslint-plugin-react-hooks": "^4.6.0",
-    "http-proxy": "^1.18.1",
-    "patch-package": "^8.0.1",
     "postcss": "^8.4.32",
     "tailwindcss": "^3.3.6",
-    "tailwindcss-intersect": "^2.2.0",
-    "tailwindcss-motion": "^1.1.1",
     "typescript": "^5.2.2",
     "vite": "^5.0.8"
   }

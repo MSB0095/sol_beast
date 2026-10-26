@@ -1,0 +1,264 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e3]:
+    - complementary [ref=f1e4]:
+      - button "SOL BEAST 2.0 / ENGINE" [ref=f1e6] [cursor=pointer]:
+        - generic [ref=f1e17]:
+          - generic [ref=f1e18]: SOL
+          - generic [ref=f1e19]: BEAST
+          - generic [ref=f1e20]: 2.0 / ENGINE
+      - generic [ref=f1e21]:
+        - generic [ref=f1e22]:
+          - generic [ref=f1e24]: Engine online
+          - generic [ref=f1e25]: Radar
+        - generic [ref=f1e27]:
+          - generic [ref=f1e28]: UP 11m 37s
+          - generic [ref=f1e29]: feed now
+      - navigation [ref=f1e30]:
+        - generic [ref=f1e31]:
+          - generic [ref=f1e32]: Operate
+          - button "Overview" [ref=f1e33] [cursor=pointer]
+          - button "Radar" [ref=f1e43] [cursor=pointer]
+          - button "Execution" [ref=f1e53] [cursor=pointer]
+          - button "Rent reclaimer" [ref=f1e58] [cursor=pointer]
+        - generic [ref=f1e66]:
+          - generic [ref=f1e67]: Market
+          - button "Venues 60" [ref=f1e68] [cursor=pointer]:
+            - generic [ref=f1e75]: Venues
+            - generic [ref=f1e76]: "60"
+          - button "Pool feed" [ref=f1e77] [cursor=pointer]
+        - generic [ref=f1e84]:
+          - generic [ref=f1e85]: Control
+          - button "Strategies" [ref=f1e86] [cursor=pointer]
+          - button "System" [ref=f1e90] [cursor=pointer]
+      - generic [ref=f1e96]:
+        - generic [ref=f1e97]:
+          - generic [ref=f1e98]: API
+          - generic [ref=f1e100]: Jupiter
+          - generic [ref=f1e102]: Jito
+          - generic [ref=f1e104]: Guard
+        - generic [ref=f1e106]:
+          - generic [ref=f1e110]:
+            - strong [ref=f1e111]: Operator
+            - generic [ref=f1e112]: authenticated session
+          - button "Lock session" [ref=f1e113] [cursor=pointer]
+        - generic [ref=f1e117]: v0.2.0 · green-or-revert
+    - main [ref=f1e118]:
+      - generic [ref=f1e119]:
+        - generic [ref=f1e121]:
+          - generic [ref=f1e122]:
+            - generic [ref=f1e123]: SOL BEAST
+            - generic [ref=f1e126]: COMMAND CENTER
+          - heading "Command center" [level=1] [ref=f1e127]
+          - paragraph [ref=f1e128]: Live engine telemetry and radar pulse
+        - generic [ref=f1e129]:
+          - generic "Telemetry refresh cadence" [ref=f1e130]: SYNC now
+          - button "Refresh now" [ref=f1e132] [cursor=pointer]
+          - combobox "Process-wide mode (cannot exceed configured ceiling)" [ref=f1e141] [cursor=pointer]:
+            - option "Off"
+            - option "Radar" [selected]
+            - option "Canary" [disabled]
+            - option "Live" [disabled]
+          - button "Kill" [ref=f1e142] [cursor=pointer]
+      - generic [ref=f1e152]:
+        - strong [ref=f1e153]: Radar posture.
+        - text: The engine is detecting and modeling only. Live signing requires
+        - code [ref=f1e154]: "--real"
+        - text: ","
+        - code [ref=f1e155]: runtime.real=true
+        - text: ", a deployed guard and Jito."
+      - generic [ref=f1e157]:
+        - generic [ref=f1e158]:
+          - generic [ref=f1e159]:
+            - generic [ref=f1e160]: MISSION CONTROL / RADAR POSTURE
+            - heading "Every trade ends green — or reverts on-chain." [level=2] [ref=f1e162]
+            - paragraph [ref=f1e163]: Detect cross-venue dislocations, model every lamport of cost, then submit an atomic bundle only when the on-chain guard can prove net SOL profit. No sandwiches. No front-running. No unpaid risk.
+            - generic [ref=f1e164]:
+              - button "Open radar" [ref=f1e165] [cursor=pointer]
+              - button "Reclaim rent" [ref=f1e173] [cursor=pointer]
+              - button "60 venues" [ref=f1e181] [cursor=pointer]
+          - generic [ref=f1e186]:
+            - generic [ref=f1e187]:
+              - generic [ref=f1e188]: REALIZED NET
+              - strong [ref=f1e189]: "0.00"
+              - emphasis [ref=f1e190]: SOL
+            - generic [ref=f1e191]:
+              - generic [ref=f1e192]:
+                - generic [ref=f1e196]: Guard
+                - strong [ref=f1e197]: UNSET
+              - generic [ref=f1e198]:
+                - generic [ref=f1e203]: Live readiness
+                - strong [ref=f1e204]: GATED
+              - generic [ref=f1e205]:
+                - generic [ref=f1e209]: Mode
+                - strong [ref=f1e210]: RADAR
+        - generic [ref=f1e211]:
+          - generic [ref=f1e212]:
+            - generic [ref=f1e213]: Realized net
+            - generic [ref=f1e219]: 0.00 SOL
+            - generic [ref=f1e220]: No on-chain settlement yet
+          - generic [ref=f1e221]:
+            - generic [ref=f1e222]: Opportunities
+            - generic [ref=f1e232]: "0"
+            - generic [ref=f1e233]: 0 profitable in recent window
+          - generic [ref=f1e234]:
+            - generic [ref=f1e235]: Bundle land rate
+            - generic [ref=f1e248]: —
+            - generic [ref=f1e249]: 0 landed / 0 submitted
+          - generic [ref=f1e250]:
+            - generic [ref=f1e251]: Feed coverage
+            - generic [ref=f1e258]: 0/0
+            - generic [ref=f1e259]: 0 stale · 406 ms age
+          - generic [ref=f1e260]:
+            - generic [ref=f1e261]: Rent recovered
+            - generic [ref=f1e271]: 0.00 SOL
+            - generic [ref=f1e272]: 0 empty accounts closed
+          - generic [ref=f1e273]:
+            - generic [ref=f1e274]: Guard floor
+            - generic [ref=f1e280]: 0.00001 SOL
+            - generic [ref=f1e281]: 10,000 lamports · risk healthy
+        - generic [ref=f1e282]:
+          - generic [ref=f1e283]:
+            - generic [ref=f1e284]:
+              - generic [ref=f1e289]:
+                - heading "Radar pulse" [level=2] [ref=f1e290]
+                - paragraph [ref=f1e291]: Cumulative detections and realized net across the session
+              - generic [ref=f1e292]:
+                - generic [ref=f1e293]:
+                  - generic [ref=f1e294]: Detections
+                  - generic [ref=f1e296]: Realized SOL
+                - generic [ref=f1e298]: 0 feed updates
+            - img [ref=f1e303]:
+              - generic [ref=f1e306]: 02:50:50
+              - generic [ref=f1e311]:
+                - generic [ref=f1e312]: "0"
+                - generic [ref=f1e314]: "1"
+                - generic [ref=f1e316]: "2"
+                - generic [ref=f1e318]: "3"
+                - generic [ref=f1e320]: "4"
+              - generic [ref=f1e323]:
+                - generic [ref=f1e324]: "0.00"
+                - generic [ref=f1e326]: "0.00"
+                - generic [ref=f1e328]: "0.00"
+                - generic [ref=f1e330]: "0.00"
+                - generic [ref=f1e332]: "0.00"
+          - generic [ref=f1e340]:
+            - generic [ref=f1e341]:
+              - generic [ref=f1e346]:
+                - heading "Engine readiness" [level=2] [ref=f1e347]
+                - paragraph [ref=f1e348]: Green-or-revert execution chain
+              - generic [ref=f1e349]: gated
+            - generic [ref=f1e352]:
+              - generic [ref=f1e353]:
+                - strong [ref=f1e356]: API control plane
+                - generic [ref=f1e357]: 127.0.0.1:8081
+              - generic [ref=f1e358]:
+                - strong [ref=f1e361]: Jupiter quotes
+                - generic [ref=f1e362]: configured
+              - generic [ref=f1e363]:
+                - strong [ref=f1e366]: Jito bundles
+                - generic [ref=f1e367]: disabled
+              - generic [ref=f1e368]:
+                - strong [ref=f1e371]: Profit guard
+                - generic [ref=f1e372]: program id unset
+              - generic [ref=f1e373]:
+                - strong [ref=f1e376]: Wallet
+                - generic [ref=f1e377]: keypair configured
+              - generic [ref=f1e378]:
+                - strong [ref=f1e381]: Rent reclaimer
+                - generic [ref=f1e382]: not available
+            - generic [ref=f1e383]:
+              - generic [ref=f1e384]:
+                - generic [ref=f1e385]: Risk
+                - generic [ref=f1e386]: healthy
+              - paragraph [ref=f1e387]: No active risk reasons. Radar never signs transactions.
+        - generic [ref=f1e388]:
+          - generic [ref=f1e389]:
+            - generic [ref=f1e395]:
+              - heading "Best modeled route" [level=2] [ref=f1e396]
+              - paragraph [ref=f1e397]: Highest net opportunity currently in the local store
+            - generic [ref=f1e398]:
+              - heading "No route has cleared the threshold" [level=3] [ref=f1e402]
+              - paragraph [ref=f1e403]: The radar is scanning every fresh pool. Add more pools or wait for a dislocation.
+              - button "Manage pool feed" [ref=f1e405] [cursor=pointer]
+          - generic [ref=f1e406]:
+            - generic [ref=f1e407]:
+              - generic [ref=f1e414]:
+                - heading "Venue coverage" [level=2] [ref=f1e415]
+                - paragraph [ref=f1e416]: 60 registered programs / local models first, Jupiter fallback
+              - button "All venues" [ref=f1e418] [cursor=pointer]
+            - generic [ref=f1e422]:
+              - generic [ref=f1e424]:
+                - generic [ref=f1e425]: quote only
+                - generic [ref=f1e426]: "40"
+              - generic [ref=f1e430]:
+                - generic [ref=f1e431]: modeled
+                - generic [ref=f1e432]: "8"
+              - generic [ref=f1e436]:
+                - generic [ref=f1e437]: catalogued
+                - generic [ref=f1e438]: "6"
+              - generic [ref=f1e442]:
+                - generic [ref=f1e443]: decoded
+                - generic [ref=f1e444]: "3"
+              - generic [ref=f1e448]:
+                - generic [ref=f1e449]: stake pool
+                - generic [ref=f1e450]: "2"
+              - generic [ref=f1e454]:
+                - generic [ref=f1e455]: disabled
+                - generic [ref=f1e456]: "1"
+            - generic [ref=f1e459]: 8 venues use verified local math; the long tail routes through Jupiter with explicit cost and stale-data checks.
+        - generic [ref=f1e464]:
+          - generic [ref=f1e465]:
+            - generic [ref=f1e466]:
+              - generic [ref=f1e476]:
+                - heading "Recent opportunities" [level=2] [ref=f1e477]
+                - paragraph [ref=f1e478]: Newest detections from the SQLite radar journal
+              - button "Open radar" [ref=f1e480] [cursor=pointer]
+            - generic [ref=f1e484]:
+              - heading "Radar is quiet" [level=3] [ref=f1e493]
+              - paragraph [ref=f1e494]: No opportunities persisted yet. Configure pools and allow the engine to scan.
+          - generic [ref=f1e495]:
+            - generic [ref=f1e496]:
+              - generic [ref=f1e502]:
+                - heading "Execution pulse" [level=2] [ref=f1e503]
+                - paragraph [ref=f1e504]: Recent attempts and settlement truth
+              - generic [ref=f1e505]: 0 recent
+            - generic [ref=f1e508]:
+              - heading "No executions yet" [level=3] [ref=f1e512]
+              - paragraph [ref=f1e513]: Canary simulations and live attempts appear here with real settlement data.
+            - generic [ref=f1e514]:
+              - generic [ref=f1e515]:
+                - generic [ref=f1e516]: Submitted
+                - strong [ref=f1e517]: "0"
+              - generic [ref=f1e518]:
+                - generic [ref=f1e519]: Dropped
+                - strong [ref=f1e520]: "0"
+              - generic [ref=f1e521]:
+                - generic [ref=f1e522]: Reverted
+                - strong [ref=f1e523]: "0"
+              - generic [ref=f1e524]:
+                - generic [ref=f1e525]: Guard fails
+                - strong [ref=f1e526]: "0"
+        - generic [ref=f1e527]:
+          - generic [ref=f1e528]:
+            - generic [ref=f1e529]:
+              - generic [ref=f1e536]:
+                - heading "Strategy edge" [level=2] [ref=f1e537]
+                - paragraph [ref=f1e538]: Modeled net by strategy, ranked
+              - generic [ref=f1e539]: 0 active
+            - generic [ref=f1e541]:
+              - heading "No strategy edge yet" [level=3] [ref=f1e546]
+              - paragraph [ref=f1e547]: Once the radar persists opportunities, per-strategy modeled net appears here.
+          - generic [ref=f1e548]:
+            - generic [ref=f1e549]:
+              - generic [ref=f1e554]:
+                - heading "Event stream" [level=2] [ref=f1e555]
+                - paragraph [ref=f1e556]: Operator-visible engine events
+              - button "System" [ref=f1e558] [cursor=pointer]
+            - generic [ref=f1e565]:
+              - strong [ref=f1e566]: mode changed
+              - generic [ref=f1e567]: api · 11m ago
+      - generic [ref=f1e568]:
+        - generic [ref=f1e569]: SOL BEAST 2.0 · local-first keeper engine
+        - generic [ref=f1e570]: API 127.0.0.1:8081
+        - generic [ref=f1e572]: NO FRONT-RUNNING · NO SANDWICHING · GUARDED BUNDLES
+  - generic [aria-hidden] [ref=f1e573]: "0.00"

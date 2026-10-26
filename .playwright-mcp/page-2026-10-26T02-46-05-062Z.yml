@@ -1,0 +1,36 @@
+- generic [ref=e5]:
+  - generic [ref=e17]:
+    - generic [ref=e18]: SOLANA / GREEN-OR-REVERT
+    - heading "SOL BEAST" [level=1] [ref=e19]
+    - paragraph [ref=e20]: Keeper & liquidity engine command center
+  - generic [ref=e21]:
+    - generic [ref=e28]:
+      - heading "Authenticate the operator" [level=2] [ref=e29]
+      - paragraph [ref=e30]: The API is loopback-only and requires a bearer token. Tokens never leave this tab.
+    - generic [ref=e31]:
+      - generic [ref=e32]:
+        - generic [ref=e33]: Admin or read-only token
+        - generic [ref=e34]:
+          - textbox "Admin or read-only token Show token" [active] [ref=e35]:
+            - /placeholder: paste token from secrets.toml
+          - button "Show token" [ref=e36] [cursor=pointer]
+      - button "Enter command center" [ref=e40] [cursor=pointer]
+    - generic [ref=e43]:
+      - generic [ref=e48]:
+        - strong [ref=e49]: beast run
+        - text: starts the engine and local API
+      - generic [ref=e54]:
+        - text: Tokens are generated in
+        - code [ref=e55]: secrets.toml
+        - text: (0600)
+      - generic [ref=e61]:
+        - text: API proxy
+        - code [ref=e62]: /v1
+        - text: and
+        - code [ref=e63]: /healthz
+        - text: →
+        - code [ref=e64]: 127.0.0.1:8081
+  - generic [ref=e65]:
+    - generic [ref=e66]: READ / WRITE SEPARATION
+    - generic [ref=e67]: LOOPBACK BIND
+    - generic [ref=e68]: NO CUSTODY

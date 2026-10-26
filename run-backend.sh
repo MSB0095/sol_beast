@@ -11,10 +11,10 @@ cd "$SCRIPT_DIR"
 export RUST_LOG=info
 
 echo "🚀 Starting Sol Beast Backend..."
-echo "📍 http://localhost:8080"
-echo "📊 API: http://localhost:8080/api"
+echo "📍 http://127.0.0.1:8081"
+echo "📊 API: http://127.0.0.1:8081/v1"
 echo ""
 echo "Press Ctrl+C to stop"
 echo ""
 
-cargo run --release
+cargo run --release -p beast-cli -- run

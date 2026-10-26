@@ -1,7 +1,54 @@
+[workspace]
+members = ["crates/*"]
+exclude = ["programs/guard"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/MSB0095/sol_beast"
+
+[workspace.dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+borsh = { version = "1.5", features = ["derive"] }
+bs58 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = "0.3"
+hex = "0.4"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled", "chrono", "serde_json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+solana-sdk = "2.1.1"
+solana-program = "2.1.1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1.40", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "limit", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["derive"] }
+
 [package]
 name = "sol_beast"
 version = "0.1.0"
 edition = "2021"
+description = "SOL BEAST legacy pump.fun sniper (dry mode by default)"
+license = "MIT"
+
+[[bin]]
+name = "sol_beast"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1.40", features = ["full"] }
@@ -36,6 +83,4 @@ tower-http = { version = "0.5", features = ["trace", "cors"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 thiserror = "2.0.17"
-flate2 = "1.0"
 sha2 = "0.10"
-

@@ -9,7 +9,7 @@ cd "$SCRIPT_DIR/frontend"
 
 echo "🚀 Starting Sol Beast Frontend..."
 echo "📍 http://localhost:3000"
-echo "⌛ Waiting for backend on http://localhost:8080"
+echo "⌛ Waiting for backend on http://127.0.0.1:8081"
 echo ""
 
 # Wait for the backend API to be reachable before starting Vite.
@@ -17,7 +17,7 @@ echo ""
 waited=0
 max_wait=300
 while [ $waited -lt $max_wait ]; do
-    if curl -s --max-time 2 http://localhost:8080/api/health >/dev/null 2>&1; then
+    if curl -s --max-time 2 http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
         echo "✓ Backend is ready"
         break
     fi

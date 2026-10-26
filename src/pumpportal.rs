@@ -2,10 +2,10 @@ use crate::settings::Settings;
 use futures_util::{stream::StreamExt, SinkExt};
 use log::{debug, error, info};
 use serde_json::{json, Value};
-use std::sync::Arc;
-use std::str::FromStr;
-use tokio::sync::mpsc;
 use solana_program::pubkey::Pubkey;
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 /// Minimal PumpPortal websocket client.
@@ -22,7 +22,10 @@ pub async fn run_pumpportal_ws(
         let (ws_stream, _) = match connect_async(wss_url).await {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to connect to PumpPortal {}: {}. Retrying in 2s", wss_url, e);
+                error!(
+                    "Failed to connect to PumpPortal {}: {}. Retrying in 2s",
+                    wss_url, e
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
@@ -62,12 +65,18 @@ pub async fn run_pumpportal_ws(
                     }
                 },
                 Message::Ping(_) | Message::Pong(_) => continue,
-                Message::Close(_) => { error!("PumpPortal close frame"); break; },
+                Message::Close(_) => {
+                    error!("PumpPortal close frame");
+                    break;
+                }
                 Message::Frame(_) => continue,
             };
 
             // Log raw incoming PumpPortal message (trimmed) to observe real format
-            info!("PumpPortal raw: {}", text.chars().take(200).collect::<String>());
+            info!(
+                "PumpPortal raw: {}",
+                text.chars().take(200).collect::<String>()
+            );
 
             let v: Value = match serde_json::from_str(&text) {
                 Ok(v) => v,
@@ -77,7 +86,8 @@ pub async fn run_pumpportal_ws(
                 }
             };
             // Extract common fields PumpPortal provides when available
-            let sig_opt = v.get("tx_signature")
+            let sig_opt = v
+                .get("tx_signature")
                 .and_then(|s| s.as_str())
                 .or_else(|| v.get("signature").and_then(|s| s.as_str()))
                 .or_else(|| v.get("txSig").and_then(|s| s.as_str()))
@@ -90,9 +100,13 @@ pub async fn run_pumpportal_ws(
             let get_str = |obj: &Value, keys: &[&str]| -> Option<String> {
                 for k in keys {
                     if let Some(vv) = obj.get(*k) {
-                        if let Some(s) = vv.as_str() { return Some(s.to_string()); }
+                        if let Some(s) = vv.as_str() {
+                            return Some(s.to_string());
+                        }
                         // sometimes PumpPortal emits numbers as strings
-                        if let Some(n) = vv.as_u64() { return Some(n.to_string()); }
+                        if let Some(n) = vv.as_u64() {
+                            return Some(n.to_string());
+                        }
                     }
                 }
                 None
@@ -101,22 +115,43 @@ pub async fn run_pumpportal_ws(
             let get_num_u64 = |obj: &Value, keys: &[&str]| -> Option<u64> {
                 for k in keys {
                     if let Some(vv) = obj.get(*k) {
-                        if let Some(n) = vv.as_u64() { return Some(n); }
-                        if let Some(s) = vv.as_str() { if let Ok(p) = s.parse::<u64>() { return Some(p); } }
-                        if let Some(f) = vv.as_f64() { return Some(f as u64); }
+                        if let Some(n) = vv.as_u64() {
+                            return Some(n);
+                        }
+                        if let Some(s) = vv.as_str() {
+                            if let Ok(p) = s.parse::<u64>() {
+                                return Some(p);
+                            }
+                        }
+                        if let Some(f) = vv.as_f64() {
+                            return Some(f as u64);
+                        }
                     }
                 }
                 None
             };
 
-
-
             // Mint: tolerate noisy PumpPortal values and trim whitespace
-            if let Some(raw_mint) = get_str(&v, &["mint", "mintAddress", "tokenMint", "mintAddr", "mint_addr", "mintAddrStr", "mintPubkey", "mint_pubkey", "token_mint"]) {
+            if let Some(raw_mint) = get_str(
+                &v,
+                &[
+                    "mint",
+                    "mintAddress",
+                    "tokenMint",
+                    "mintAddr",
+                    "mint_addr",
+                    "mintAddrStr",
+                    "mintPubkey",
+                    "mint_pubkey",
+                    "token_mint",
+                ],
+            ) {
                 // Normalize: trim whitespace first
                 let mut mint = raw_mint.trim().to_string();
                 // strip trailing non-alphanumeric characters
-                while mint.ends_with(|c: char| !c.is_ascii_alphanumeric()) { mint.pop(); }
+                while mint.ends_with(|c: char| !c.is_ascii_alphanumeric()) {
+                    mint.pop();
+                }
 
                 // First, try the mint as-is (some valid pubkeys can end with "pump")
                 if Pubkey::from_str(&mint).is_ok() {
@@ -128,7 +163,9 @@ pub async fn run_pumpportal_ws(
                     if low.ends_with("pump") {
                         trimmed.truncate(trimmed.len() - 4);
                         trimmed = trimmed.trim().to_string();
-                        while trimmed.ends_with(|c: char| !c.is_ascii_alphanumeric()) { trimmed.pop(); }
+                        while trimmed.ends_with(|c: char| !c.is_ascii_alphanumeric()) {
+                            trimmed.pop();
+                        }
                     }
 
                     if Pubkey::from_str(&trimmed).is_ok() {
@@ -140,12 +177,31 @@ pub async fn run_pumpportal_ws(
             }
 
             // Creator / trader public key
-            if let Some(creator) = get_str(&v, &["traderPublicKey", "creator", "creatorPubkey", "creatorAddress", "trader"]) {
+            if let Some(creator) = get_str(
+                &v,
+                &[
+                    "traderPublicKey",
+                    "creator",
+                    "creatorPubkey",
+                    "creatorAddress",
+                    "trader",
+                ],
+            ) {
                 pumpobj.insert("creator".to_string(), Value::String(creator));
             }
 
             // Bonding curve identifier
-            if let Some(curve) = get_str(&v, &["bondingCurveKey", "bonding_curve", "bondingCurve", "bondingCurvePDA", "bonding_curve_pda", "curve"]) {
+            if let Some(curve) = get_str(
+                &v,
+                &[
+                    "bondingCurveKey",
+                    "bonding_curve",
+                    "bondingCurve",
+                    "bondingCurvePDA",
+                    "bonding_curve_pda",
+                    "curve",
+                ],
+            ) {
                 pumpobj.insert("bonding_curve".to_string(), Value::String(curve));
             }
 
@@ -194,7 +250,13 @@ pub async fn run_pumpportal_ws(
             // be 1_073_000_000_000_000 for a 6-decimal token).  We convert to base units
             // (multiply by 1e6) the same way we convert vSol from SOL to lamports (×1e9).
             // pump.fun tokens always have 6 decimals.
-            if let Some(vv) = v.get("vTokensInBondingCurve").or_else(|| v.get("v_tokens_in_bonding_curve")).or_else(|| v.get("v_tokens")).or_else(|| v.get("virtual_token_reserves")).or_else(|| v.get("vTokens")) {
+            if let Some(vv) = v
+                .get("vTokensInBondingCurve")
+                .or_else(|| v.get("v_tokens_in_bonding_curve"))
+                .or_else(|| v.get("v_tokens"))
+                .or_else(|| v.get("virtual_token_reserves"))
+                .or_else(|| v.get("vTokens"))
+            {
                 let vtok_base_opt: Option<u64> = match vv {
                     Value::Number(n) => {
                         if let Some(f) = n.as_f64() {
@@ -213,25 +275,46 @@ pub async fn run_pumpportal_ws(
                     }
                     Value::String(s) => {
                         if s.contains('.') || s.to_lowercase().contains('e') {
-                            s.parse::<f64>().ok().map(|f| (f * 1_000_000.0).round() as u64)
+                            s.parse::<f64>()
+                                .ok()
+                                .map(|f| (f * 1_000_000.0).round() as u64)
                         } else {
                             s.parse::<u64>().ok().map(|u| {
-                                if u < 1_000_000_000_000 { u * 1_000_000 } else { u }
+                                if u < 1_000_000_000_000 {
+                                    u * 1_000_000
+                                } else {
+                                    u
+                                }
                             })
                         }
                     }
                     _ => None,
                 };
                 if let Some(vtok_base) = vtok_base_opt {
-                    bstate_map.insert("virtual_token_reserves".to_string(), Value::Number(serde_json::Number::from(vtok_base)));
+                    bstate_map.insert(
+                        "virtual_token_reserves".to_string(),
+                        Value::Number(serde_json::Number::from(vtok_base)),
+                    );
                 }
             }
             // Parse mint decimals if PumpPortal provides them (avoid RPC lookup)
-            if let Some(dec) = get_num_u64(&v, &["decimals", "mintDecimals", "mint_decimals", "tokenDecimals"]) {
-                bstate_map.insert("decimals".to_string(), Value::Number(serde_json::Number::from(dec)));
+            if let Some(dec) = get_num_u64(
+                &v,
+                &["decimals", "mintDecimals", "mint_decimals", "tokenDecimals"],
+            ) {
+                bstate_map.insert(
+                    "decimals".to_string(),
+                    Value::Number(serde_json::Number::from(dec)),
+                );
             }
             // Robust parsing for vSol: decide whether value is SOL (float/string with decimal) or lamports (integer)
-            if let Some(vv) = v.get("vSolInBondingCurve").or_else(|| v.get("v_sol_in_bonding_curve")).or_else(|| v.get("v_sol")).or_else(|| v.get("virtual_sol_reserves")).or_else(|| v.get("vSol")) {
+            if let Some(vv) = v
+                .get("vSolInBondingCurve")
+                .or_else(|| v.get("v_sol_in_bonding_curve"))
+                .or_else(|| v.get("v_sol"))
+                .or_else(|| v.get("virtual_sol_reserves"))
+                .or_else(|| v.get("vSol"))
+            {
                 let vsol_lamports_opt: Option<u64> = match vv {
                     Value::Number(n) => {
                         if n.is_f64() {
@@ -251,21 +334,34 @@ pub async fn run_pumpportal_ws(
                     }
                     Value::String(s) => {
                         if s.contains('.') || s.to_lowercase().contains('e') {
-                            s.parse::<f64>().ok().map(|f| (f * 1_000_000_000.0).round() as u64)
+                            s.parse::<f64>()
+                                .ok()
+                                .map(|f| (f * 1_000_000_000.0).round() as u64)
                         } else {
                             s.parse::<u64>().ok().map(|u| {
-                                if u < 1_000_000_000 { u * 1_000_000_000 } else { u }
+                                if u < 1_000_000_000 {
+                                    u * 1_000_000_000
+                                } else {
+                                    u
+                                }
                             })
                         }
                     }
                     _ => None,
                 };
                 if let Some(vsol_lamports) = vsol_lamports_opt {
-                    bstate_map.insert("virtual_sol_reserves".to_string(), Value::Number(serde_json::Number::from(vsol_lamports)));
+                    bstate_map.insert(
+                        "virtual_sol_reserves".to_string(),
+                        Value::Number(serde_json::Number::from(vsol_lamports)),
+                    );
                 }
             }
             // Complete / migrated flag
-            if let Some(complete) = v.get("complete").and_then(|c| c.as_bool()).or_else(|| v.get("migrated").and_then(|c| c.as_bool())) {
+            if let Some(complete) = v
+                .get("complete")
+                .and_then(|c| c.as_bool())
+                .or_else(|| v.get("migrated").and_then(|c| c.as_bool()))
+            {
                 bstate_map.insert("complete".to_string(), Value::Bool(complete));
             }
             if !bstate_map.is_empty() {
@@ -305,7 +401,10 @@ pub async fn run_pumpportal_ws(
 
             // Send the single properly-formatted message to the channel
             if let Err(e) = tx.send(out).await {
-                error!("Failed to forward PumpPortal event into main channel: {}", e);
+                error!(
+                    "Failed to forward PumpPortal event into main channel: {}",
+                    e
+                );
             }
         }
 

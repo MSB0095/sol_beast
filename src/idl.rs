@@ -1,21 +1,18 @@
-use std::collections::HashMap;
-use std::fs;
+use once_cell::sync::Lazy;
 use serde_json::Value;
 use solana_program::instruction::AccountMeta;
 use solana_program::pubkey::Pubkey;
+use std::collections::HashMap;
+use std::fs;
 use std::str::FromStr;
 use std::vec::Vec;
-use once_cell::sync::Lazy;
 
 const SYSTEM_PROGRAM_PUBKEY: &str = "11111111111111111111111111111111";
-const TOKEN_PROGRAM_PUBKEY: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const TOKEN_2022_PROGRAM_PUBKEY: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ASSOCIATED_PROGRAM_PUBKEY: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
 /// Global cache for loaded IDLs to avoid reloading on every call
-static IDL_CACHE: Lazy<HashMap<String, SimpleIdl>> = Lazy::new(|| {
-    load_idls_internal()
-});
+static IDL_CACHE: Lazy<HashMap<String, SimpleIdl>> = Lazy::new(load_idls_internal);
 
 #[derive(Debug, Clone)]
 pub struct SimpleIdl {
@@ -49,7 +46,12 @@ impl SimpleIdl {
             .raw
             .get("instructions")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| format!("IDL for program {} missing instructions array", self.address))?;
+            .ok_or_else(|| {
+                format!(
+                    "IDL for program {} missing instructions array",
+                    self.address
+                )
+            })?;
         let mut instr_val_opt: Option<&Value> = None;
         for instr in instructions {
             if instr.get("name").and_then(|n| n.as_str()) == Some(instr_name) {
@@ -58,22 +60,35 @@ impl SimpleIdl {
             }
         }
         let instr = instr_val_opt.ok_or_else(|| {
-            format!("Instruction '{}' not found in IDL for program {}", instr_name, self.address)
+            format!(
+                "Instruction '{}' not found in IDL for program {}",
+                instr_name, self.address
+            )
         })?;
 
-        let accounts = instr.get("accounts").and_then(|v| v.as_array()).ok_or_else(|| {
-            format!("Instruction '{}' missing accounts array in IDL", instr_name)
-        })?;
+        let accounts = instr
+            .get("accounts")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| format!("Instruction '{}' missing accounts array in IDL", instr_name))?;
         let mut metas: Vec<AccountMeta> = Vec::with_capacity(accounts.len());
         // Build a mutable working context so accounts resolved earlier can be referenced later
         let mut working_context = context.clone();
 
         for account in accounts.iter() {
             // Get the account name for tracking
-            let account_name = account.get("name").and_then(|n| n.as_str()).unwrap_or("<unnamed>");
+            let account_name = account
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("<unnamed>");
             // default flags
-            let is_writable = account.get("writable").and_then(|v| v.as_bool()).unwrap_or(false);
-            let is_signer = account.get("signer").and_then(|v| v.as_bool()).unwrap_or(false);
+            let is_writable = account
+                .get("writable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_signer = account
+                .get("signer")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             // prefer explicit address
             if let Some(addr) = account.get("address").and_then(|a| a.as_str()) {
                 let pk = Pubkey::from_str(addr)?;
@@ -108,9 +123,15 @@ impl SimpleIdl {
                                         .filter_map(|n| n.as_u64().map(|x| x as u8))
                                         .collect();
                                     if bytes.len() == 32 {
-                                        Pubkey::new_from_array(bytes.try_into().map_err(|_: Vec<u8>| "failed to convert vec to array")?)
+                                        Pubkey::new_from_array(bytes.try_into().map_err(
+                                            |_: Vec<u8>| "failed to convert vec to array",
+                                        )?)
                                     } else {
-                                        return Err(format!("Program const value has wrong length: {}", bytes.len()).into());
+                                        return Err(format!(
+                                            "Program const value has wrong length: {}",
+                                            bytes.len()
+                                        )
+                                        .into());
                                     }
                                 } else {
                                     return Err("Program const missing value array".into());
@@ -119,7 +140,10 @@ impl SimpleIdl {
                             "account" => {
                                 // program is a reference to another account in context
                                 if let Some(path) = prog.get("path").and_then(|p| p.as_str()) {
-                                    context.get(path).cloned().ok_or(format!("Context missing program account path: {}", path))?
+                                    context.get(path).cloned().ok_or(format!(
+                                        "Context missing program account path: {}",
+                                        path
+                                    ))?
                                 } else {
                                     return Err("Program account missing path".into());
                                 }
@@ -138,14 +162,20 @@ impl SimpleIdl {
                 };
 
                 // collect seeds
-                let seeds_val = pda_obj.get("seeds").and_then(|s| s.as_array()).ok_or("pda.seeds missing")?;
+                let seeds_val = pda_obj
+                    .get("seeds")
+                    .and_then(|s| s.as_array())
+                    .ok_or("pda.seeds missing")?;
                 let mut seeds_out: Vec<Vec<u8>> = Vec::new();
                 for seed in seeds_val.iter() {
                     let kind = seed.get("kind").and_then(|k| k.as_str()).unwrap_or("const");
                     match kind {
                         "const" => {
                             if let Some(arr) = seed.get("value").and_then(|v| v.as_array()) {
-                                let bytes: Vec<u8> = arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect();
+                                let bytes: Vec<u8> = arr
+                                    .iter()
+                                    .filter_map(|n| n.as_u64().map(|x| x as u8))
+                                    .collect();
                                 seeds_out.push(bytes);
                             } else {
                                 return Err("const seed missing value".into());
@@ -206,7 +236,10 @@ impl SimpleIdl {
                     }
                     "token_program" | "tokenProgram" => {
                         // Check context first (caller may provide Token-2022 or SPL Token)
-                        let pk = if let Some(tp) = working_context.get("token_program").or_else(|| working_context.get("tokenProgram")) {
+                        let pk = if let Some(tp) = working_context
+                            .get("token_program")
+                            .or_else(|| working_context.get("tokenProgram"))
+                        {
                             *tp
                         } else {
                             // Default to Token-2022 for pump.fun tokens
@@ -221,12 +254,17 @@ impl SimpleIdl {
                     }
                     // derive associated token account if user + mint present
                     "associated_user" | "associatedUser" => {
-                        if let (Some(user), Some(mint)) = (working_context.get("user"), working_context.get("mint")) {
+                        if let (Some(user), Some(mint)) =
+                            (working_context.get("user"), working_context.get("mint"))
+                        {
                             // Use the correct token program for ATA derivation
-                            let token_prog = working_context.get("token_program")
+                            let token_prog = working_context
+                                .get("token_program")
                                 .or_else(|| working_context.get("tokenProgram"))
                                 .cloned()
-                                .unwrap_or_else(|| Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap());
+                                .unwrap_or_else(|| {
+                                    Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap()
+                                });
                             let ata = spl_associated_token_account::get_associated_token_address_with_program_id(user, mint, &token_prog);
                             if is_signer {
                                 metas.push(AccountMeta::new(ata, true));
@@ -245,11 +283,19 @@ impl SimpleIdl {
                     }
                     "associated_bonding_curve" | "associatedBondingCurve" => {
                         // Derive associated token account for bonding curve
-                        if let (Some(bonding_curve), Some(mint)) = (working_context.get("bondingCurve").or_else(|| working_context.get("bonding_curve")), working_context.get("mint")) {
-                            let token_prog = working_context.get("token_program")
+                        if let (Some(bonding_curve), Some(mint)) = (
+                            working_context
+                                .get("bondingCurve")
+                                .or_else(|| working_context.get("bonding_curve")),
+                            working_context.get("mint"),
+                        ) {
+                            let token_prog = working_context
+                                .get("token_program")
                                 .or_else(|| working_context.get("tokenProgram"))
                                 .cloned()
-                                .unwrap_or_else(|| Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap());
+                                .unwrap_or_else(|| {
+                                    Pubkey::from_str(TOKEN_2022_PROGRAM_PUBKEY).unwrap()
+                                });
                             let ata = spl_associated_token_account::get_associated_token_address_with_program_id(bonding_curve, mint, &token_prog);
                             if is_signer {
                                 metas.push(AccountMeta::new(ata, true));
@@ -269,7 +315,10 @@ impl SimpleIdl {
                     "fee_recipient" | "feeRecipient" => {
                         // fee_recipient is typically a global PDA or the protocol fee account
                         // For pump.fun, check if it's provided in context, otherwise compute standard PDA
-                        if let Some(pk) = working_context.get("fee_recipient").or_else(|| working_context.get("feeRecipient")) {
+                        if let Some(pk) = working_context
+                            .get("fee_recipient")
+                            .or_else(|| working_context.get("feeRecipient"))
+                        {
                             if is_signer {
                                 metas.push(AccountMeta::new(*pk, true));
                             } else if is_writable {
@@ -279,7 +328,8 @@ impl SimpleIdl {
                             }
                         } else {
                             // Use a well-known fee recipient (pump.fun uses global PDA typically)
-                            let (global_pda, _) = Pubkey::find_program_address(&[b"global"], &self.address);
+                            let (global_pda, _) =
+                                Pubkey::find_program_address(&[b"global"], &self.address);
                             if is_writable {
                                 metas.push(AccountMeta::new(global_pda, false));
                             } else {
@@ -324,14 +374,14 @@ impl SimpleIdl {
 /// Internal function that performs the actual IDL loading
 fn load_idls_internal() -> HashMap<String, SimpleIdl> {
     let mut m = HashMap::new();
-    
+
     // Try loading from bundled idl/ directory first (preferred)
     let bundled_candidates = vec![
         ("pumpfun", "idl/pumpfun.json"),
         ("pumpfunamm", "idl/pumpfunamm.json"),
         ("pumpfunfees", "idl/pumpfunfees.json"),
     ];
-    
+
     for (key, path) in bundled_candidates {
         if std::path::Path::new(path).exists() {
             match SimpleIdl::load_from(path) {
@@ -345,7 +395,7 @@ fn load_idls_internal() -> HashMap<String, SimpleIdl> {
             }
         }
     }
-    
+
     // Fallback to legacy root-level files if bundled not found
     if m.is_empty() {
         log::debug!("No bundled IDL files found, trying legacy root-level files");
@@ -365,13 +415,13 @@ fn load_idls_internal() -> HashMap<String, SimpleIdl> {
             }
         }
     }
-    
+
     if m.is_empty() {
         log::warn!("No IDL files loaded - transactions will use fallback builders");
     } else {
         log::info!("Loaded {} IDL file(s)", m.len());
     }
-    
+
     m
 }
 
@@ -386,8 +436,8 @@ pub fn load_all_idls() -> HashMap<String, SimpleIdl> {
 #[cfg(test)]
 mod tests {
     use super::load_all_idls;
-    use std::collections::HashMap;
     use solana_program::pubkey::Pubkey;
+    use std::collections::HashMap;
     use std::str::FromStr;
 
     #[test]
@@ -406,7 +456,7 @@ mod tests {
             std::path::Path::new("idl/pumpfun.json").exists(),
             "Bundled pumpfun.json should exist in idl/ directory"
         );
-        
+
         let idls = load_all_idls();
         assert!(
             idls.contains_key("pumpfun"),
@@ -417,59 +467,76 @@ mod tests {
     #[test]
     fn test_idl_has_buy_instruction() {
         let idls = load_all_idls();
-        
+
         // Pumpfun IDL must be present; fail fast if it is missing
         let idl = idls
             .get("pumpfun")
             .expect("pumpfun IDL should be loaded for buy instruction test");
-        
+
         let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
         assert!(instructions.is_some(), "IDL should have instructions array");
-        
-        let has_buy = instructions.unwrap().iter().any(|instr| {
-            instr.get("name").and_then(|n| n.as_str()) == Some("buy")
-        });
+
+        let has_buy = instructions
+            .unwrap()
+            .iter()
+            .any(|instr| instr.get("name").and_then(|n| n.as_str()) == Some("buy"));
         assert!(has_buy, "IDL should contain 'buy' instruction");
     }
 
     #[test]
     fn test_idl_has_sell_instruction() {
         let idls = load_all_idls();
-        
+
         // Pumpfun IDL must be present; fail fast if it is missing
         let idl = idls
             .get("pumpfun")
             .expect("pumpfun IDL should be loaded for sell instruction test");
-        
+
         let instructions = idl.raw.get("instructions").and_then(|v| v.as_array());
         assert!(instructions.is_some(), "IDL should have instructions array");
-        
-        let has_sell = instructions.unwrap().iter().any(|instr| {
-            instr.get("name").and_then(|n| n.as_str()) == Some("sell")
-        });
+
+        let has_sell = instructions
+            .unwrap()
+            .iter()
+            .any(|instr| instr.get("name").and_then(|n| n.as_str()) == Some("sell"));
         assert!(has_sell, "IDL should contain 'sell' instruction");
     }
 
     #[test]
     fn test_build_buy_accounts_with_context() {
         let idls = load_all_idls();
-        
+
         if let Some(idl) = idls.get("pumpfun") {
             // Create a deterministic test context with valid Solana pubkeys
             let mut context = HashMap::new();
-            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111111").unwrap());
-            context.insert("user".to_string(), Pubkey::from_str("11111111111111111111111111111111").unwrap());
-            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("CKu6dsG7HutDdWZkrjQRL75T1NsYKQc4Qh6TRD67Rr4q").unwrap());
-            context.insert("feeRecipient".to_string(), Pubkey::from_str("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin").unwrap());
-            
+            context.insert(
+                "mint".to_string(),
+                Pubkey::from_str("So11111111111111111111111111111111111111111").unwrap(),
+            );
+            context.insert(
+                "user".to_string(),
+                Pubkey::from_str("11111111111111111111111111111111").unwrap(),
+            );
+            context.insert(
+                "bondingCurve.creator".to_string(),
+                Pubkey::from_str("CKu6dsG7HutDdWZkrjQRL75T1NsYKQc4Qh6TRD67Rr4q").unwrap(),
+            );
+            context.insert(
+                "feeRecipient".to_string(),
+                Pubkey::from_str("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin").unwrap(),
+            );
+
             // Try to build accounts for buy instruction
             let result = idl.build_accounts_for("buy", &context);
-            
+
             // Should either succeed or fail with a clear error message
             match result {
                 Ok(metas) => {
                     assert!(!metas.is_empty(), "Buy instruction should have accounts");
-                    assert!(metas.len() >= 10, "Buy instruction should have at least 10 accounts");
+                    assert!(
+                        metas.len() >= 10,
+                        "Buy instruction should have at least 10 accounts"
+                    );
                 }
                 Err(e) => {
                     // If it fails, error should mention which account couldn't be resolved
@@ -487,24 +554,42 @@ mod tests {
     #[test]
     fn test_build_sell_accounts_with_context() {
         let idls = load_all_idls();
-        
+
         if let Some(idl) = idls.get("pumpfun") {
             // Create a deterministic test context with valid Solana pubkeys
             let mut context = HashMap::new();
-            context.insert("mint".to_string(), Pubkey::from_str("So11111111111111111111111111111111111111111").unwrap());
-            context.insert("user".to_string(), Pubkey::from_str("11111111111111111111111111111111").unwrap());
-            context.insert("bondingCurve.creator".to_string(), Pubkey::from_str("CKu6dsG7HutDdWZkrjQRL75T1NsYKQc4Qh6TRD67Rr4q").unwrap());
-            context.insert("feeRecipient".to_string(), Pubkey::from_str("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin").unwrap());
-            context.insert("feeProgram".to_string(), Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ").unwrap());
-            
+            context.insert(
+                "mint".to_string(),
+                Pubkey::from_str("So11111111111111111111111111111111111111111").unwrap(),
+            );
+            context.insert(
+                "user".to_string(),
+                Pubkey::from_str("11111111111111111111111111111111").unwrap(),
+            );
+            context.insert(
+                "bondingCurve.creator".to_string(),
+                Pubkey::from_str("CKu6dsG7HutDdWZkrjQRL75T1NsYKQc4Qh6TRD67Rr4q").unwrap(),
+            );
+            context.insert(
+                "feeRecipient".to_string(),
+                Pubkey::from_str("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin").unwrap(),
+            );
+            context.insert(
+                "feeProgram".to_string(),
+                Pubkey::from_str("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ").unwrap(),
+            );
+
             // Try to build accounts for sell instruction
             let result = idl.build_accounts_for("sell", &context);
-            
+
             // Should either succeed or fail with a clear error message
             match result {
                 Ok(metas) => {
                     assert!(!metas.is_empty(), "Sell instruction should have accounts");
-                    assert!(metas.len() >= 10, "Sell instruction should have at least 10 accounts");
+                    assert!(
+                        metas.len() >= 10,
+                        "Sell instruction should have at least 10 accounts"
+                    );
                 }
                 Err(e) => {
                     // If it fails, error should mention which account couldn't be resolved
@@ -522,7 +607,7 @@ mod tests {
     #[test]
     fn test_idl_address_matches_program_id() {
         let idls = load_all_idls();
-        
+
         if let Some(idl) = idls.get("pumpfun") {
             let expected_program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
             assert_eq!(
@@ -539,13 +624,13 @@ mod tests {
             std::path::Path::new("idl/pumpfunfees.json").exists(),
             "Bundled pumpfunfees.json should exist in idl/ directory"
         );
-        
+
         let idls = load_all_idls();
         assert!(
             idls.contains_key("pumpfunfees"),
             "Should load bundled pumpfunfees.json into IDL map"
         );
-        
+
         let idl = idls.get("pumpfunfees").unwrap();
         let expected_program_id = "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ";
         assert_eq!(
@@ -561,13 +646,13 @@ mod tests {
             std::path::Path::new("idl/pumpfunamm.json").exists(),
             "Bundled pumpfunamm.json should exist in idl/ directory"
         );
-        
+
         let idls = load_all_idls();
         assert!(
             idls.contains_key("pumpfunamm"),
             "Should load bundled pumpfunamm.json into IDL map"
         );
-        
+
         let idl = idls.get("pumpfunamm").unwrap();
         let expected_program_id = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
         assert_eq!(

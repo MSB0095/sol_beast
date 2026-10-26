@@ -81,7 +81,9 @@ pub struct Holding {
     pub onchain: Option<OnchainFullMetadata>,
 }
 
-fn default_token_decimals_u8() -> u8 { 6 }
+fn default_token_decimals_u8() -> u8 {
+    6
+}
 pub type PriceCache = LruCache<String, (Instant, f64)>;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -100,10 +102,10 @@ impl OffchainTokenMetadata {
     /// `name` and `symbol` from common alternative fields in `extras`.
     pub fn normalize(&mut self) {
         fn norm_opt(mut s: Option<String>) -> Option<String> {
-            s.as_mut().map(|v| {
+            if let Some(v) = s.as_mut() {
                 let trimmed = v.trim().trim_end_matches('\u{0}').to_string();
                 *v = trimmed;
-            });
+            }
             s.and_then(|v| {
                 let trimmed = v.trim().trim_end_matches('\u{0}').to_string();
                 if trimmed.is_empty() {
@@ -141,7 +143,7 @@ impl OffchainTokenMetadata {
                         None
                     }
                     serde_json::Value::Array(arr) => {
-                        if let Some(serde_json::Value::String(s4)) = arr.get(0) {
+                        if let Some(serde_json::Value::String(s4)) = arr.first() {
                             return Some(s4.clone());
                         }
                         None
@@ -256,8 +258,6 @@ pub struct AccountInfoResult {
     pub data: Vec<String>,
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::BondingCurveState;
@@ -277,11 +277,20 @@ mod tests {
             is_mayhem_mode: false,
         };
         let price_opt = state.spot_price_sol_per_token();
-        assert!(price_opt.is_some(), "spot_price_sol_per_token should not be None");
+        assert!(
+            price_opt.is_some(),
+            "spot_price_sol_per_token should not be None"
+        );
         let price = price_opt.unwrap();
         let expected = 30.0 / 1_073_000_191.0_f64; // ~2.795e-8
         let diff = (price - expected).abs();
-        assert!(diff < 1e-15, "price mismatch: got {} expected {} diff {}", price, expected, diff);
+        assert!(
+            diff < 1e-15,
+            "price mismatch: got {} expected {} diff {}",
+            price,
+            expected,
+            diff
+        );
     }
 
     #[test]
@@ -300,14 +309,26 @@ mod tests {
 
         // Name in nested object with locale
         let v = json!({ "name": { "en": "Localized Token" }, "symbol": "LCL" });
-        let mut m2 = OffchainTokenMetadata { name: None, symbol: None, description: None, image: None, extras: Some(v) };
+        let mut m2 = OffchainTokenMetadata {
+            name: None,
+            symbol: None,
+            description: None,
+            image: None,
+            extras: Some(v),
+        };
         m2.normalize();
         assert_eq!(m2.name.as_deref(), Some("Localized Token"));
         assert_eq!(m2.symbol.as_deref(), Some("LCL"));
 
         // Name in properties.name
         let v = json!({ "properties": { "name": "Properties Token" }, "ticker": "PRP" });
-        let mut m3 = OffchainTokenMetadata { name: None, symbol: None, description: None, image: None, extras: Some(v) };
+        let mut m3 = OffchainTokenMetadata {
+            name: None,
+            symbol: None,
+            description: None,
+            image: None,
+            extras: Some(v),
+        };
         m3.normalize();
         assert_eq!(m3.name.as_deref(), Some("Properties Token"));
         assert_eq!(m3.symbol.as_deref(), Some("PRP"));
@@ -325,7 +346,10 @@ mod tests {
             creator: None,
             is_mayhem_mode: false,
         };
-        assert!(!normal_state.is_mayhem_mode, "Standard token should not be in mayhem mode");
+        assert!(
+            !normal_state.is_mayhem_mode,
+            "Standard token should not be in mayhem mode"
+        );
 
         let mayhem_state = BondingCurveState {
             virtual_sol_reserves: 30_000_000_000u64,
@@ -337,6 +361,9 @@ mod tests {
             creator: None,
             is_mayhem_mode: true,
         };
-        assert!(mayhem_state.is_mayhem_mode, "Mayhem token should be in mayhem mode");
+        assert!(
+            mayhem_state.is_mayhem_mode,
+            "Mayhem token should be in mayhem mode"
+        );
     }
 }

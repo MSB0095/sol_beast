@@ -1,0 +1,23 @@
+[package]
+name = "beast-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SOL BEAST core types, layered configuration, economics and risk engine"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

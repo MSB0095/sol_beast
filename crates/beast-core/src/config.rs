@@ -53,6 +53,8 @@ pub struct BeastConfig {
     #[serde(default)]
     pub guard: GuardConfig,
     #[serde(default)]
+    pub safety: SafetyConfig,
+    #[serde(default)]
     pub venues: VenueConfig,
     #[serde(default)]
     pub pools: Vec<PoolConfig>,
@@ -459,6 +461,22 @@ impl Default for GuardConfig {
             mode: GuardMode::Lite,
             program_id: String::new(),
             min_profit_lamports: default_guard_min_profit(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SafetyConfig {
+    /// Allow live execution without a deployed on-chain guard program.
+    /// If true, the bundle has NO on-chain revert guarantee. Only off-chain checks apply.
+    pub allow_unguarded_live: bool,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            allow_unguarded_live: false,
         }
     }
 }

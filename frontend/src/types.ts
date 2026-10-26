@@ -78,6 +78,7 @@ export interface GuardStatus {
   mode: string
   program_id_configured: boolean
   min_profit_lamports: number
+  unguarded_live_allowed: boolean
 }
 
 export interface Status {

@@ -161,12 +161,20 @@ export function Overview({
             <div>
               <ShieldCheck size={15} />
               <span>Guard</span>
-              <strong>{status.guard.program_id_configured ? 'ARMED' : 'UNSET'}</strong>
+              <strong>
+                {status.guard.unguarded_live_allowed && status.real && !status.guard.program_id_configured
+                  ? 'UNGUARDED'
+                  : status.guard.program_id_configured
+                  ? 'ARMED'
+                  : 'UNSET'}
+              </strong>
             </div>
             <div>
               <LockKeyhole size={15} />
               <span>Live readiness</span>
-              <strong>{liveReady ? 'READY' : 'GATED'}</strong>
+              <strong>
+                {liveReady ? 'READY' : status.guard.unguarded_live_allowed && status.real && !status.guard.program_id_configured ? 'UNGUARDED' : 'GATED'}
+              </strong>
             </div>
             <div>
               <Gauge size={15} />
@@ -176,6 +184,20 @@ export function Overview({
           </div>
         </div>
       </section>
+
+      {status.guard.unguarded_live_allowed && status.real && !status.guard.program_id_configured && (
+        <div className="unguarded-banner">
+          <div className="unguarded-content">
+            <span className="unguarded-icon">⚠️</span>
+            <div>
+              <strong>UNGUARDED LIVE MODE ACTIVE</strong>
+              <br />
+              No on-chain profit guard deployed. Bundles have NO automatic revert guarantee. Only off-chain checks apply.
+              You accept full risk of any outcome. Set [safety] allow_unguarded_live = false to re-enable guard requirement.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="stats-grid">
         <StatCard

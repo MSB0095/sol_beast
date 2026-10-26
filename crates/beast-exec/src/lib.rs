@@ -117,6 +117,15 @@ impl Default for ExecutionConfig {
 }
 
 impl ExecutionConfig {
+    pub fn guard_enabled(&self) -> bool {
+        !self.guard_program.is_empty()
+            && self
+                .guard_program
+                .parse::<Pubkey>()
+                .map(|pubkey| pubkey != Pubkey::default())
+                .unwrap_or(false)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.min_profit_lamports == 0 {
             return Err(ExecutionError::Config(
@@ -143,12 +152,11 @@ impl ExecutionConfig {
                 "max_tip_lamports must be >= 1000".into(),
             ));
         }
-        if self.guard_program.is_empty() {
-            return Err(ExecutionError::GuardDisabled);
+        if !self.guard_program.is_empty() {
+            self.guard_program
+                .parse::<Pubkey>()
+                .map_err(|error| ExecutionError::Config(format!("guard_program: {error}")))?;
         }
-        self.guard_program
-            .parse::<Pubkey>()
-            .map_err(|error| ExecutionError::Config(format!("guard_program: {error}")))?;
         if self.transaction_fee_lamports == 0 {
             return Err(ExecutionError::Config(
                 "transaction_fee_lamports must be > 0".into(),
@@ -304,12 +312,11 @@ impl Executor {
         &self.wallet
     }
 
-    /// Prepare a closed Jupiter cycle with an on-chain profit guard.
+    /// Prepare a closed Jupiter cycle with an optional on-chain profit guard.
     ///
     /// The cycle may contain two or three legs (Jito caps a bundle at five
-    /// transactions: swaps + guard + tip). This function performs quotes and
-    /// signing only. It never sends a transaction; `submit` is a separate,
-    /// explicit step.
+    /// transactions). This function performs quotes and signing only. It never
+    /// sends a transaction; `submit` is a separate, explicit step.
     pub async fn prepare_cycle(&self, opportunity: &Opportunity) -> Result<BundlePlan> {
         let legs = &opportunity.legs;
         if !(2..=MAX_CYCLE_LEGS).contains(&legs.len()) {
@@ -321,7 +328,7 @@ impl Executor {
         let start = parse_mint(&legs[0].mint_in, "start mint")?;
         if start.to_string() != WSOL_MINT {
             return Err(ExecutionError::Unsupported(format!(
-                "live guard only supports WSOL-starting cycles, got {start}"
+                "live executor only supports WSOL-starting cycles, got {start}"
             )));
         }
 
@@ -382,17 +389,23 @@ impl Executor {
         }
         let gross_min = leg_amount - amount_in;
 
-        let transaction_count = legs.len() + 2;
+        let guard_enabled = self.config.guard_enabled();
+        // Guarded bundle: swaps + guard + tip (4 tx max for 2 legs). Unguarded: swaps + tip (3 tx max for 2 legs).
+        let transaction_count = legs.len() + if guard_enabled { 2 } else { 1 };
         let intermediate_accounts = legs.len() - 1;
         let fees_lamports = self
             .config
             .total_costs(transaction_count, intermediate_accounts)?;
         let tip_lamports = self.choose_tip(gross_min, fees_lamports)?;
-        let guard_required = self.config.guard_threshold(
-            start_balance,
-            tip_lamports,
-            self.config.transaction_fee_lamports,
-        )?;
+        let guard_required = if guard_enabled {
+            self.config.guard_threshold(
+                start_balance,
+                tip_lamports,
+                self.config.transaction_fee_lamports,
+            )?
+        } else {
+            0
+        };
 
         let (blockhash_string, _) = self.rpc.get_latest_blockhash().await?;
         let blockhash = parse_hash(&blockhash_string)?;
@@ -400,16 +413,6 @@ impl Executor {
         for quote in quotes {
             swaps.push(self.build_swap_transaction(quote, blockhash).await?);
         }
-        let guard = build_guard_transaction(
-            &self.config.guard_program,
-            self.wallet.pubkey(),
-            start_balance,
-            self.config.min_profit_lamports,
-            tip_lamports,
-            self.config.transaction_fee_lamports,
-            blockhash,
-            &self.wallet.keypair,
-        )?;
         let tip_account = self.choose_tip_account().await?;
         let tip = build_tip_transaction(
             self.wallet.pubkey(),
@@ -425,8 +428,20 @@ impl Executor {
             encoded_transactions.push(swap.encoded);
             signatures.push(swap.signature);
         }
-        encoded_transactions.push(guard.encoded);
-        signatures.push(guard.signature);
+        if guard_enabled {
+            let guard = build_guard_transaction(
+                &self.config.guard_program,
+                self.wallet.pubkey(),
+                start_balance,
+                self.config.min_profit_lamports,
+                tip_lamports,
+                self.config.transaction_fee_lamports,
+                blockhash,
+                &self.wallet.keypair,
+            )?;
+            encoded_transactions.push(guard.encoded);
+            signatures.push(guard.signature);
+        }
         encoded_transactions.push(tip.encoded);
         signatures.push(tip.signature);
 
@@ -734,22 +749,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_guard_program() {
+    fn accepts_empty_guard_program_for_unguarded_mode() {
         let config = ExecutionConfig::default();
-        assert!(matches!(
-            config.validate(),
-            Err(ExecutionError::GuardDisabled)
-        ));
-        let config = ExecutionConfig::default();
-        assert!(matches!(
-            config.validate(),
-            Err(ExecutionError::GuardDisabled)
-        ));
+        assert!(config.validate().is_ok());
         let config = ExecutionConfig {
-            guard_program: "11111111111111111111111111111111".into(),
+            guard_program: "11111111111111111111111111111112".into(), // not system program
             ..ExecutionConfig::default()
         };
         assert!(config.validate().is_ok());
+        let config = ExecutionConfig {
+            guard_program: "11111111111111111111111111111112".into(),
+            ..ExecutionConfig::default()
+        };
+        assert!(config.guard_enabled());
     }
 
     #[test]

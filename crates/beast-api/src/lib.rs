@@ -529,6 +529,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Value>> {
             "mode": state.config.guard.mode,
             "program_id_configured": !state.config.guard.program_id.is_empty(),
             "min_profit_lamports": state.config.guard.min_profit_lamports,
+            "unguarded_live_allowed": state.config.safety.allow_unguarded_live,
         },
         "jito_enabled": state.config.jito.enabled,
         "wallet": {

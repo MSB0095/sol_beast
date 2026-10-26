@@ -47,6 +47,20 @@ export function ExecutionPage({ data, onRefresh }: { data: Dashboard | null; onR
 
   return (
     <div className="page-grid">
+      {data?.status.guard.unguarded_live_allowed && data?.status.real && !data?.status.guard.program_id_configured && (
+        <div className="unguarded-banner">
+          <div className="unguarded-content">
+            <span className="unguarded-icon">⚠️</span>
+            <div>
+              <strong>UNGUARDED LIVE MODE ACTIVE</strong>
+              <br />
+              No on-chain profit guard deployed. Bundles have NO automatic revert guarantee. Only off-chain checks apply.
+              You accept full risk of any outcome. Set [safety] allow_unguarded_live = false to re-enable guard requirement.
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="stats-grid stats-grid-4">
         <StatCard label="Simulated" value={String(metrics?.simulated || 0)} detail="Bundles that passed simulation" icon={<CheckCircle2 size={18} />} tone="good" mono />
         <StatCard label="Submitted" value={String(metrics?.bundles_submitted || 0)} detail={`${metrics?.bundles_landed || 0} landed`} icon={<Boxes size={18} />} tone="accent" mono />
@@ -57,7 +71,16 @@ export function ExecutionPage({ data, onRefresh }: { data: Dashboard | null; onR
       <section className="gate-strip">
         <div className="gate-item">
           <span className="gate-icon"><ShieldCheck size={17} /></span>
-          <div><strong>On-chain guard</strong><span>{data?.status.guard.program_id_configured ? `${data.status.guard.mode} / armed` : 'program id unset'}</span></div>
+          <div>
+            <strong>On-chain guard</strong>
+            <span>
+              {data?.status.guard.unguarded_live_allowed && data?.status.real && !data?.status.guard.program_id_configured
+                ? 'UNGUARDED — no on-chain revert'
+                : data?.status.guard.program_id_configured
+                  ? `${data.status.guard.mode} / armed`
+                  : 'program id unset'}
+            </span>
+          </div>
         </div>
         <div className="gate-item">
           <span className="gate-icon"><Boxes size={17} /></span>

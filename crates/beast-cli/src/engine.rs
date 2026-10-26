@@ -127,13 +127,17 @@ pub async fn run(options: RunOptions) -> Result<()> {
         if config.guard.mode != GuardMode::Program {
             bail!("live mode requires [guard] mode=\"program\"");
         }
-        if config
+        let guard_id_valid = config
             .guard
             .program_id
             .parse::<solana_sdk::pubkey::Pubkey>()
-            .is_err()
-        {
-            bail!("live mode requires a valid [guard] program_id");
+            .is_ok();
+        if !guard_id_valid {
+            if config.safety.allow_unguarded_live {
+                tracing::error!("CRITICAL: RUNNING UNGUARDED LIVE - NO ON-CHAIN REVERT GUARANTEE. Only off-chain checks apply.");
+            } else {
+                bail!("live mode requires a valid [guard] program_id (or set [safety] allow_unguarded_live = true to run without on-chain guard - NO REVERT GUARANTEE)");
+            }
         }
         if !config.jito.enabled {
             bail!("live mode requires [jito] enabled=true (bundle-only policy)");
@@ -350,18 +354,30 @@ fn build_executor(
     effective: Mode,
     cli_real: bool,
 ) -> Result<Option<Arc<Executor>>> {
-    if config.guard.program_id.is_empty() {
-        if effective.is_live() {
-            bail!("live mode requires [guard] program_id");
-        }
-        return Ok(None);
-    }
-    let guard_program = config
+    let guard_id_valid = config
         .guard
         .program_id
         .parse::<solana_sdk::pubkey::Pubkey>()
-        .map_err(|error| anyhow::anyhow!("invalid guard program id: {error}"))?;
-    let _ = guard_program;
+        .is_ok();
+    if config.guard.program_id.is_empty() || !guard_id_valid {
+        if effective.is_live() {
+            if config.safety.allow_unguarded_live {
+                tracing::error!("CRITICAL: RUNNING UNGUARDED LIVE - NO ON-CHAIN REVERT GUARANTEE. Only off-chain checks apply.");
+            } else {
+                bail!("live mode requires [guard] program_id (or set [safety] allow_unguarded_live = true to run without on-chain guard - NO REVERT GUARANTEE)");
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+    if guard_id_valid {
+        let guard_program = config
+            .guard
+            .program_id
+            .parse::<solana_sdk::pubkey::Pubkey>()
+            .map_err(|error| anyhow::anyhow!("invalid guard program id: {error}"))?;
+        let _ = guard_program;
+    }
     let Some(wallet) = wallet else {
         return Ok(None);
     };

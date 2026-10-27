@@ -540,7 +540,8 @@ fn decoder_needs_reserves(decoder: Option<DecoderKind>) -> bool {
     matches!(
         decoder,
         Some(
-            DecoderKind::RaydiumAmmV4
+            DecoderKind::RaydiumCpmm
+                | DecoderKind::RaydiumAmmV4
                 | DecoderKind::PumpSwap
                 | DecoderKind::SplTokenSwap
                 | DecoderKind::MeteoraDammV1

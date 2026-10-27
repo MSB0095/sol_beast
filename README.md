@@ -106,11 +106,20 @@ cargo run --release -p beast-cli -- check
 # Write config.toml + secrets.toml (0600, two distinct API tokens).
 cargo run --release -p beast-cli -- init
 
-# Discover pools for a locally modelled venue.
-cargo run --release -p beast-cli -- discover --venue raydium_cpmm --limit 50 --save
+# Discover one WSOL/USDC pair for a locally modelled venue.
+cargo run --release -p beast-cli -- discover --venue raydium_cpmm \
+  --mint So11111111111111111111111111111111111111112 \
+  --mint EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --limit 50 --save
 
 # Radar: price routes and persist opportunities; never send.
 cargo run --release -p beast-cli -- run
+
+# Simulate a local two-leg WSOL flash cycle through two Raydium CPMM pools.
+# Add --probe only to prove mechanics with a prefunded, deliberately
+# unprofitable cycle; both commands simulate and never send.
+cargo run --release -p beast-cli -- flash-cycle \
+  --pool-in <cpmm-pool-a> --pool-out <cpmm-pool-b> --amount 1000000
 ```
 
 Frontend:

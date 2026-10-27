@@ -63,6 +63,81 @@ pub struct StakePoolState {
     pub exchange_rate: f64,
 }
 
+/// Byte offsets that identify the two mints in a pool account.
+///
+/// Discovery cannot ask `getProgramAccounts` to return only the pools it wants
+/// without knowing where the mints live. These offsets come from the same
+/// layouts the decoders use, so a filter can never drift away from a decoder
+/// silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolLayout {
+    pub mint_a_offset: usize,
+    pub mint_b_offset: usize,
+    /// Exact account size when the program uses a fixed-size pool account and
+    /// the size has been verified on mainnet. `None` when variable-size or
+    /// unverified: an incorrect `dataSize` filter returns zero pools, which is
+    /// worse than filtering only by mint.
+    pub account_size: Option<usize>,
+}
+
+/// Return the mint offsets and optional exact account size for a decoder.
+pub fn pool_layout(decoder: DecoderKind) -> Option<PoolLayout> {
+    let layout = match decoder {
+        DecoderKind::RaydiumCpmm => PoolLayout {
+            mint_a_offset: 168,
+            mint_b_offset: 200,
+            account_size: Some(637),
+        },
+        DecoderKind::RaydiumAmmV4 => PoolLayout {
+            mint_a_offset: 400,
+            mint_b_offset: 432,
+            account_size: Some(752),
+        },
+        DecoderKind::RaydiumClmm => PoolLayout {
+            mint_a_offset: 73,
+            mint_b_offset: 105,
+            account_size: None,
+        },
+        DecoderKind::OrcaWhirlpool => PoolLayout {
+            mint_a_offset: 101,
+            mint_b_offset: 181,
+            account_size: Some(653),
+        },
+        DecoderKind::PumpSwap => PoolLayout {
+            mint_a_offset: 43,
+            mint_b_offset: 75,
+            account_size: None,
+        },
+        DecoderKind::MeteoraDammV2 => PoolLayout {
+            mint_a_offset: 168,
+            mint_b_offset: 200,
+            account_size: None,
+        },
+        DecoderKind::MeteoraDammV1 => PoolLayout {
+            mint_a_offset: 40,
+            mint_b_offset: 72,
+            account_size: None,
+        },
+        DecoderKind::MeteoraDlmm => PoolLayout {
+            mint_a_offset: 88,
+            mint_b_offset: 120,
+            account_size: None,
+        },
+        DecoderKind::SaberStable => PoolLayout {
+            mint_a_offset: 203,
+            mint_b_offset: 235,
+            account_size: None,
+        },
+        DecoderKind::SplTokenSwap => PoolLayout {
+            mint_a_offset: 131,
+            mint_b_offset: 163,
+            account_size: None,
+        },
+        DecoderKind::SplStakePool | DecoderKind::Marinade => return None,
+    };
+    Some(layout)
+}
+
 pub fn decode_venue(
     venue: &Venue,
     data: &[u8],
@@ -161,6 +236,13 @@ pub fn decode_raydium_cpmm(
     if status & 4 != 0 {
         return Err(DexError::Unsupported("raydium cpmm swap disabled".into()));
     }
+    if read_u8(data, 390)? != 0 {
+        // The router quotes trade-fee-only constant product. Creator fees are
+        // an extra charge on one side and would make every quote optimistic.
+        return Err(DexError::Unsupported(
+            "raydium cpmm creator fees enabled".into(),
+        ));
+    }
     let mint_a = read_address(data, 168)?;
     let mint_b = read_address(data, 200)?;
     let vault_a = read_address(data, 72)?;
@@ -174,6 +256,18 @@ pub fn decode_raydium_cpmm(
     let fee = aux.amm_config.map(cpmm_fee_bps).unwrap_or(25).max(1);
     let fee = aux.fee_override_bps.unwrap_or(fee);
     let (reserve_a, reserve_b) = context.reserves.unwrap_or((0, 0));
+    // Raydium accrues protocol/fund/creator fees inside the vaults and subtracts
+    // them from both balances before running the swap curve. Those amounts are
+    // not swappable liquidity, so quoting gross vault balances invents profit
+    // that cannot be realised. Keep the effective reserves instead.
+    let pending_a = read_u64(data, 341)?
+        .saturating_add(read_u64(data, 357)?)
+        .saturating_add(read_u64(data, 397)?);
+    let pending_b = read_u64(data, 349)?
+        .saturating_add(read_u64(data, 365)?)
+        .saturating_add(read_u64(data, 405)?);
+    let reserve_a = reserve_a.saturating_sub(pending_a);
+    let reserve_b = reserve_b.saturating_sub(pending_b);
     snapshot(
         venue,
         context,
@@ -193,21 +287,15 @@ pub fn decode_raydium_cpmm(
 }
 
 fn cpmm_fee_bps(config: &[u8]) -> u32 {
-    if config.len() < 116 {
+    if config.len() < 20 || config[..8] != RAYDIUM_CPMM_CONFIG_DISC {
         return 25;
     }
-    if config[..8] != RAYDIUM_CPMM_CONFIG_DISC {
-        return 25;
-    }
+    // Raydium's `trade_fee_rate` is the whole swap fee, in units of 1e-6
+    // (hundredths of a bip). `protocol_fee_rate`, `fund_fee_rate` and
+    // `creator_fee_rate` are *shares of that fee*, not additional charges.
+    // Adding them produced a nonsensical 17% fee on a 0.005% pool.
     let trade = read_u64(config, 12).unwrap_or(2_500);
-    let protocol = read_u64(config, 20).unwrap_or(1_200);
-    let fund = read_u64(config, 28).unwrap_or(0);
-    let creator = read_u64(config, 108).unwrap_or(0);
-    let total = trade
-        .saturating_add(protocol)
-        .saturating_add(fund)
-        .saturating_add(creator);
-    (total / 100).clamp(1, 9_999) as u32
+    trade.div_ceil(100).clamp(1, 9_999) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +866,13 @@ mod tests {
         data[331] = 9;
         data[332] = 6;
         data[329] = 0;
+        // Booked-but-uncollected fees are not swappable liquidity.
+        put_u64(&mut data, 341, 2);
+        put_u64(&mut data, 349, 3);
+        put_u64(&mut data, 357, 1);
+        put_u64(&mut data, 365, 4);
+        put_u64(&mut data, 397, 1);
+        put_u64(&mut data, 405, 2);
         let context = DecodeContext::new(Address([7; 32]), 1).with_reserves((10, 20));
         let aux = DecodeAux {
             fee_override_bps: Some(25),
@@ -790,10 +885,39 @@ mod tests {
         assert_eq!(
             pool.model,
             PoolModel::ConstantProduct {
-                reserve_a: 10,
-                reserve_b: 20
+                reserve_a: 6,
+                reserve_b: 11
             }
         );
+    }
+
+    #[test]
+    fn raydium_cpmm_rejects_creator_fee_pools() {
+        let mut data = vec![0u8; 637];
+        data[..8].copy_from_slice(&RAYDIUM_CPMM_POOL_DISC);
+        data[390] = 1;
+        let context = DecodeContext::new(Address([7; 32]), 1).with_reserves((10, 20));
+        let error = decode_raydium_cpmm(
+            venue("raydium_cpmm").unwrap(),
+            &data,
+            &context,
+            &DecodeAux::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("creator fees"));
+    }
+
+    #[test]
+    fn cpmm_fee_uses_only_the_trade_rate() {
+        let mut config = vec![0u8; 236];
+        config[..8].copy_from_slice(&RAYDIUM_CPMM_CONFIG_DISC);
+        put_u64(&mut config, 12, 2_500);
+        put_u64(&mut config, 20, 120_000);
+        put_u64(&mut config, 28, 40_000);
+        put_u64(&mut config, 108, 14_950);
+        assert_eq!(cpmm_fee_bps(&config), 25);
+        put_u64(&mut config, 12, 50);
+        assert_eq!(cpmm_fee_bps(&config), 1);
     }
 
     #[test]
@@ -873,5 +997,54 @@ mod tests {
     #[test]
     fn short_account_is_rejected() {
         assert!(decode_spl_stake_pool(&[0u8; 10]).is_err());
+    }
+
+    #[test]
+    fn discovery_layout_matches_verified_mint_offsets() {
+        assert_eq!(
+            pool_layout(DecoderKind::RaydiumCpmm),
+            Some(PoolLayout {
+                mint_a_offset: 168,
+                mint_b_offset: 200,
+                account_size: Some(637),
+            })
+        );
+        assert_eq!(
+            pool_layout(DecoderKind::OrcaWhirlpool),
+            Some(PoolLayout {
+                mint_a_offset: 101,
+                mint_b_offset: 181,
+                account_size: Some(653),
+            })
+        );
+        assert_eq!(
+            pool_layout(DecoderKind::RaydiumAmmV4),
+            Some(PoolLayout {
+                mint_a_offset: 400,
+                mint_b_offset: 432,
+                account_size: Some(752),
+            })
+        );
+        // Every swap decoder must expose offsets; a new decoder without one
+        // would make `beast discover --mint` fail instead of silently scanning
+        // the whole program.
+        for decoder in [
+            DecoderKind::RaydiumClmm,
+            DecoderKind::PumpSwap,
+            DecoderKind::MeteoraDammV2,
+            DecoderKind::MeteoraDammV1,
+            DecoderKind::MeteoraDlmm,
+            DecoderKind::SaberStable,
+            DecoderKind::SplTokenSwap,
+        ] {
+            let layout = pool_layout(decoder).expect("swap decoder needs discovery offsets");
+            assert_ne!(layout.mint_a_offset, layout.mint_b_offset);
+            assert!(layout.mint_a_offset + 32 <= layout.mint_b_offset);
+            if let Some(size) = layout.account_size {
+                assert!(layout.mint_b_offset + 32 <= size);
+            }
+        }
+        assert_eq!(pool_layout(DecoderKind::SplStakePool), None);
+        assert_eq!(pool_layout(DecoderKind::Marinade), None);
     }
 }

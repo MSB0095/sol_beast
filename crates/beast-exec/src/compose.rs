@@ -35,9 +35,7 @@ use thiserror::Error;
 /// Solana's hard cap on a serialized legacy transaction.
 pub const MAX_TRANSACTION_BYTES: usize = 1232;
 /// Legacy (non-ALT) encoding: 1 signature of 64 bytes + header + 1s per account key.
-const ACCOUNT_KEY_BYTES: usize = 64;
 /// A conservative estimate of the per-account cost inside an instruction.
-const INSTRUCTION_ACCOUNT_BYTES: usize = 33;
 
 #[derive(Debug, Error)]
 pub enum ComposeError {
@@ -175,7 +173,6 @@ pub fn compose_cycle_with(
     let mut lookup_tables: Vec<String> = Vec::new();
     // Jupiter swap-instructions are signed by the wallet alone.
     let signatures_required = 1usize;
-    let mut estimated_bytes = ACCOUNT_KEY_BYTES + 70; // signature + message header/slot
 
     for (index, leg) in legs.iter().enumerate() {
         if leg.instructions.swap_instruction.is_empty() {
@@ -190,7 +187,6 @@ pub fn compose_cycle_with(
     }
 
     for instruction in preamble {
-        estimated_bytes += size_of(instruction);
         instructions.push(instruction.clone());
     }
 
@@ -217,7 +213,6 @@ pub fn compose_cycle_with(
         }
         for instruction in raw_preamble {
             let instruction = to_instruction(instruction, index)?;
-            estimated_bytes += size_of(&instruction);
             instructions.push(instruction);
         }
 
@@ -227,12 +222,10 @@ pub fn compose_cycle_with(
             // supported because the engine holds exactly one keypair.
             return Err(ComposeError::UnsupportedSigner { index });
         }
-        estimated_bytes += size_of(&swap);
         instructions.push(swap);
 
         for instruction in &leg.instructions.other_instructions {
             let instruction = to_instruction(instruction, index)?;
-            estimated_bytes += size_of(&instruction);
             instructions.push(instruction);
         }
 
@@ -241,17 +234,16 @@ pub fn compose_cycle_with(
         if leg.is_final && options.include_final_cleanup {
             if let Some(cleanup) = &leg.instructions.cleanup_instruction {
                 let instruction = to_instruction(cleanup, index)?;
-                estimated_bytes += size_of(&instruction);
                 instructions.push(instruction);
             }
         }
     }
 
     for instruction in postamble {
-        estimated_bytes += size_of(instruction);
         instructions.push(instruction.clone());
     }
 
+    let estimated_bytes = estimate_bytes(&instructions);
     if estimated_bytes > MAX_TRANSACTION_BYTES {
         return Err(ComposeError::TooLarge {
             needed: estimated_bytes,
@@ -266,8 +258,32 @@ pub fn compose_cycle_with(
     })
 }
 
-fn size_of(instruction: &Instruction) -> usize {
-    instruction.data.len() + 1 + instruction.accounts.len() * INSTRUCTION_ACCOUNT_BYTES + 8
+/// Estimate the serialized message size from the actual instruction set.
+///
+/// The old implementation charged every instruction account a full 32-byte key.
+/// That is wildly pessimistic for v0/static-key messages, where repeated keys
+/// cost one index byte, and it rejected provably fitting local CPMM cycles. This
+/// version charges each unique key once and each instruction meta one index
+/// byte. It is still conservative for lookup-table cycles (table-resident keys
+/// are charged as static 32-byte keys here) and the exact serialized size is
+/// checked again by `build_composed_transaction` before signing.
+fn estimate_bytes(instructions: &[Instruction]) -> usize {
+    use std::collections::HashSet;
+    let mut keys: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
+    let mut account_meta_bytes = 0usize;
+    let mut data_bytes = 0usize;
+    for instruction in instructions {
+        keys.insert(instruction.program_id);
+        for meta in &instruction.accounts {
+            keys.insert(meta.pubkey);
+            account_meta_bytes += 1;
+        }
+        data_bytes += instruction.data.len();
+    }
+    // signature count + signature + message header + blockhash + key list +
+    // instruction count + per-instruction framing (program index, account
+    // count, data length) + account indices + instruction data.
+    1 + 64 + 3 + 32 + keys.len() * 32 + 1 + instructions.len() * 3 + account_meta_bytes + data_bytes
 }
 
 /// Re-serialise a composed transaction to measure its true on-wire size.
@@ -703,18 +719,28 @@ mod tests {
 
     #[test]
     fn the_size_estimate_grows_with_leg_count() {
-        // The estimate is deliberately pessimistic, so a cycle that exceeds the
-        // 1232-byte wire limit is rejected before anything is signed.
         let two = compose_cycle(&legs(2)).expect("2 legs compose");
-        let four = compose_cycle(&legs(4));
-        assert!(
-            two.estimated_bytes
-                < four
-                    .as_ref()
-                    .map(|c| c.estimated_bytes)
-                    .unwrap_or(u64::MAX as usize)
-        );
-        assert!(matches!(four, Err(ComposeError::TooLarge { .. })));
+        let four = compose_cycle(&legs(4)).expect("4 compact legs compose");
+        assert!(two.estimated_bytes < four.estimated_bytes);
+        assert!(four.estimated_bytes <= MAX_TRANSACTION_BYTES);
+    }
+
+    #[test]
+    fn rejects_an_oversized_instruction_set() {
+        use super::native_key;
+        let oversized = solana_sdk::instruction::Instruction {
+            program_id: native_key(&pubkey(1)),
+            accounts: Vec::new(),
+            data: vec![0u8; MAX_TRANSACTION_BYTES],
+        };
+        let error = compose_cycle_with(
+            &legs(2),
+            ComposeOptions::default(),
+            std::slice::from_ref(&oversized),
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(error, ComposeError::TooLarge { .. }));
     }
 
     #[test]

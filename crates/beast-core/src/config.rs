@@ -745,6 +745,12 @@ pub struct FlashConfig {
     /// mint is discovered on-chain at startup.
     #[serde(default)]
     pub reserve: String,
+    /// Slippage tolerance for flash-loan legs, in basis points. Local CPMM
+    /// cycles are exact-in and revert rather than accept a worse fill, so this
+    /// is the maximum adverse decay allowed between the radar quote and the
+    /// fresh executor quote. It is not added to the on-chain swap minimum.
+    #[serde(default = "default_flash_slippage")]
+    pub slippage_bps: u16,
 }
 
 fn default_flash_provider() -> String {
@@ -756,6 +762,9 @@ fn default_flash_mint() -> String {
 fn default_flash_max_borrow() -> u64 {
     1_000_000_000
 }
+fn default_flash_slippage() -> u16 {
+    20
+}
 
 impl Default for FlashConfig {
     fn default() -> Self {
@@ -765,6 +774,7 @@ impl Default for FlashConfig {
             mint: default_flash_mint(),
             max_borrow_lamports: default_flash_max_borrow(),
             reserve: String::new(),
+            slippage_bps: default_flash_slippage(),
         }
     }
 }

@@ -152,8 +152,8 @@ min_profit_lamports = 10_000
 [venues]
 disabled = []
 quote_only = []
-jupiter_quote_url = "https://lite-api.jup.ag/swap/v1/quote"
-jupiter_swap_instructions_url = "https://lite-api.jup.ag/swap/v1/swap-instructions"
+jupiter_quote_url = "https://lite-api.jup.ag/swap/v1"
+jupiter_swap_instructions_url = "https://lite-api.jup.ag/swap/v1"
 max_accounts = 48
 restrict_intermediate_tokens = true
 
@@ -165,6 +165,9 @@ provider = "kamino"
 mint = ""
 max_borrow_lamports = 1000000000
 reserve = ""
+# Maximum adverse decay between the radar quote and the executor's fresh
+# quote. Local CPMM swaps are exact-in; this does not relax on-chain minimums.
+slippage_bps = 20
 
 [rent]
 enabled = true

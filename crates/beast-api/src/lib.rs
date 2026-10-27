@@ -570,7 +570,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Value>> {
             .into_iter()
             .map(|endpoint| json!({
                 "name": endpoint.name,
-                "url": endpoint.url,
+                "url": sanitize_url(&endpoint.url),
                 "role": endpoint.role,
                 "max_rps": endpoint.max_rps,
                 "heavy_rps": endpoint.heavy_rps,
@@ -688,6 +688,28 @@ fn redact_config(value: &mut Value) {
         for url in urls {
             if let Some(text) = url.as_str() {
                 *url = Value::String(sanitize_url(text));
+            }
+        }
+    }
+    if let Some(endpoints) = value
+        .get_mut("rpc")
+        .and_then(|rpc| rpc.get_mut("endpoints"))
+        .and_then(Value::as_array_mut)
+    {
+        for endpoint in endpoints {
+            for key in ["url", "ws_url"] {
+                if let Some(text) = endpoint.get(key).and_then(Value::as_str) {
+                    let redacted = sanitize_url(text);
+                    endpoint[key] = Value::String(redacted);
+                }
+            }
+        }
+    }
+    if let Some(rpc) = value.get_mut("rpc").and_then(Value::as_object_mut) {
+        for key in ["jupiter_quote_url", "jupiter_swap_instructions_url"] {
+            if let Some(text) = rpc.get(key).and_then(Value::as_str) {
+                let redacted = sanitize_url(text);
+                rpc.insert(key.to_string(), Value::String(redacted));
             }
         }
     }
@@ -1375,10 +1397,43 @@ mod tests {
         let (state, _router) = test_state();
         let mut value = serde_json::to_value(&*state.config).unwrap();
         value["rpc"]["urls"] = json!(["https://user:pass@example.invalid/?api-key=secret"]);
+        value["rpc"]["endpoints"] = json!([{
+            "name": "helius",
+            "url": "https://mainnet.helius-rpc.com/?api-key=secret",
+            "role": "exec",
+        }]);
+        value["rpc"]["jupiter_quote_url"] = json!("https://api.jup.ag/swap/v1?api-key=secret");
         redact_config(&mut value);
         let urls = value["rpc"]["urls"].as_array().unwrap();
         assert_eq!(urls[0], "https://example.invalid/[redacted]");
         assert!(!urls[0].as_str().unwrap().contains("secret"));
+        let endpoint = &value["rpc"]["endpoints"][0]["url"];
+        assert_eq!(endpoint, "https://mainnet.helius-rpc.com/[redacted]");
+        assert!(!endpoint.as_str().unwrap().contains("secret"));
+        assert_eq!(
+            value["rpc"]["jupiter_quote_url"],
+            "https://api.jup.ag/[redacted]"
+        );
+    }
+
+    #[test]
+    fn endpoint_urls_keep_hosts_and_hide_credentials() {
+        assert_eq!(
+            sanitize_url("https://mainnet.helius-rpc.com/?api-key=secret"),
+            "https://mainnet.helius-rpc.com/[redacted]"
+        );
+        assert_eq!(
+            sanitize_url("https://solana-mainnet.g.alchemy.com/v2/alch_secret"),
+            "https://solana-mainnet.g.alchemy.com/[redacted]"
+        );
+        assert_eq!(
+            sanitize_url("https://user:pass@example.invalid/path"),
+            "https://example.invalid/[redacted]"
+        );
+        assert_eq!(
+            sanitize_url("https://api.mainnet-beta.solana.com"),
+            "https://api.mainnet-beta.solana.com/[redacted]"
+        );
     }
 
     #[tokio::test]

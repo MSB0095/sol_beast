@@ -42,14 +42,14 @@ pub struct RunOptions {
     pub radar_interval_ms: u64,
 }
 
-struct FlashRuntime {
-    provider: Arc<dyn FlashProvider>,
+pub(crate) struct FlashRuntime {
+    pub(crate) provider: Arc<dyn FlashProvider>,
     /// Deepest verified reserve per borrowable mint.
-    reserves: HashMap<Address, FlashReserve>,
+    pub(crate) reserves: HashMap<Address, FlashReserve>,
 }
 
 impl FlashRuntime {
-    fn reserve_for(&self, mint: Address) -> Option<&FlashReserve> {
+    pub(crate) fn reserve_for(&self, mint: Address) -> Option<&FlashReserve> {
         self.reserves.get(&mint)
     }
 
@@ -280,7 +280,13 @@ pub async fn run(options: RunOptions) -> Result<()> {
             .is_ok();
         if !guard_id_valid {
             if config.safety.allow_unguarded_live {
-                tracing::error!("CRITICAL: RUNNING UNGUARDED LIVE - NO ON-CHAIN REVERT GUARANTEE. Only off-chain checks apply.");
+                if effective == Mode::Live {
+                    tracing::error!("CRITICAL: RUNNING UNGUARDED LIVE - NO ON-CHAIN REVERT GUARANTEE. Only off-chain checks apply.");
+                } else {
+                    tracing::warn!(
+                        "canary runs without an on-chain guard; bundles are simulated and never submitted"
+                    );
+                }
             } else {
                 bail!("live mode requires a valid [guard] program_id (or set [safety] allow_unguarded_live = true to run without on-chain guard - NO REVERT GUARANTEE)");
             }
@@ -391,6 +397,11 @@ pub async fn run(options: RunOptions) -> Result<()> {
                 }),
                 "max_borrow_lamports": config.flash.max_borrow_lamports,
                 "lamport_guard": config.guard.enabled
+                    && config
+                        .guard
+                        .program_id
+                        .parse::<solana_sdk::pubkey::Pubkey>()
+                        .is_ok()
                     && flash.reserves.keys().any(|mint| mint.to_string() == WSOL_MINT),
                 "reserve_count": reserves.len(),
                 "reserves": reserves
@@ -503,7 +514,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
 /// A flash-enabled configuration that cannot resolve an active reserve fails
 /// startup: silently running without the advertised capability would be worse
 /// than refusing to start.
-async fn build_flash_runtime(
+pub(crate) async fn build_flash_runtime(
     config: &BeastConfig,
     rpc: &Arc<RpcClient>,
 ) -> Result<Option<Arc<FlashRuntime>>> {
@@ -648,7 +659,7 @@ fn load_wallet(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_executor(
+pub(crate) fn build_executor(
     config: &BeastConfig,
     rpc: &Arc<RpcClient>,
     jupiter: &Arc<JupiterClient>,
@@ -662,17 +673,17 @@ fn build_executor(
         .program_id
         .parse::<solana_sdk::pubkey::Pubkey>()
         .is_ok();
-    if config.guard.program_id.is_empty() || !guard_id_valid {
-        if effective.is_live() {
-            if config.safety.allow_unguarded_live {
-                tracing::error!("CRITICAL: RUNNING UNGUARDED LIVE - NO ON-CHAIN REVERT GUARANTEE. Only off-chain checks apply.");
-            } else {
-                bail!("live mode requires [guard] program_id (or set [safety] allow_unguarded_live = true to run without on-chain guard - NO REVERT GUARANTEE)");
-            }
+    if (config.guard.program_id.is_empty() || !guard_id_valid) && effective == Mode::Live {
+        if config.safety.allow_unguarded_live {
+            tracing::error!("CRITICAL: RUNNING UNGUARDED LIVE - NO ON-CHAIN REVERT GUARANTEE. Only off-chain checks apply.");
         } else {
-            return Ok(None);
+            bail!("live mode requires [guard] program_id (or set [safety] allow_unguarded_live = true to run without on-chain guard - NO REVERT GUARANTEE)");
         }
     }
+    // Non-live modes still build the executor so canary can simulate. A plan
+    // that needs the guard reports `guard_required_lamports = 0`; a non-WSOL
+    // flash cycle does not use the lamport guard at all. Live mode remains
+    // gated above.
     if guard_id_valid {
         let guard_program = config
             .guard
@@ -690,6 +701,7 @@ fn build_executor(
         min_profit_lamports: config.guard.min_profit_lamports,
         balance_floor_lamports: config.risk.balance_floor_lamports,
         slippage_bps: 50,
+        flash_slippage_bps: config.flash.slippage_bps,
         tip_alpha: strategy.tip_alpha_initial,
         max_tip_lamports: strategy.tip_cap_lamports,
         guard_program: config.guard.program_id.clone(),

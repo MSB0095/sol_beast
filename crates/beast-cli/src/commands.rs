@@ -5,17 +5,25 @@ use beast_core::config::{
     self, BeastConfig, EndpointRole, GuardMode, LoadedConfig, RpcEndpointConfig,
     DEFAULT_CONFIG_TOML,
 };
+use beast_core::types::{LegPlan, Mode, Opportunity, OutcomeLabel, StrategyKind};
 use beast_dex::catalog::{self, VenueKind, VENUES};
+use beast_dex::decode::{pool_layout, PoolLayout};
 use beast_dex::jupiter::{JupiterClient, QuoteRequest};
 use beast_dex::Address;
-use beast_exec::{RentReclaimer, Wallet};
+use beast_exec::{cpmm, RentReclaimer, Wallet, WSOL_MINT};
 use beast_feed::{refresh_pool, WatchedPool};
-use beast_rpc::{EndpointOptions, RpcClient};
+use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::Store;
 use serde::Serialize;
 use serde_json::{json, Value};
+use solana_sdk::pubkey::Pubkey;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+use uuid::Uuid;
+
+use crate::engine::{build_executor, build_flash_runtime};
 
 fn load(path: Option<&Path>, real: bool) -> Result<LoadedConfig> {
     let loaded = config::load(path, real)?;
@@ -26,11 +34,33 @@ fn load(path: Option<&Path>, real: bool) -> Result<LoadedConfig> {
 }
 
 fn rpc(config: &BeastConfig) -> Result<RpcClient> {
-    Ok(RpcClient::new(
-        config.rpc.urls.clone(),
+    rpc_with_timeout(config, config.rpc.timeout_ms)
+}
+
+/// Build a client using the same role-routed endpoints as the engine.
+///
+/// The old helper passed only `rpc.urls`, so `beast discover` silently used the
+/// public feed endpoint instead of the configured Helius discovery endpoint and
+/// timed out on a full program scan.
+fn rpc_with_timeout(config: &BeastConfig, timeout_ms: u64) -> Result<RpcClient> {
+    let endpoints = config
+        .rpc
+        .effective_endpoints()
+        .into_iter()
+        .map(|endpoint| {
+            EndpointOptions::new(endpoint.name, endpoint.url)
+                .with_role_name(endpoint.role.as_str())
+                .with_rps(endpoint.max_rps, endpoint.heavy_rps)
+                .with_budget(endpoint.monthly_call_budget)
+                .with_priority(endpoint.priority)
+        })
+        .collect();
+    Ok(RpcClient::with_endpoints(
+        endpoints,
         config.rpc.commitment.clone(),
-        config.rpc.timeout_ms,
+        timeout_ms,
         config.rpc.max_retries,
+        config.rpc.circuit_breaker_seconds * 1_000,
     )?)
 }
 
@@ -230,9 +260,61 @@ pub fn venues(json_output: bool, kind: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Build the `getProgramAccounts` filters for mint-aware discovery.
+///
+/// Two mints means "pools containing this pair": both account orientations are
+/// queried, because a base/quote pair can be stored in either order. One mint
+/// means "pools containing this mint on either side". No mint keeps the old
+/// full-program scan, which is only practical for small programs or a paid RPC.
+fn discovery_filters(layout: Option<PoolLayout>, mints: &[Address]) -> Result<Vec<Vec<Value>>> {
+    let Some(layout) = layout else {
+        if mints.is_empty() {
+            return Ok(vec![Vec::new()]);
+        }
+        bail!("venue has no mint offsets, so --mint cannot be used");
+    };
+    let mut base = Vec::new();
+    if let Some(size) = layout.account_size {
+        base.push(json!({ "dataSize": size }));
+    }
+    let mint_filter = |offset: usize, mint: &Address| json!({ "memcmp": { "offset": offset, "bytes": mint.to_string() } });
+    let filters = match mints {
+        [] => vec![base],
+        [mint] => vec![
+            {
+                let mut filters = base.clone();
+                filters.push(mint_filter(layout.mint_a_offset, mint));
+                filters
+            },
+            {
+                let mut filters = base.clone();
+                filters.push(mint_filter(layout.mint_b_offset, mint));
+                filters
+            },
+        ],
+        [a, b] => vec![
+            {
+                let mut filters = base.clone();
+                filters.push(mint_filter(layout.mint_a_offset, a));
+                filters.push(mint_filter(layout.mint_b_offset, b));
+                filters
+            },
+            {
+                let mut filters = base.clone();
+                filters.push(mint_filter(layout.mint_a_offset, b));
+                filters.push(mint_filter(layout.mint_b_offset, a));
+                filters
+            },
+        ],
+        _ => bail!("--mint may be given at most twice (a pair of mints)"),
+    };
+    Ok(filters)
+}
+
 pub async fn discover(
     path: Option<&Path>,
     venue_id: &str,
+    mints: &[String],
     limit: usize,
     save: bool,
     json_output: bool,
@@ -250,17 +332,65 @@ pub async fn discover(
     if limit == 0 || limit > 1_000 {
         bail!("--limit must be 1..=1000");
     }
-    let rpc = rpc(config)?;
+    let mints = mints
+        .iter()
+        .map(|mint| {
+            mint.parse::<Address>()
+                .map_err(|error| anyhow::anyhow!("--mint {mint}: {error}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if mints.len() == 2 && mints[0] == mints[1] {
+        bail!("--mint must name two different mints");
+    }
+    let layout = venue.decoder.and_then(pool_layout);
+    let filters = discovery_filters(layout, &mints)?;
+    if mints.is_empty() {
+        eprintln!(
+            "warning: no --mint filter; scanning every {} account can exceed free-tier limits",
+            venue.id
+        );
+    }
+    // Discovery is a heavy call and a filtered scan can still take longer than
+    // the five-second feed timeout. Give it its own budget instead of failing
+    // halfway through a valid request.
+    let rpc = rpc_with_timeout(config, config.rpc.timeout_ms.max(60_000))?;
     let program_id = venue
         .program_id
         .parse::<Address>()
         .map_err(|error| anyhow::anyhow!("venue program id: {error}"))?;
-    println!("discovering {} ({}) ...", venue.id, venue.program_id);
-    let accounts = rpc
-        .get_program_accounts(program_id, Vec::new(), Some((0, 0)))
-        .await
-        .with_context(|| format!("getProgramAccounts {}", venue.program_id))?;
-    println!(
+    eprintln!(
+        "discovering {} ({}){}{} ...",
+        venue.id,
+        venue.program_id,
+        if mints.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " for {}",
+                mints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            )
+        },
+        if mints.len() == 2 { " [pair]" } else { "" }
+    );
+    let mut by_address: std::collections::BTreeMap<Address, ()> = std::collections::BTreeMap::new();
+    for filter in filters {
+        let accounts = rpc
+            .get_program_accounts(program_id, filter, Some((0, 0)))
+            .await
+            .with_context(|| {
+                format!(
+                    "getProgramAccounts {} (pass --mint <A> --mint <B> to narrow the scan)",
+                    venue.program_id
+                )
+            })?;
+        by_address.extend(accounts.into_iter().map(|(address, _)| (address, ())));
+    }
+    let accounts: Vec<Address> = by_address.into_keys().collect();
+    eprintln!(
         "received {} accounts; decoding up to {limit}",
         accounts.len()
     );
@@ -276,7 +406,7 @@ pub async fn discover(
     // Programs can expose non-pool accounts. Keep walking until the requested
     // number of pools decodes, but cap wasted RPC calls.
     let max_attempts = accounts.len().min(limit.saturating_mul(10).max(limit));
-    for (address, _account) in accounts.into_iter().take(max_attempts) {
+    for address in accounts.into_iter().take(max_attempts) {
         if pools.len() >= limit {
             break;
         }
@@ -301,6 +431,7 @@ pub async fn discover(
             serde_json::to_string_pretty(&json!({
                 "venue": venue.id,
                 "program_id": venue.program_id,
+                "mints": mints,
                 "scanned": attempted,
                 "decoded": pools.len(),
                 "saved": save,
@@ -354,6 +485,326 @@ pub async fn quote(
     request.slippage_bps = slippage_bps.clamp(1, 500);
     let quote = client.quote(&request).await?;
     println!("{}", serde_json::to_string_pretty(&quote)?);
+    Ok(())
+}
+
+/// Quote one CPMM leg from live vault balances, for display and plan metadata.
+async fn cpmm_leg_quote(
+    rpc: &RpcClient,
+    pool: &cpmm::CpmmPool,
+    input_mint: &Pubkey,
+    output_mint: &Pubkey,
+    amount: u64,
+) -> Result<(u64, u32)> {
+    let input_index = pool.mint_index(input_mint).ok_or_else(|| {
+        anyhow::anyhow!(
+            "pool {} does not contain input mint {input_mint}",
+            pool.address
+        )
+    })?;
+    let output_index = 1 - input_index;
+    if pool.mints[output_index] != *output_mint {
+        bail!(
+            "pool {} does not contain output mint {output_mint}",
+            pool.address
+        );
+    }
+    let keys = [
+        beast_flash::address(&pool.amm_config),
+        beast_flash::address(&pool.vaults[input_index]),
+        beast_flash::address(&pool.vaults[output_index]),
+    ];
+    let accounts = rpc.get_multiple_accounts(&keys).await?;
+    let config = accounts
+        .first()
+        .and_then(Option::as_ref)
+        .ok_or_else(|| anyhow::anyhow!("CPMM config {} not found", pool.amm_config))?;
+    let vault_in = accounts
+        .get(1)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| anyhow::anyhow!("CPMM vault {} not found", pool.vaults[input_index]))?;
+    let vault_out = accounts
+        .get(2)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| anyhow::anyhow!("CPMM vault {} not found", pool.vaults[output_index]))?;
+    let fee = cpmm::decode_trade_fee_rate(&config.data)?;
+    let (mint_in, reserve_in) = cpmm::token_account_mint_and_amount(&vault_in.data)?;
+    let (mint_out, reserve_out) = cpmm::token_account_mint_and_amount(&vault_out.data)?;
+    if mint_in != *input_mint || mint_out != *output_mint {
+        bail!(
+            "CPMM vault mints do not match the pool layout for {}",
+            pool.address
+        );
+    }
+    // The swap curve runs on vault balances minus booked-but-uncollected
+    // protocol/fund/creator fees, exactly like the on-chain program.
+    let reserve_in = pool.effective_reserve(input_index, reserve_in)?;
+    let reserve_out = pool.effective_reserve(output_index, reserve_out)?;
+    let amount_out = cpmm::quote_base_input(amount, reserve_in, reserve_out, fee)?;
+    let spot = (u128::from(amount))
+        .checked_mul(u128::from(reserve_out))
+        .and_then(|value| value.checked_div(u128::from(reserve_in)))
+        .unwrap_or(0);
+    let impact = if spot > u128::from(amount_out) {
+        u32::try_from((spot - u128::from(amount_out)) * 10_000 / spot).unwrap_or(10_000)
+    } else {
+        0
+    };
+    Ok((amount_out, impact))
+}
+
+/// `beast flash-cycle` — prove a two-pool Raydium CPMM flash cycle.
+///
+/// Simulation only: this command never signs-and-sends a bundle. It builds the
+/// exact borrow/swap/repay transaction and simulates it (through Jito when
+/// `--jito` is passed, otherwise through the configured RPC).
+pub async fn flash_cycle(
+    path: Option<&Path>,
+    pool_in: &str,
+    pool_out: &str,
+    amount: u64,
+    jito_bundle: bool,
+    json_output: bool,
+    probe: bool,
+) -> Result<()> {
+    if amount == 0 {
+        bail!("--amount must be > 0");
+    }
+    let loaded = load(path, false)?;
+    let config = &loaded.config;
+    if !config.flash.enabled {
+        bail!("[flash] enabled=false in config");
+    }
+    if amount > config.flash.max_borrow_lamports {
+        bail!(
+            "--amount {amount} exceeds flash.max_borrow_lamports {}",
+            config.flash.max_borrow_lamports
+        );
+    }
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required for a flash-cycle simulation"))?;
+    let rpc = Arc::new(rpc(config)?);
+    let flash = build_flash_runtime(config, &rpc)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("[flash] enabled=false in config"))?;
+    let wsol: Address = WSOL_MINT.parse().expect("WSOL is a valid address");
+    let reserve = flash
+        .reserve_for(wsol)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no active WSOL flash reserve was loaded; clear flash.mint/flash.reserve or point them at WSOL"
+            )
+        })?;
+
+    let pool_a_address = pool_in
+        .parse::<Address>()
+        .map_err(|error| anyhow::anyhow!("pool-in: {error}"))?;
+    let pool_b_address = pool_out
+        .parse::<Address>()
+        .map_err(|error| anyhow::anyhow!("pool-out: {error}"))?;
+    if pool_a_address == pool_b_address {
+        bail!("pool-in and pool-out must be different pools");
+    }
+    let accounts = rpc
+        .get_multiple_accounts(&[pool_a_address, pool_b_address])
+        .await?;
+    let decode_pool = |address: Address,
+                       account: Option<beast_rpc::Account>|
+     -> Result<cpmm::CpmmPool> {
+        let account = account.ok_or_else(|| anyhow::anyhow!("CPMM pool {address} not found"))?;
+        Ok(cpmm::CpmmPool::decode(
+            beast_flash::pubkey(&address),
+            &account.data,
+        )?)
+    };
+    let pool_a = decode_pool(pool_a_address, accounts.first().cloned().flatten())?;
+    let pool_b = decode_pool(pool_b_address, accounts.get(1).cloned().flatten())?;
+    pool_a.ensure_swappable()?;
+    pool_b.ensure_swappable()?;
+    pool_a.authority()?;
+    pool_b.authority()?;
+
+    let wsol_key = Pubkey::from_str(WSOL_MINT).expect("WSOL is a valid pubkey");
+    let a_in = pool_a
+        .mint_index(&wsol_key)
+        .ok_or_else(|| anyhow::anyhow!("pool-in {} does not contain WSOL", pool_a.address))?;
+    let middle = pool_a.mints[1 - a_in];
+    let b_in = pool_b.mint_index(&middle).ok_or_else(|| {
+        anyhow::anyhow!(
+            "pool-out {} does not contain the intermediate mint {middle}",
+            pool_b.address
+        )
+    })?;
+    if pool_b.mints[1 - b_in] != wsol_key {
+        bail!(
+            "pool-out {} does not return WSOL; pool-in/pool-out are not a WSOL cycle",
+            pool_b.address
+        );
+    }
+
+    let (quote_a, impact_a) = cpmm_leg_quote(&rpc, &pool_a, &wsol_key, &middle, amount).await?;
+    let (quote_b, impact_b) = cpmm_leg_quote(&rpc, &pool_b, &middle, &wsol_key, quote_a).await?;
+    let provider = flash.provider.clone();
+    let flash_fee = provider.flash_fee(&reserve, amount)?;
+    let gross = i64::try_from(quote_b)
+        .ok()
+        .and_then(|value| value.checked_sub(i64::try_from(amount).ok()?))
+        .ok_or_else(|| anyhow::anyhow!("CPMM quote overflow"))?;
+
+    let slot = rpc.get_slot().await.unwrap_or(0);
+    let opportunity = Opportunity {
+        id: Uuid::new_v4(),
+        strategy: StrategyKind::FlashArb,
+        mode: Mode::Canary,
+        slot_detected: slot,
+        detected_at_ms: chrono::Utc::now().timestamp_millis(),
+        legs: vec![
+            LegPlan {
+                venue: "raydium_cpmm".into(),
+                pool: pool_a.address.to_string(),
+                mint_in: WSOL_MINT.into(),
+                mint_out: middle.to_string(),
+                amount_in: amount,
+                min_out: quote_a,
+                price_impact_bps: impact_a,
+            },
+            LegPlan {
+                venue: "raydium_cpmm".into(),
+                pool: pool_b.address.to_string(),
+                mint_in: middle.to_string(),
+                mint_out: WSOL_MINT.into(),
+                amount_in: quote_a,
+                min_out: quote_b,
+                price_impact_bps: impact_b,
+            },
+        ],
+        est_gross_lamports: gross,
+        est_costs: beast_core::types::CostBreakdown {
+            flash_fee_lamports: flash_fee,
+            ..beast_core::types::CostBreakdown::default()
+        },
+        est_net_lamports: gross.saturating_sub(flash_fee as i64),
+        confidence: 1.0,
+        ttl_slots: 1,
+        dedupe_key: format!("flash_cycle:{pool_in}:{pool_out}:{amount}"),
+        outcome: OutcomeLabel::Open,
+        meta: json!({"source": "beast flash-cycle"}),
+    };
+
+    let jupiter_client = Arc::new(jupiter(config, &loaded.secrets)?);
+    let jito = if config.jito.enabled {
+        Some(Arc::new(JitoClient::new(
+            config.jito.block_engine_urls.clone(),
+            None,
+        )?))
+    } else {
+        None
+    };
+    let wallet = Arc::new(wallet);
+    let executor = build_executor(
+        config,
+        &rpc,
+        &jupiter_client,
+        &jito,
+        Some(wallet),
+        Mode::Canary,
+        false,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("executor unavailable"))?;
+
+    let plan = if probe {
+        executor
+            .prepare_flash_cycle_probe(&opportunity, provider.as_ref(), &reserve)
+            .await?
+    } else {
+        executor
+            .prepare_flash_cycle(&opportunity, provider.as_ref(), &reserve)
+            .await?
+    };
+
+    let (simulation, used_jito) = if jito_bundle {
+        if !executor.jito_enabled() {
+            bail!("--jito requested but [jito] is disabled");
+        }
+        (executor.simulate(&plan).await?, true)
+    } else {
+        (
+            serde_json::to_value(executor.simulate_cycle(&plan).await?)?,
+            false,
+        )
+    };
+    let simulation_error = if used_jito {
+        None
+    } else {
+        simulation
+            .get("err")
+            .cloned()
+            .filter(|value| !value.is_null())
+    };
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "plan": plan,
+                "jito_bundle": used_jito,
+                "simulation": simulation,
+                "ok": simulation_error.is_none(),
+                "probe": probe,
+            }))?
+        );
+    } else {
+        let flash_info = plan.flash.as_ref().expect("flash plan carries info");
+        if probe {
+            println!(
+                "MECHANICS PROBE: this cycle is expected to lose money; the wallet prefunds the \
+                 shortfall and the transaction is simulated only, never sent."
+            );
+        }
+        println!(
+            "plan: borrow {} {} from {} (fee {})",
+            flash_info.borrowed, flash_info.mint, flash_info.provider, flash_info.fee
+        );
+        println!(
+            "      repay {} | enforced final min {} | tip {} | costs {}",
+            flash_info.repayment, plan.quoted_out_min, plan.tip_lamports, plan.fees_lamports
+        );
+        println!(
+            "      pools {} -> {} | transactions {} | guard_required {}",
+            pool_a.address,
+            pool_b.address,
+            plan.encoded_transactions.len(),
+            plan.guard_required_lamports
+        );
+        println!(
+            "simulation: {} ({} )",
+            if simulation_error.is_none() {
+                "ok"
+            } else {
+                "FAILED"
+            },
+            if used_jito {
+                "Jito bundle"
+            } else {
+                "RPC cycle"
+            }
+        );
+        if let Some(error) = &simulation_error {
+            println!("error: {error}");
+        }
+        if let Some(logs) = simulation.get("logs").and_then(Value::as_array) {
+            let start = logs.len().saturating_sub(12);
+            for log in &logs[start..] {
+                if let Some(log) = log.as_str() {
+                    println!("  {log}");
+                }
+            }
+        }
+    }
+    if let Some(error) = simulation_error {
+        bail!("flash cycle simulation failed: {error}");
+    }
     Ok(())
 }
 

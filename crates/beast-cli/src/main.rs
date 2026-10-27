@@ -61,11 +61,38 @@ enum Command {
     Discover {
         #[arg(long)]
         venue: String,
+        /// Mint to filter by. Repeat twice to discover one mint pair.
+        #[arg(long = "mint")]
+        mint: Vec<String>,
         #[arg(long, default_value_t = 50)]
         limit: usize,
         /// Persist decoded pools to the configured SQLite store.
         #[arg(long)]
         save: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Build and simulate a two-pool Raydium CPMM flash cycle.
+    ///
+    /// Simulation only: this command never sends a bundle. It is the cheapest
+    /// way to prove borrow -> swap -> swap -> repay with very little SOL.
+    FlashCycle {
+        /// First pool: WSOL -> intermediate mint.
+        #[arg(long)]
+        pool_in: String,
+        /// Second pool: intermediate mint -> WSOL.
+        #[arg(long)]
+        pool_out: String,
+        /// Borrow amount in lamports (WSOL has 9 decimals).
+        #[arg(long)]
+        amount: u64,
+        /// Simulate the whole bundle through Jito instead of the RPC.
+        #[arg(long)]
+        jito: bool,
+        /// Mechanics probe: allow an unprofitable cycle, prefund the expected
+        /// loss from the wallet, and simulate it. This never sends a bundle.
+        #[arg(long)]
+        probe: bool,
         #[arg(long)]
         json: bool,
     },
@@ -174,12 +201,33 @@ async fn main() -> Result<()> {
         Command::Venues { json, kind } => commands::venues(json, kind.as_deref()),
         Command::Discover {
             venue,
+            mint,
             limit,
             save,
             json,
         } => {
             init_logging("info", cli.json_logs)?;
-            commands::discover(cli.config.as_deref(), &venue, limit, save, json).await
+            commands::discover(cli.config.as_deref(), &venue, &mint, limit, save, json).await
+        }
+        Command::FlashCycle {
+            pool_in,
+            pool_out,
+            amount,
+            jito,
+            probe,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::flash_cycle(
+                cli.config.as_deref(),
+                &pool_in,
+                &pool_out,
+                amount,
+                jito,
+                json,
+                probe,
+            )
+            .await
         }
         Command::Quote {
             input_mint,
@@ -240,9 +288,12 @@ async fn main() -> Result<()> {
 pub fn init_logging(level: &str, json: bool) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level));
+    // Diagnostics belong on stderr so machine-readable command output stays
+    // pure JSON even when INFO logging is enabled.
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(true);
+        .with_target(true)
+        .with_writer(std::io::stderr);
     let result = if json {
         builder.json().try_init()
     } else {

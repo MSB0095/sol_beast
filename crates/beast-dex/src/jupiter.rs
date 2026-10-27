@@ -6,6 +6,7 @@
 
 use crate::address::Address;
 use crate::error::DexError;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
@@ -159,6 +160,109 @@ pub struct JupiterSwap {
     pub error: Option<String>,
 }
 
+/// One wire-format instruction as returned by `/swap-instructions`.
+///
+/// Jupiter serialises these as plain JSON objects rather than Borsh, so the
+/// caller converts them into `solana_sdk::instruction::Instruction` when the
+/// full transaction is assembled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawInstruction {
+    pub program_id: Address,
+    pub accounts: Vec<RawAccountMeta>,
+    pub data: String,
+}
+
+impl RawInstruction {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Decode the base64 instruction payload.
+    pub fn data_bytes(&self) -> std::result::Result<Vec<u8>, base64::DecodeError> {
+        base64::engine::general_purpose::STANDARD.decode(&self.data)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawAccountMeta {
+    pub pubkey: Address,
+    #[serde(default)]
+    pub is_signer: bool,
+    #[serde(default)]
+    pub is_writable: bool,
+}
+
+/// The instruction decomposition of one swap.
+///
+/// `setup_instructions` create the token accounts the swap needs,
+/// `swap_instruction` performs the exchange, and `cleanup_instruction` unwraps
+/// or closes what the swap created. When several legs are composed into one
+/// transaction only the *final* leg's cleanup may run, because earlier legs
+/// consume the accounts the next leg needs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapInstructions {
+    #[serde(default)]
+    pub token_ledger_instruction: Option<RawInstruction>,
+    #[serde(default)]
+    pub compute_budget_instructions: Vec<RawInstruction>,
+    #[serde(default)]
+    pub setup_instructions: Vec<RawInstruction>,
+    pub swap_instruction: RawInstruction,
+    #[serde(default)]
+    pub cleanup_instruction: Option<RawInstruction>,
+    #[serde(default)]
+    pub other_instructions: Vec<RawInstruction>,
+    #[serde(default)]
+    pub address_lookup_table_addresses: Vec<Address>,
+    #[serde(default)]
+    pub prioritization_fee_lamports: Value,
+    #[serde(default)]
+    pub compute_unit_limit: Option<u64>,
+    #[serde(default)]
+    pub transaction_version: Value,
+    #[serde(default)]
+    pub simulation_slot: Option<u64>,
+    #[serde(default)]
+    pub dynamic_slippage_report: Option<Value>,
+    #[serde(default)]
+    pub simulation_error: Value,
+    #[serde(default)]
+    pub blockhash_with_metadata: Option<Value>,
+}
+
+impl SwapInstructions {
+    /// Every instruction that must precede the actual swap exchange.
+    pub fn preamble(&self) -> Vec<&RawInstruction> {
+        let mut out = Vec::new();
+        if let Some(instruction) = &self.token_ledger_instruction {
+            out.push(instruction);
+        }
+        out.extend(self.compute_budget_instructions.iter());
+        out.extend(self.setup_instructions.iter());
+        out
+    }
+
+    /// Rough serialized size of all instructions, used to stay inside the
+    /// 1232-byte transaction limit before anything is signed.
+    pub fn payload_bytes(&self) -> usize {
+        let mut total = self.swap_instruction.data.len().div_ceil(2) + 1;
+        for instruction in self
+            .compute_budget_instructions
+            .iter()
+            .chain(self.setup_instructions.iter())
+            .chain(self.other_instructions.iter())
+        {
+            total += instruction.data.len().div_ceil(2) + 1 + instruction.accounts.len() * 33;
+        }
+        if let Some(instruction) = &self.token_ledger_instruction {
+            total += instruction.data.len().div_ceil(2) + 1;
+        }
+        total
+    }
+}
+
 impl JupiterClient {
     pub fn new() -> Result<Self, DexError> {
         Self::with_base_url(JUPITER_LITE_BASE, None)
@@ -248,6 +352,55 @@ impl JupiterClient {
         }
         let swap: JupiterSwap = serde_json::from_str(&text).map_err(DexError::from)?;
         validate_swap(swap)
+    }
+
+    /// Request the *instruction set* for a swap instead of a signed transaction.
+    ///
+    /// This is the primitive behind multi-leg atomic arbitrage: several legs are
+    /// normally separate transactions because a Jito bundle caps at five
+    /// transactions. Concatenating instruction sets from multiple quotes lets a
+    /// whole cycle run inside **one** transaction, which removes the per-leg
+    /// transaction from the bundle and turns the 5-transaction cap into a
+    /// 1232-byte size limit instead.
+    pub async fn swap_instructions(
+        &self,
+        request: &SwapRequest,
+    ) -> Result<SwapInstructions, DexError> {
+        let body = serde_json::json!({
+            "userPublicKey": request.user_public_key,
+            "quoteResponse": request.quote,
+            "wrapAndUnwrapSol": request.wrap_and_unwrap_sol,
+            "dynamicComputeUnitLimit": request.dynamic_compute_unit_limit,
+        });
+        let mut call = self
+            .http
+            .post(format!("{}/swap-instructions", self.base_url))
+            .json(&body);
+        if let Some(api_key) = &self.api_key {
+            call = call.header("x-api-key", api_key);
+        }
+        let response = call.send().await.map_err(http_error)?;
+        let status = response.status();
+        let text = response.text().await.map_err(http_error)?;
+        if !status.is_success() {
+            return Err(DexError::Http(format!(
+                "Jupiter swap-instructions HTTP {status}: {}",
+                truncate(&text)
+            )));
+        }
+        let instructions: SwapInstructions = serde_json::from_str(&text).map_err(DexError::from)?;
+        if !instructions.simulation_error.is_null() {
+            return Err(DexError::Http(format!(
+                "Jupiter swap-instructions simulation failed: {}",
+                truncate(&instructions.simulation_error.to_string())
+            )));
+        }
+        if instructions.swap_instruction.data.is_empty() {
+            return Err(DexError::Http(
+                "Jupiter swap-instructions returned no swap instruction".into(),
+            ));
+        }
+        Ok(instructions)
     }
 }
 

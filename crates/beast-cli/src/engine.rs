@@ -656,10 +656,18 @@ fn build_opportunity(
         }
     }
     let rent = SPL_TOKEN_ACCOUNT_RENT_LAMPORTS.saturating_mul(intermediates.len() as u64);
+    // A composed (single-transaction) cycle pays one network fee for the whole
+    // cycle rather than one per leg, so the estimate must use the same shape as
+    // the executor or the model and the guard disagree about profitability.
+    let base_fee_transactions = if strategy == StrategyKind::TriangularArb {
+        3 // composed cycle + guard + tip
+    } else {
+        route.legs.len() + 2 // one tx per leg + guard + tip
+    };
     let costs = CostBreakdown {
         tip_lamports: tip,
         base_fee_lamports: DEFAULT_TRANSACTION_FEE_LAMPORTS
-            .saturating_mul((route.legs.len() + 2) as u64),
+            .saturating_mul(base_fee_transactions as u64),
         rent_lamports: rent,
         ..CostBreakdown::default()
     };
@@ -847,7 +855,15 @@ async fn maybe_execute(
         risk.begin_attempt(opportunity.strategy);
     }
 
-    let plan = match executor.prepare_cycle(opportunity).await {
+    // Triangular and longer routes run as one composed transaction: a single
+    // network fee instead of one per leg, and more legs than the Jito
+    // five-transaction bundle cap would otherwise allow.
+    let prepare = if opportunity.strategy == StrategyKind::TriangularArb {
+        executor.prepare_composed_cycle(opportunity).await
+    } else {
+        executor.prepare_cycle(opportunity).await
+    };
+    let plan = match prepare {
         Ok(plan) => plan,
         Err(error) => {
             let _ = ctx.store.update_attempt(

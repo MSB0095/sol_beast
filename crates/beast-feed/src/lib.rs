@@ -16,7 +16,7 @@ use beast_dex::decode::{decode_venue, DecodeAux, DecodeContext};
 use beast_dex::model::PoolSnapshot;
 use beast_dex::Address;
 use beast_rpc::{mint_decimals, token_account_amount, RpcClient};
-use futures_util::stream::{self, StreamExt};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -218,27 +218,124 @@ impl PoolFeed {
     }
 
     pub async fn refresh_all(&self) -> FeedReport {
+        let report = self.refresh_all_batched().await;
+        tracing::debug!(?report, "pool feed refresh");
+        report
+    }
+
+    /// Refresh the whole watchlist in three batched RPC calls.
+    ///
+    /// The unbatched path costs 2-3 calls *per pool* per tick. A 10-pool
+    /// watchlist therefore burned 20-30 calls every interval, which exhausts
+    /// a free-tier monthly quota in about a week. Batching collapses one tick
+    /// to three `getMultipleAccounts` calls regardless of watchlist size.
+    ///
+    /// Pools that fail to decode are reported individually, so a single bad
+    /// account never hides the rest of the feed.
+    pub async fn refresh_all_batched(&self) -> FeedReport {
         let started = Instant::now();
         let watchlist = self.watchlist().await;
         let attempted = watchlist.len();
-        let max_concurrent = self.config.max_concurrent.max(1);
-        let results: Vec<bool> = stream::iter(watchlist.into_iter().map(|watched| async move {
-            match refresh_pool(&self.rpc, &watched, self.config.refresh_reserves).await {
-                Ok(snapshot) => {
-                    self.commit_ok(&watched, snapshot).await;
-                    true
+        if attempted == 0 {
+            self.last_refresh_ms
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+            return FeedReport::default();
+        }
+
+        // Stage 1: one RPC call for every pool account in the watchlist.
+        let pool_addresses: Vec<Address> = watchlist.iter().map(|p| p.address).collect();
+        let pool_accounts = match self.rpc.get_multiple_accounts(&pool_addresses).await {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                tracing::warn!(error = %error, "batched pool fetch failed");
+                for watched in &watchlist {
+                    self.commit_err(watched, &FeedError::Rpc(error.clone()))
+                        .await;
                 }
+                *self.last_error.write().await = Some(error.to_string());
+                return FeedReport {
+                    attempted,
+                    updated: 0,
+                    failed: attempted,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                };
+            }
+        };
+        let mut first_pass: Vec<(&WatchedPool, Result<PendingPool>)> =
+            Vec::with_capacity(attempted);
+        for (watched, account) in watchlist.iter().zip(pool_accounts) {
+            let venue = match pool_venue(watched) {
+                Ok(venue) => venue,
                 Err(error) => {
-                    self.commit_err(&watched, &error).await;
-                    false
+                    first_pass.push((watched, Err(error)));
+                    continue;
+                }
+            };
+            let result = account
+                .map(|account| beast_rpc::AccountInfo { slot: 0, account })
+                .map(|info| begin_decode(watched, venue, info, self.config.refresh_reserves))
+                .unwrap_or(Err(FeedError::NotFound(watched.address)));
+            first_pass.push((watched, result));
+        }
+
+        // Stage 2: one RPC call for every auxiliary account still needed.
+        let mut aux_addresses: Vec<Address> = Vec::new();
+        for (_, pending) in &first_pass {
+            if let Ok(pending) = pending {
+                for address in pending.aux_addresses() {
+                    if !aux_addresses.contains(&address) {
+                        aux_addresses.push(address);
+                    }
                 }
             }
-        }))
-        .buffer_unordered(max_concurrent)
-        .collect()
-        .await;
-        let updated = results.iter().filter(|ok| **ok).count();
-        let failed = attempted.saturating_sub(updated);
+        }
+        let aux_accounts = if aux_addresses.is_empty() {
+            Vec::new()
+        } else {
+            match self.rpc.get_multiple_accounts(&aux_addresses).await {
+                Ok(accounts) => accounts,
+                Err(error) => {
+                    tracing::warn!(error = %error, "batched aux fetch failed");
+                    for watched in &watchlist {
+                        self.commit_err(watched, &FeedError::Rpc(error.clone()))
+                            .await;
+                    }
+                    *self.last_error.write().await = Some(error.to_string());
+                    return FeedReport {
+                        attempted,
+                        updated: 0,
+                        failed: attempted,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    };
+                }
+            }
+        };
+        let aux_map: HashMap<Address, &beast_rpc::Account> = aux_addresses
+            .iter()
+            .copied()
+            .zip(aux_accounts.iter())
+            .filter_map(|(address, account)| account.as_ref().map(|account| (address, account)))
+            .collect();
+
+        let mut updated = 0usize;
+        let mut failed = 0usize;
+        for (watched, pending) in first_pass {
+            let outcome = pending.and_then(|pending| {
+                let venue = pool_venue(&pending.watched)?;
+                finish_decode(venue, pending, &aux_map)
+            });
+            match outcome {
+                Ok(snapshot) => {
+                    self.commit_ok(watched, snapshot).await;
+                    updated += 1;
+                }
+                Err(error) => {
+                    self.commit_err(watched, &error).await;
+                    failed += 1;
+                }
+            }
+        }
+
         if failed > 0 {
             *self.last_error.write().await =
                 Some(format!("{failed}/{attempted} pool refreshes failed"));
@@ -360,23 +457,126 @@ impl PoolFeed {
 }
 
 /// Refresh a single pool account and decode it.
+/// Stage-1 result: the pool decoded without auxiliary accounts, plus a
+/// description of the extra accounts needed to finish the decode.
+struct PendingPool {
+    watched: WatchedPool,
+    data: Vec<u8>,
+    slot: u64,
+    decimals: Option<(u8, u8)>,
+    fee_bps: Option<u32>,
+    /// `amm_config` account address (Raydium family decoders only).
+    config: Option<Address>,
+    /// Vault accounts, needed only by decoders that store reserves elsewhere.
+    vault_a: Option<Address>,
+    vault_b: Option<Address>,
+    /// Mint accounts, needed only when decimals are unknown.
+    mint_a: Option<Address>,
+    mint_b: Option<Address>,
+}
+
+impl PendingPool {
+    fn aux_addresses(&self) -> Vec<Address> {
+        let mut addresses = Vec::with_capacity(5);
+        for address in [
+            self.config,
+            self.vault_a,
+            self.vault_b,
+            self.mint_a,
+            self.mint_b,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+        addresses
+    }
+}
+
 pub async fn refresh_pool(
     rpc: &RpcClient,
     watched: &WatchedPool,
     refresh_reserves: bool,
 ) -> Result<PoolSnapshot> {
-    let venue = catalog::venue(&watched.venue)
-        .ok_or_else(|| FeedError::UnknownVenue(watched.venue.clone()))?;
-    if venue.decoder.is_none() {
-        return Err(FeedError::Config(format!(
-            "venue {} is quote-only and has no account decoder",
-            watched.venue
-        )));
-    }
+    let venue = pool_venue(watched)?;
     let info = rpc
         .get_account_info(watched.address)
         .await?
         .ok_or(FeedError::NotFound(watched.address))?;
+    let pending = begin_decode(&watched, venue, info, refresh_reserves)?;
+    let aux_addresses = pending.aux_addresses();
+    let accounts = if aux_addresses.is_empty() {
+        Vec::new()
+    } else {
+        rpc.get_multiple_accounts(&aux_addresses).await?
+    };
+    let aux_map: HashMap<Address, &beast_rpc::Account> = aux_addresses
+        .iter()
+        .copied()
+        .zip(accounts.iter())
+        .filter_map(|(address, account)| account.as_ref().map(|account| (address, account)))
+        .collect();
+    finish_decode(venue, pending, &aux_map)
+}
+
+fn pool_venue(watched: &WatchedPool) -> Result<&'static beast_dex::catalog::Venue> {
+    let venue = catalog::venue(&watched.venue)
+        .ok_or_else(|| FeedError::UnknownVenue(watched.venue.clone()))?;
+    if venue.decoder.is_none() {
+        return Err(FeedError::Config(format!(
+            "venue {} is quote-only and has no local account decoder",
+            watched.venue
+        )));
+    }
+    Ok(venue)
+}
+
+/// Which decoders keep their vault balances in separate accounts rather than
+/// in the pool state itself.
+fn decoder_needs_reserves(decoder: Option<DecoderKind>) -> bool {
+    matches!(
+        decoder,
+        Some(
+            DecoderKind::RaydiumAmmV4
+                | DecoderKind::PumpSwap
+                | DecoderKind::SplTokenSwap
+                | DecoderKind::MeteoraDammV1
+                | DecoderKind::MeteoraDammV2
+                | DecoderKind::MeteoraDlmm
+        )
+    )
+}
+
+/// Which decoders cannot derive token decimals from the pool state alone.
+fn decoder_needs_decimals(decoder: Option<DecoderKind>) -> bool {
+    matches!(
+        decoder,
+        Some(
+            DecoderKind::PumpSwap
+                | DecoderKind::OrcaWhirlpool
+                | DecoderKind::SplTokenSwap
+                | DecoderKind::SaberStable
+                | DecoderKind::MeteoraDammV1
+                | DecoderKind::MeteoraDammV2
+                | DecoderKind::MeteoraDlmm
+        )
+    )
+}
+
+/// Stage 1: validate the pool account and learn which aux accounts exist.
+///
+/// Decoding is deliberate: `decode_venue` is called with no aux data so the
+/// pool's own mint/vault addresses can be read out of the state. Those
+/// addresses are then fetched in one batched call for the whole watchlist.
+fn begin_decode(
+    watched: &WatchedPool,
+    venue: &beast_dex::catalog::Venue,
+    info: beast_rpc::AccountInfo,
+    refresh_reserves: bool,
+) -> Result<PendingPool> {
     if info.account.owner.to_string() != venue.program_id {
         return Err(FeedError::Config(format!(
             "pool {} owner {} does not match catalogue program {}",
@@ -384,103 +584,89 @@ pub async fn refresh_pool(
         )));
     }
     let data = info.account.data;
-    let config_address = watched
-        .amm_config
-        .or_else(|| auxiliary_config_address(venue.decoder, &data));
-    let config_account = match config_address {
-        Some(address) => rpc.get_account_info(address).await.ok().flatten(),
-        None => None,
-    };
-    let aux = DecodeAux {
-        amm_config: config_account
-            .as_ref()
-            .map(|account| account.account.data.as_slice()),
+    let probe_aux = DecodeAux {
+        amm_config: None,
         decimals: watched.decimals,
         fee_override_bps: watched.fee_override_bps,
     };
-    let base_context = DecodeContext::new(watched.address, info.slot);
-    let first = decode_venue(venue, &data, &base_context, &aux)?;
+    let probed = decode_venue(
+        venue,
+        &data,
+        &DecodeContext::new(watched.address, info.slot),
+        &probe_aux,
+    )?;
 
-    let needs_reserves = refresh_reserves
-        && matches!(
-            venue.decoder,
-            Some(
-                DecoderKind::RaydiumAmmV4
-                    | DecoderKind::PumpSwap
-                    | DecoderKind::SplTokenSwap
-                    | DecoderKind::MeteoraDammV1
-                    | DecoderKind::MeteoraDammV2
-                    | DecoderKind::MeteoraDlmm
-            )
-        );
-    let needs_decimals = watched.decimals.is_none()
-        && matches!(
-            venue.decoder,
-            Some(
-                DecoderKind::PumpSwap
-                    | DecoderKind::OrcaWhirlpool
-                    | DecoderKind::SplTokenSwap
-                    | DecoderKind::SaberStable
-                    | DecoderKind::MeteoraDammV1
-                    | DecoderKind::MeteoraDammV2
-                    | DecoderKind::MeteoraDlmm
-            )
-        );
+    let needs_reserves = refresh_reserves && decoder_needs_reserves(venue.decoder);
+    let needs_decimals = watched.decimals.is_none() && decoder_needs_decimals(venue.decoder);
 
-    let mut reserves = None;
-    let mut decimals = watched.decimals;
-    if needs_reserves || needs_decimals {
-        let mut addresses = Vec::with_capacity(4);
-        if needs_reserves {
-            addresses.push(first.vault_a);
-            addresses.push(first.vault_b);
-        }
-        if needs_decimals {
-            addresses.push(first.mint_a);
-            addresses.push(first.mint_b);
-        }
-        let mut unique = Vec::with_capacity(addresses.len());
-        for address in addresses {
-            if !unique.contains(&address) {
-                unique.push(address);
-            }
-        }
-        let accounts = rpc.get_multiple_accounts(&unique).await?;
-        let by_address: HashMap<Address, &beast_rpc::Account> = unique
-            .iter()
-            .copied()
-            .zip(accounts.iter())
-            .filter_map(|(address, account)| account.as_ref().map(|account| (address, account)))
-            .collect();
-        if needs_reserves {
-            let reserve_a = by_address
-                .get(&first.vault_a)
+    let config = watched
+        .amm_config
+        .or_else(|| auxiliary_config_address(venue.decoder, &data));
+    Ok(PendingPool {
+        watched: watched.clone(),
+        data,
+        slot: info.slot,
+        decimals: watched.decimals,
+        fee_bps: watched.fee_override_bps,
+        config,
+        vault_a: needs_reserves.then_some(probed.vault_a),
+        vault_b: needs_reserves.then_some(probed.vault_b),
+        mint_a: needs_decimals.then_some(probed.mint_a),
+        mint_b: needs_decimals.then_some(probed.mint_b),
+    })
+}
+
+/// Stage 2: decode again, now with the batched aux accounts resolved.
+fn finish_decode(
+    venue: &beast_dex::catalog::Venue,
+    pending: PendingPool,
+    aux_map: &HashMap<Address, &beast_rpc::Account>,
+) -> Result<PoolSnapshot> {
+    let config = pending
+        .config
+        .and_then(|address| aux_map.get(&address))
+        .map(|account| account.data.as_slice());
+
+    let reserves = match (pending.vault_a, pending.vault_b) {
+        (Some(a), Some(b)) => {
+            let reserve_a = aux_map
+                .get(&a)
                 .and_then(|account| token_account_amount(&account.data));
-            let reserve_b = by_address
-                .get(&first.vault_b)
+            let reserve_b = aux_map
+                .get(&b)
                 .and_then(|account| token_account_amount(&account.data));
-            if let (Some(reserve_a), Some(reserve_b)) = (reserve_a, reserve_b) {
-                reserves = Some((reserve_a, reserve_b));
+            match (reserve_a, reserve_b) {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => None,
             }
         }
-        if needs_decimals {
-            let decimals_a = by_address
-                .get(&first.mint_a)
+        _ => None,
+    };
+    let decimals = match (pending.mint_a, pending.mint_b) {
+        (Some(a), Some(b)) => {
+            let dec_a = aux_map
+                .get(&a)
                 .and_then(|account| mint_decimals(&account.data));
-            let decimals_b = by_address
-                .get(&first.mint_b)
+            let dec_b = aux_map
+                .get(&b)
                 .and_then(|account| mint_decimals(&account.data));
-            if let (Some(decimals_a), Some(decimals_b)) = (decimals_a, decimals_b) {
-                decimals = Some((decimals_a, decimals_b));
+            match (dec_a, dec_b) {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => None,
             }
         }
-    }
+        _ => pending.decimals,
+    };
 
-    let mut context = DecodeContext::new(watched.address, info.slot);
+    let aux = DecodeAux {
+        amm_config: config,
+        decimals,
+        fee_override_bps: pending.fee_bps,
+    };
+    let mut context = DecodeContext::new(pending.watched.address, pending.slot);
     context.reserves = reserves;
     context.decimals = decimals;
-    let snapshot = decode_venue(venue, &data, &context, &aux)?;
-    Ok(snapshot)
+    decode_venue(venue, &pending.data, &context, &aux).map_err(FeedError::from)
 }
 
 fn auxiliary_config_address(decoder: Option<DecoderKind>, data: &[u8]) -> Option<Address> {

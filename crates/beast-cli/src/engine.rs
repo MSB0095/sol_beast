@@ -18,7 +18,7 @@ use beast_exec::{
     ExecutionConfig, Executor, RentReclaimer, Wallet, DEFAULT_TRANSACTION_FEE_LAMPORTS, WSOL_MINT,
 };
 use beast_feed::{FeedConfig, PoolFeed, WatchedPool};
-use beast_rpc::{JitoClient, RpcClient};
+use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::{AttemptRecord, AttemptUpdate, BundleRecord, Store};
 use chrono::Utc;
 use serde_json::json;
@@ -95,12 +95,44 @@ pub async fn run(options: RunOptions) -> Result<()> {
     store.set_meta("version", env!("CARGO_PKG_VERSION"))?;
     store.set_meta("mode", effective.as_str())?;
 
-    let rpc = Arc::new(RpcClient::new(
-        config.rpc.urls.clone(),
+    // Every endpoint is rate-limited against its own published free-tier
+    // ceiling, and endpoints that trip 429 go on a cooldown instead of
+    // poisoning the whole watchlist.
+    let rpc = Arc::new(RpcClient::with_endpoints(
+        config
+            .rpc
+            .effective_endpoints()
+            .into_iter()
+            .map(|endpoint| {
+                EndpointOptions::new(endpoint.name, endpoint.url)
+                    .with_rps(endpoint.max_rps, endpoint.heavy_rps)
+            })
+            .collect(),
         config.rpc.commitment.clone(),
         config.rpc.timeout_ms,
         config.rpc.max_retries,
+        config.rpc.circuit_breaker_seconds * 1_000,
     )?);
+    if config.rpc.endpoints.is_empty() {
+        tracing::info!(
+            "using legacy [rpc] urls as fallback endpoints; add [[rpc.endpoints]] for role routing"
+        );
+    }
+    let rpc_health: Arc<std::sync::Mutex<Vec<beast_rpc::EndpointHealth>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let rpc = rpc.clone();
+        let rpc_health = rpc_health.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                ticker.tick().await;
+                if let Ok(mut health) = rpc_health.lock() {
+                    *health = rpc.health();
+                }
+            }
+        });
+    }
     let jupiter_base = if config.rpc.jupiter_quote_url.trim().is_empty() {
         "https://lite-api.jup.ag/swap/v1".to_string()
     } else {
@@ -227,6 +259,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         )?;
         state.rent = rent.clone();
         state.signing_enabled = options.real && config.runtime.real;
+        state.rpc_health = Some(rpc_health.clone());
         let state = Arc::new(state);
         let controls = ControlPlane {
             mode: state.mode.clone(),

@@ -115,6 +115,38 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Append a named RPC provider endpoint block to config.toml.
+    Rpc {
+        #[command(subcommand)]
+        action: RpcCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RpcCommand {
+    /// Add one provider endpoint (`beast rpc add --provider drpc --key-env DRPC_KEY --role feed`).
+    Add {
+        /// Provider preset: drpc | helius | alchemy | quicknode | chainstack | public
+        #[arg(long, default_value = "drpc")]
+        provider: String,
+        /// Environment variable holding the API key. Leave empty for `public`.
+        #[arg(long)]
+        key_env: Option<String>,
+        /// feed | exec | discovery | rent | fallback
+        #[arg(long, default_value = "feed")]
+        role: String,
+        /// Endpoint name; defaults to the provider id.
+        #[arg(long)]
+        name: Option<String>,
+        /// Append even if an endpoint with this name already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print every configured endpoint with its role and limits.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -185,6 +217,23 @@ async fn main() -> Result<()> {
             init_logging("warn", cli.json_logs)?;
             commands::init(force)
         }
+        Command::Rpc { action } => match action {
+            RpcCommand::Add {
+                provider,
+                key_env,
+                role,
+                name,
+                force,
+            } => commands::rpc_add(
+                cli.config.as_deref(),
+                &provider,
+                key_env.as_deref(),
+                &role,
+                name.as_deref(),
+                force,
+            ),
+            RpcCommand::List { json } => commands::rpc_list(cli.config.as_deref(), json),
+        },
     }
 }
 

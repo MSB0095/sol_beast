@@ -1,17 +1,21 @@
 //! Non-daemon CLI commands.
 
 use anyhow::{bail, Context, Result};
-use beast_core::config::{self, BeastConfig, GuardMode, LoadedConfig, DEFAULT_CONFIG_TOML};
+use beast_core::config::{
+    self, BeastConfig, EndpointRole, GuardMode, LoadedConfig, RpcEndpointConfig,
+    DEFAULT_CONFIG_TOML,
+};
 use beast_dex::catalog::{self, VenueKind, VENUES};
 use beast_dex::jupiter::{JupiterClient, QuoteRequest};
 use beast_dex::Address;
 use beast_exec::{RentReclaimer, Wallet};
 use beast_feed::{refresh_pool, WatchedPool};
-use beast_rpc::RpcClient;
+use beast_rpc::{EndpointOptions, RpcClient};
 use beast_store::Store;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 fn load(path: Option<&Path>, real: bool) -> Result<LoadedConfig> {
     let loaded = config::load(path, real)?;
@@ -360,6 +364,141 @@ struct DoctorCheck {
     detail: String,
 }
 
+/// One heavy-method probe against a dedicated endpoint for its role.
+struct CapabilityProbe {
+    name: &'static str,
+    ok: bool,
+    detail: String,
+}
+
+/// Probe the heavy methods free tiers actually block.
+///
+/// `getProgramAccounts` powers pool discovery and `getTokenAccountsByOwner`
+/// powers rent reclamation. Both are commonly disabled or throttled on free
+/// plans, and a failure only surfaces mid-run, so they get probed up front.
+async fn probe_capabilities(config: &BeastConfig) -> Vec<CapabilityProbe> {
+    let endpoints = config.rpc.effective_endpoints();
+    let by_role = |role: beast_core::config::EndpointRole| -> Option<&RpcEndpointConfig> {
+        endpoints
+            .iter()
+            .find(|endpoint| endpoint.role == role)
+            .or_else(|| endpoints.first())
+    };
+
+    let client_for = |endpoint: &RpcEndpointConfig| {
+        beast_rpc::RpcClient::with_endpoints(
+            vec![
+                EndpointOptions::new(endpoint.name.clone(), endpoint.url.clone())
+                    .with_rps(endpoint.max_rps, endpoint.heavy_rps),
+            ],
+            config.rpc.commitment.clone(),
+            config.rpc.timeout_ms,
+            0,
+            0,
+        )
+    };
+
+    let mut probes = Vec::new();
+
+    // getProgramAccounts against the SOL/SPL token program (small account count
+    // per owner filter, so it stays cheap even on nodes with a full index).
+    let discovery = by_role(EndpointRole::Discovery).or_else(|| by_role(EndpointRole::Fallback));
+    if let Some(endpoint) = discovery {
+        let program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            .parse::<beast_dex::Address>()
+            .expect("token program id");
+        let result = client_for(endpoint);
+        probes.push(match result {
+            Ok(client) => {
+                let started = std::time::Instant::now();
+                match client
+                    .get_program_accounts(program, Vec::new(), Some((0, 0)))
+                    .await
+                {
+                    Ok(accounts) => CapabilityProbe {
+                        name: "cap:getProgramAccounts",
+                        ok: true,
+                        detail: format!(
+                            "{} accounts via {} in {}ms",
+                            accounts.len(),
+                            endpoint.name,
+                            started.elapsed().as_millis()
+                        ),
+                    },
+                    Err(error) => CapabilityProbe {
+                        name: "cap:getProgramAccounts",
+                        ok: false,
+                        detail: format!("{} blocked: {error}", endpoint.name),
+                    },
+                }
+            }
+            Err(error) => CapabilityProbe {
+                name: "cap:getProgramAccounts",
+                ok: false,
+                detail: error.to_string(),
+            },
+        });
+    } else {
+        probes.push(CapabilityProbe {
+            name: "cap:getProgramAccounts",
+            ok: false,
+            detail: "no discovery-capable endpoint configured".into(),
+        });
+    }
+
+    // getTokenAccountsByOwner against a known non-empty wallet so the call
+    // returns a small, deterministic payload.
+    let rent = by_role(EndpointRole::Rent).or_else(|| by_role(EndpointRole::Fallback));
+    if let Some(endpoint) = rent {
+        // A well-known active wallet; only used to test method availability.
+        let owner = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+            .parse::<beast_dex::Address>()
+            .expect("probe owner");
+        let token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            .parse::<beast_dex::Address>()
+            .expect("token program id");
+        let result = client_for(endpoint);
+        probes.push(match result {
+            Ok(client) => {
+                let started = std::time::Instant::now();
+                match client
+                    .get_token_accounts_by_owner(owner, token_program)
+                    .await
+                {
+                    Ok(accounts) => CapabilityProbe {
+                        name: "cap:getTokenAccountsByOwner",
+                        ok: true,
+                        detail: format!(
+                            "{} accounts via {} in {}ms",
+                            accounts.len(),
+                            endpoint.name,
+                            started.elapsed().as_millis()
+                        ),
+                    },
+                    Err(error) => CapabilityProbe {
+                        name: "cap:getTokenAccountsByOwner",
+                        ok: false,
+                        detail: format!("{} blocked: {error}", endpoint.name),
+                    },
+                }
+            }
+            Err(error) => CapabilityProbe {
+                name: "cap:getTokenAccountsByOwner",
+                ok: false,
+                detail: error.to_string(),
+            },
+        });
+    } else {
+        probes.push(CapabilityProbe {
+            name: "cap:getTokenAccountsByOwner",
+            ok: false,
+            detail: "no rent-capable endpoint configured".into(),
+        });
+    }
+
+    probes
+}
+
 pub async fn doctor(path: Option<&Path>, json_output: bool, no_network: bool) -> Result<()> {
     let loaded = load(path, false)?;
     let config = &loaded.config;
@@ -456,21 +595,66 @@ pub async fn doctor(path: Option<&Path>, json_output: bool, no_network: bool) ->
         });
     } else {
         let rpc = rpc(config)?;
-        let health = rpc.get_health().await;
-        let slot = rpc.get_slot().await;
-        let version = rpc.get_version().await;
-        checks.push(DoctorCheck {
-            name: "rpc",
-            ok: health.as_deref().map(|v| v == "ok").unwrap_or(false),
-            detail: format!(
-                "health={:?} slot={:?} version={}",
-                health,
-                slot,
-                version
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|error| error.to_string())
-            ),
-        });
+
+        // Probe each configured endpoint independently. Free tiers disagree on
+        // which heavy methods they allow, so a global health check would hide a
+        // dead discovery/rent path behind a healthy feed.
+        for endpoint in config.rpc.effective_endpoints() {
+            let started = std::time::Instant::now();
+            let client = beast_rpc::RpcClient::with_endpoints(
+                vec![
+                    EndpointOptions::new(endpoint.name.clone(), endpoint.url.clone())
+                        .with_rps(endpoint.max_rps, endpoint.heavy_rps),
+                ],
+                config.rpc.commitment.clone(),
+                config.rpc.timeout_ms,
+                1,
+                0,
+            )?;
+            let health = client.get_health().await;
+            let slot = client.get_slot().await;
+            let elapsed_ms = started.elapsed().as_millis();
+            let ok = health
+                .as_deref()
+                .map(|value| value == "ok")
+                .unwrap_or(false)
+                && slot.is_ok();
+            let detail = match (&health, &slot) {
+                (Ok(health), Ok(slot)) => {
+                    format!(
+                        "role={} health={health} slot={slot} rtt={elapsed_ms}ms max_rps={} heavy_rps={}",
+                        endpoint.role.as_str(),
+                        endpoint.max_rps,
+                        endpoint.heavy_rps
+                    )
+                }
+                (Ok(health), Err(error)) => {
+                    format!(
+                        "role={} health={health} slot error: {error}",
+                        endpoint.role.as_str()
+                    )
+                }
+                (Err(error), _) => {
+                    format!("role={} unreachable: {error}", endpoint.role.as_str())
+                }
+            };
+            checks.push(DoctorCheck {
+                name: Box::leak(format!("rpc:{}", endpoint.name).into_boxed_str()),
+                ok,
+                detail,
+            });
+            let _ = client;
+        }
+
+        // Capability probes for the methods the bot actually depends on.
+        let capabilities = probe_capabilities(config).await;
+        for capability in capabilities {
+            checks.push(DoctorCheck {
+                name: capability.name,
+                ok: capability.ok,
+                detail: capability.detail,
+            });
+        }
 
         let client = jupiter(config, &loaded.secrets)?;
         let mut request = QuoteRequest::new(
@@ -599,6 +783,210 @@ pub async fn doctor(path: Option<&Path>, json_output: bool, no_network: bool) ->
         }
     }
     let _ = wallet_address;
+    Ok(())
+}
+
+/// Verify a free-tier RPC provider's real limits before wiring it in.
+///
+/// Every number here comes from the provider's own published docs; the point
+/// is that the preset writes limits you cannot accidentally exceed, which is
+/// what keeps a free account alive for months instead of hours.
+struct ProviderPreset {
+    id: &'static str,
+    url: &'static str,
+    /// URL when `key_env` is empty (public endpoints).
+    public_url: Option<&'static str>,
+    max_rps: u32,
+    heavy_rps: u32,
+    monthly_budget: u64,
+    /// Honest note shown to the operator when the preset is added.
+    caveat: &'static str,
+}
+
+const PROVIDER_PRESETS: &[ProviderPreset] = &[
+    ProviderPreset {
+        id: "drpc",
+        url: "https://solana.drpc.org",
+        public_url: None,
+        max_rps: 80,
+        heavy_rps: 5,
+        monthly_budget: 8_000_000,
+        caveat:
+            "210M CU/30d at 20 CU/call: ~10.5M calls/month. Biggest free tier; no gRPC at any plan.",
+    },
+    ProviderPreset {
+        id: "helius",
+        url: "https://mainnet.helius-rpc.com/?api-key=${KEY}",
+        public_url: None,
+        max_rps: 8,
+        heavy_rps: 4,
+        monthly_budget: 800_000,
+        caveat:
+            "1M credits/month at 10 RPS; getProgramAccounts is 5 RPS and sendTransaction 1 RPS.",
+    },
+    ProviderPreset {
+        id: "alchemy",
+        url: "https://solana-mainnet.g.alchemy.com/v2/${KEY}",
+        public_url: None,
+        max_rps: 12,
+        heavy_rps: 4,
+        monthly_budget: 900_000,
+        caveat: "30M CU/month is ~1.1M requests at ~27 CU average; archival reads on free.",
+    },
+    ProviderPreset {
+        id: "quicknode",
+        url: "https://YOUR-ENDPOINT.solana-mainnet.quiknode.pro/${KEY}/",
+        public_url: None,
+        max_rps: 12,
+        heavy_rps: 4,
+        monthly_budget: 300_000,
+        caveat: "30-day trial of 10M credits at 15 RPS; no permanent free plan.",
+    },
+    ProviderPreset {
+        id: "chainstack",
+        url: "https://solana-mainnet.core.chainstack.com/${KEY}/",
+        public_url: None,
+        max_rps: 12,
+        heavy_rps: 4,
+        monthly_budget: 2_500_000,
+        caveat: "3M RU/month free, but getProgramAccounts is BLOCKED on the Developer plan.",
+    },
+    ProviderPreset {
+        id: "public",
+        url: "https://api.mainnet-beta.solana.com",
+        public_url: Some("https://api.mainnet-beta.solana.com"),
+        max_rps: 4,
+        heavy_rps: 1,
+        monthly_budget: 0,
+        caveat: "100 requests/10s per IP and 40 per method: 4 RPS per method. No SLA.",
+    },
+];
+
+/// `beast rpc add` — append a verified endpoint block to config.toml.
+pub fn rpc_add(
+    config_path: Option<&Path>,
+    provider: &str,
+    key_env: Option<&str>,
+    role: &str,
+    name: Option<&str>,
+    force: bool,
+) -> Result<()> {
+    let role = match role.to_ascii_lowercase().as_str() {
+        "feed" => EndpointRole::Feed,
+        "exec" => EndpointRole::Exec,
+        "discovery" => EndpointRole::Discovery,
+        "rent" => EndpointRole::Rent,
+        "fallback" => EndpointRole::Fallback,
+        other => bail!("unknown role {other}; use feed|exec|discovery|rent|fallback"),
+    };
+    let preset = PROVIDER_PRESETS
+        .iter()
+        .find(|preset| preset.id == provider)
+        .ok_or_else(|| {
+            let known: Vec<&str> = PROVIDER_PRESETS.iter().map(|p| p.id).collect();
+            anyhow::anyhow!("unknown provider {provider}; known: {}", known.join(", "))
+        })?;
+
+    let key_env =
+        key_env
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or(if preset.id == "public" {
+                None
+            } else {
+                Some(preset.id)
+            });
+    let needs_key = preset.public_url.is_none();
+    if needs_key && key_env.is_none() {
+        bail!(
+            "provider {} needs --key-env (e.g. --key-env DRPC_KEY)",
+            preset.id
+        );
+    }
+
+    let url = if needs_key {
+        let key_env = key_env.expect("checked above");
+        preset.url.replace("${KEY}", &format!("${{{key_env}}}"))
+    } else {
+        preset.public_url.expect("public url").to_string()
+    };
+    let name = name
+        .map(str::to_string)
+        .unwrap_or_else(|| preset.id.to_string());
+
+    let path = config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("./config.toml"));
+    let existed = path.exists();
+    let mut text = if existed {
+        fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?
+    } else {
+        format!("config_version = {}\n", beast_core::CONFIG_VERSION)
+    };
+    if text.contains(&format!("name = \"{name}\"")) && !force {
+        bail!("config already has an endpoint named {name}; use --force to add another",);
+    }
+
+    let block = format!(
+        "\n[[rpc.endpoints]]\nname = \"{name}\"\nurl = \"{url}\"\nrole = \"{role}\"\n         max_rps = {max_rps}\nheavy_rps = {heavy_rps}\nmonthly_call_budget = {budget}\n",
+        role = role.as_str(),
+        max_rps = preset.max_rps,
+        heavy_rps = preset.heavy_rps,
+        budget = preset.monthly_budget,
+    );
+    text.push_str(&block);
+    fs::write(&path, &text).with_context(|| format!("write {}", path.display()))?;
+
+    println!("added endpoint {name} ({})", role.as_str());
+    println!("  url: {url}");
+    if let Some(key_env) = key_env {
+        println!("  key: export {key_env}=... (read from the environment, never written here)");
+    }
+    println!(
+        "  limits: {} rps / {} heavy rps / {} calls per month",
+        preset.max_rps, preset.heavy_rps, preset.monthly_budget
+    );
+    println!("  note: {}", preset.caveat);
+    if !existed {
+        println!("\nwrote {}", path.display());
+    }
+    println!("\nnext: beast check && beast doctor");
+    Ok(())
+}
+
+/// `beast rpc list` — every configured endpoint with its role and limits.
+pub fn rpc_list(config_path: Option<&Path>, json_output: bool) -> Result<()> {
+    let loaded = load(config_path, false)?;
+    let endpoints = loaded.config.rpc.effective_endpoints();
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "count": endpoints.len(),
+                "endpoints": endpoints,
+            }))?
+        );
+        return Ok(());
+    }
+    if endpoints.is_empty() {
+        println!("no endpoints configured");
+        return Ok(());
+    }
+    println!(
+        "{:<12} {:<9} {:>7} {:>7} {:>10}  URL",
+        "NAME", "ROLE", "MAX_RPS", "HEAVY", "BUDGET"
+    );
+    for endpoint in &endpoints {
+        println!(
+            "{:<12} {:<9} {:>7} {:>7} {:>10}  {}",
+            endpoint.name,
+            endpoint.role.as_str(),
+            endpoint.max_rps,
+            endpoint.heavy_rps,
+            endpoint.monthly_call_budget,
+            endpoint.url,
+        );
+    }
     Ok(())
 }
 

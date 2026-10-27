@@ -12,6 +12,7 @@ beast-dex = { path = "../beast-dex" }
 beast-exec = { path = "../beast-exec" }
 beast-feed = { path = "../beast-feed" }
 beast-store = { path = "../beast-store" }
+beast-rpc = { path = "../beast-rpc" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

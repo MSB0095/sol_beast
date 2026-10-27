@@ -13,7 +13,7 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, RpcError>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum RpcError {
     #[error("no RPC endpoints configured")]
     NoEndpoints,

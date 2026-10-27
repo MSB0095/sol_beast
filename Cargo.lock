@@ -516,6 +516,7 @@ dependencies = [
  "beast-dex",
  "beast-exec",
  "beast-feed",
+ "beast-rpc",
  "beast-store",
  "chrono",
  "http-body-util",

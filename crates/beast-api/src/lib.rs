@@ -147,6 +147,8 @@ pub struct ApiState {
     /// True only when the process was started with `--real` *and*
     /// `runtime.real=true`. The API uses this for any signing endpoint.
     pub signing_enabled: bool,
+    /// Latest RPC endpoint health snapshot (refreshed by the engine loop).
+    pub rpc_health: Option<Arc<std::sync::Mutex<Vec<beast_rpc::EndpointHealth>>>>,
     auth: Arc<ApiAuth>,
     read_gate: RateGate,
     admin_gate: RateGate,
@@ -192,6 +194,7 @@ impl ApiState {
             jupiter,
             rent: None,
             signing_enabled: false,
+            rpc_health: None,
             auth,
             read_gate: RateGate::new(config.api.read_rate_limit_per_sec),
             admin_gate: RateGate::new(config.api.rate_limit_per_sec),
@@ -532,6 +535,24 @@ async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Value>> {
             "unguarded_live_allowed": state.config.safety.allow_unguarded_live,
         },
         "jito_enabled": state.config.jito.enabled,
+        "rpc_endpoints": state
+            .rpc_health
+            .as_ref()
+            .and_then(|health| health.lock().ok().map(|health| health.clone()))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|endpoint| json!({
+                "name": endpoint.name,
+                "url": endpoint.url,
+                "role": "fallback",
+                "max_rps": endpoint.max_rps,
+                "heavy_rps": endpoint.heavy_rps,
+                "total_calls": endpoint.total_calls,
+                "rate_limited": endpoint.rate_limited,
+                "circuit_open": endpoint.circuit_open,
+                "circuit_remaining_ms": endpoint.circuit_remaining_ms,
+            }))
+            .collect::<Vec<_>>(),
         "wallet": {
             "keypair_configured": keypair_present(&state.config),
         },

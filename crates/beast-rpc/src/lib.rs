@@ -101,15 +101,84 @@ impl TransactionDetails {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EndpointOptions {
+    pub name: String,
+    pub url: String,
+    /// Sustained requests/second allowed on this endpoint.
+    pub max_rps: u32,
+    /// Separate limit for heavy methods that free tiers throttle harder.
+    pub heavy_rps: u32,
+}
+
+impl EndpointOptions {
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            max_rps: 5,
+            heavy_rps: 2,
+        }
+    }
+
+    pub fn with_rps(mut self, max_rps: u32, heavy_rps: u32) -> Self {
+        self.max_rps = max_rps.max(1);
+        self.heavy_rps = heavy_rps.max(1);
+        self
+    }
+}
+
+/// Live health of one endpoint, refreshed on every request.
+#[derive(Debug, Clone, Serialize)]
+pub struct EndpointHealth {
+    pub name: String,
+    pub url: String,
+    pub max_rps: u32,
+    pub heavy_rps: u32,
+    pub total_calls: u64,
+    pub rate_limited: u64,
+    pub circuit_open: bool,
+    /// Milliseconds until the circuit breaker closes. 0 when healthy.
+    pub circuit_remaining_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct EndpointState {
+    calls: AtomicU64,
+    rate_limited: AtomicU64,
+    /// Unix millis until which this endpoint is skipped after a rate limit.
+    cooldown_until: AtomicU64,
+}
+
+/// Token-bucket state for one rate-limit key (endpoint or endpoint+method).
+#[derive(Debug, Default)]
+struct Bucket {
+    /// Next instant at which a slot becomes free, in millis.
+    next_free_ms: AtomicU64,
+}
+
 #[derive(Debug)]
 pub struct RpcClient {
     http: reqwest::Client,
-    urls: Vec<String>,
+    endpoints: Vec<EndpointOptions>,
+    states: Vec<EndpointState>,
+    buckets: Vec<Bucket>,
+    /// Maps `endpoint_index * 2 + heavy_slot` into `buckles`.
+    heavy_buckets: Vec<Bucket>,
     cursor: AtomicUsize,
     request_id: AtomicU64,
     commitment: String,
     max_retries: u32,
+    circuit_breaker_ms: u64,
 }
+
+/// Methods that free tiers throttle independently of the general RPS limit.
+const HEAVY_METHODS: &[&str] = &[
+    "getProgramAccounts",
+    "getTokenAccountsByOwner",
+    "getTokenAccountsByDelegate",
+    "getTokenLargestAccounts",
+];
 
 impl RpcClient {
     pub fn new(
@@ -118,47 +187,172 @@ impl RpcClient {
         timeout_ms: u64,
         max_retries: u32,
     ) -> Result<Self> {
-        let urls: Vec<String> = urls
+        let endpoints: Vec<EndpointOptions> = urls
             .into_iter()
             .map(|url| url.trim().trim_end_matches('/').to_string())
             .filter(|url| !url.is_empty())
+            .enumerate()
+            .map(|(index, url)| EndpointOptions::new(format!("legacy-{index}"), url))
             .collect();
-        if urls.is_empty() {
+        Self::build(endpoints, commitment, timeout_ms, max_retries, 15_000)
+    }
+
+    /// Build a client from named endpoints with per-endpoint limits.
+    pub fn with_endpoints(
+        endpoints: Vec<EndpointOptions>,
+        commitment: impl Into<String>,
+        timeout_ms: u64,
+        max_retries: u32,
+        circuit_breaker_ms: u64,
+    ) -> Result<Self> {
+        Self::build(
+            endpoints,
+            commitment,
+            timeout_ms,
+            max_retries,
+            circuit_breaker_ms,
+        )
+    }
+
+    fn build(
+        endpoints: Vec<EndpointOptions>,
+        commitment: impl Into<String>,
+        timeout_ms: u64,
+        max_retries: u32,
+        circuit_breaker_ms: u64,
+    ) -> Result<Self> {
+        if endpoints.is_empty() {
             return Err(RpcError::NoEndpoints);
         }
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(timeout_ms.clamp(500, 60_000)))
             .user_agent(concat!("sol-beast-rpc/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        let count = endpoints.len();
         Ok(Self {
             http,
-            urls,
+            endpoints,
+            states: (0..count).map(|_| EndpointState::default()).collect(),
+            buckets: (0..count).map(|_| Bucket::default()).collect(),
+            heavy_buckets: (0..count).map(|_| Bucket::default()).collect(),
             cursor: AtomicUsize::new(0),
             request_id: AtomicU64::new(1),
             commitment: commitment.into(),
             max_retries,
+            circuit_breaker_ms,
         })
     }
 
-    pub fn endpoints(&self) -> &[String] {
-        &self.urls
+    pub fn endpoints(&self) -> &[EndpointOptions] {
+        &self.endpoints
     }
 
-    fn next_url(&self) -> &str {
-        let index = self.cursor.fetch_add(1, Ordering::Relaxed) % self.urls.len();
-        &self.urls[index]
+    /// Snapshot of per-endpoint health for the UI and the doctor command.
+    pub fn health(&self) -> Vec<EndpointHealth> {
+        let now = now_ms();
+        (0..self.endpoints.len())
+            .map(|index| {
+                let state = &self.states[index];
+                let cooldown = state.cooldown_until.load(Ordering::Relaxed);
+                EndpointHealth {
+                    name: self.endpoints[index].name.clone(),
+                    url: self.endpoints[index].url.clone(),
+                    max_rps: self.endpoints[index].max_rps,
+                    heavy_rps: self.endpoints[index].heavy_rps,
+                    total_calls: state.calls.load(Ordering::Relaxed),
+                    rate_limited: state.rate_limited.load(Ordering::Relaxed),
+                    circuit_open: cooldown > now,
+                    circuit_remaining_ms: cooldown.saturating_sub(now),
+                }
+            })
+            .collect()
+    }
+
+    pub fn total_calls(&self) -> u64 {
+        self.states
+            .iter()
+            .map(|state| state.calls.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Reserve a slot in the token bucket for `(endpoint, method)`.
+    ///
+    /// Free tiers fail on requests-per-second, not on compute units, so the
+    /// only thing that keeps a long-lived feed alive is refusing to issue a
+    /// request the provider will answer with 429.
+    async fn acquire(&self, index: usize, method: &str) {
+        let (limit, bucket) = if HEAVY_METHODS.contains(&method) {
+            (
+                u64::from(self.endpoints[index].heavy_rps),
+                &self.heavy_buckets[index],
+            )
+        } else {
+            (
+                u64::from(self.endpoints[index].max_rps),
+                &self.buckets[index],
+            )
+        };
+        if limit == 0 {
+            return;
+        }
+        let spacing_ms = (1_000 / limit).max(1);
+        loop {
+            let now = now_ms();
+            let next = bucket.next_free_ms.load(Ordering::Relaxed);
+            if next <= now {
+                // Claim the slot; if we lose the race, another caller claimed it.
+                if bucket
+                    .next_free_ms
+                    .compare_exchange(next, now + spacing_ms, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return;
+                }
+                continue;
+            }
+            let wait_ms = next.saturating_sub(now).min(spacing_ms);
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        }
+    }
+
+    /// Pick the next healthy endpoint. Endpoints on cooldown are skipped.
+    fn pick(&self) -> Option<usize> {
+        let now = now_ms();
+        let count = self.endpoints.len();
+        for _ in 0..count {
+            let index = self.cursor.fetch_add(1, Ordering::Relaxed) % count;
+            if self.states[index].cooldown_until.load(Ordering::Relaxed) <= now {
+                return Some(index);
+            }
+        }
+        None
     }
 
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            let url = self.next_url();
+            let Some(index) = self.pick() else {
+                let cooldown = self
+                    .states
+                    .iter()
+                    .map(|state| state.cooldown_until.load(Ordering::Relaxed))
+                    .max()
+                    .unwrap_or(0);
+                return Err(RpcError::Http(format!(
+                    "all {} RPC endpoints are cooling down for {}ms",
+                    self.endpoints.len(),
+                    cooldown.saturating_sub(now_ms())
+                )));
+            };
+            self.acquire(index, method).await;
+            let url = &self.endpoints[index].url;
             let body = json!({
                 "jsonrpc": "2.0",
                 "id": self.request_id.fetch_add(1, Ordering::Relaxed),
                 "method": method,
                 "params": params,
             });
+            self.states[index].calls.fetch_add(1, Ordering::Relaxed);
             let result = self
                 .http
                 .post(url)
@@ -177,6 +371,9 @@ impl RpcClient {
             let response = match result {
                 Ok(response) => response,
                 Err(error) => {
+                    if is_rate_limited(&error) {
+                        self.trip(index);
+                    }
                     tracing::warn!(method, url, attempt, error = %error, "RPC request failed");
                     last_error = Some(error);
                     continue;
@@ -192,6 +389,9 @@ impl RpcClient {
                     code: error.code,
                     message: error.message,
                 };
+                if is_rate_limited(&rpc_error) {
+                    self.trip(index);
+                }
                 tracing::warn!(method, url, attempt, error = %rpc_error, "RPC returned error");
                 last_error = Some(rpc_error);
                 continue;
@@ -201,6 +401,21 @@ impl RpcClient {
                 .ok_or_else(|| RpcError::Decode("missing result".into()));
         }
         Err(last_error.unwrap_or_else(|| RpcError::Decode("RPC retries exhausted".into())))
+    }
+
+    /// Put an endpoint on cooldown after a rate-limit or server error.
+    fn trip(&self, index: usize) {
+        self.states[index]
+            .rate_limited
+            .fetch_add(1, Ordering::Relaxed);
+        self.states[index]
+            .cooldown_until
+            .store(now_ms() + self.circuit_breaker_ms, Ordering::Relaxed);
+        tracing::debug!(
+            endpoint = %self.endpoints[index].name,
+            cooldown_ms = self.circuit_breaker_ms,
+            "RPC endpoint circuit opened"
+        );
     }
 
     pub async fn get_slot(&self) -> Result<u64> {
@@ -591,6 +806,23 @@ struct RpcEnvelopeError {
     message: String,
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn is_rate_limited(error: &RpcError) -> bool {
+    match error {
+        RpcError::Http(message) => message.contains("429") || message.contains("Too Many Requests"),
+        // -32005 is the generic "node is behind" / overload code used by many
+        // providers; -32429 is the Solana JSON-RPC rate-limit code.
+        RpcError::Rpc { code, .. } => *code == -32_429 || *code == -32_005,
+        _ => false,
+    }
+}
+
 fn parse_account(value: &Value) -> Result<Account> {
     let lamports = value
         .get("lamports")
@@ -864,10 +1096,10 @@ fn validate_simulation(value: &Value) -> Result<()> {
         Value::Object(map) if map.contains_key("succeeded") => Ok(()),
         Value::Object(map) => {
             let failed = map.get("failed").unwrap_or(summary);
-            return Err(RpcError::Transaction(format!(
+            Err(RpcError::Transaction(format!(
                 "Jito bundle simulation failed: {}",
                 snippet(&failed.to_string())
-            )));
+            )))
         }
         Value::String(status) => Err(RpcError::Transaction(format!(
             "Jito bundle simulation did not succeed: {status}"

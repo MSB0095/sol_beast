@@ -30,3 +30,4 @@ secrets.*.toml
 # Deploy-time keypairs (never commit wallet or guard keys)
 **/keypair.json
 **/guard-keypair.json
+test-keypair.json

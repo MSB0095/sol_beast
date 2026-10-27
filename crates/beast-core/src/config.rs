@@ -122,6 +122,75 @@ impl Default for WalletConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointRole {
+    /// High-volume pool/account reads (the refresh feed).
+    Feed,
+    /// Low-volume, latency-critical calls made right before a bundle.
+    Exec,
+    /// `getProgramAccounts` discovery scans.
+    Discovery,
+    /// `getTokenAccountsByOwner` rent scans.
+    Rent,
+    /// Last resort: any role, used only when every other endpoint is down.
+    Fallback,
+}
+
+impl EndpointRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EndpointRole::Feed => "feed",
+            EndpointRole::Exec => "exec",
+            EndpointRole::Discovery => "discovery",
+            EndpointRole::Rent => "rent",
+            EndpointRole::Fallback => "fallback",
+        }
+    }
+}
+
+/// A single named RPC endpoint with its own rate limit and monthly budget.
+///
+/// Free tiers fail in two ways: too many requests per second, and too many
+/// requests per month. Both are configurable per endpoint so the feed can be
+/// pointed at a high-volume tier while latency-critical calls use a fast one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpcEndpointConfig {
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_role")]
+    pub role: EndpointRole,
+    /// Sustained requests/second allowed on this endpoint. Free plans range
+    /// from ~4 (public per-method) to ~100 (dRPC).
+    #[serde(default = "default_endpoint_rps")]
+    pub max_rps: u32,
+    /// Separate limit for heavy methods (`getProgramAccounts`,
+    /// `getTokenAccountsByOwner`, ...) which are throttled harder, e.g. Helius
+    /// free allows 5/s for `getProgramAccounts` vs 10/s overall.
+    #[serde(default = "default_heavy_rps")]
+    pub heavy_rps: u32,
+    /// Monthly call budget. 0 disables the quota warning.
+    #[serde(default)]
+    pub monthly_call_budget: u64,
+    /// Lower wins when several endpoints serve the same role.
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+}
+
+fn default_role() -> EndpointRole {
+    EndpointRole::Fallback
+}
+fn default_endpoint_rps() -> u32 {
+    5
+}
+fn default_heavy_rps() -> u32 {
+    2
+}
+fn default_priority() -> u8 {
+    10
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpcConfig {
@@ -135,10 +204,21 @@ pub struct RpcConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_retries")]
     pub max_retries: u32,
+    /// Named, role-routed endpoints. When empty, `urls` is promoted to a
+    /// single fallback endpoint so old configs keep working.
+    #[serde(default)]
+    pub endpoints: Vec<RpcEndpointConfig>,
+    /// Cooldown applied to an endpoint after a rate-limit or server error.
+    #[serde(default = "default_circuit_seconds")]
+    pub circuit_breaker_seconds: u64,
     #[serde(default = "default_jupiter_lite")]
     pub jupiter_quote_url: String,
     #[serde(default = "default_jupiter_lite")]
     pub jupiter_swap_instructions_url: String,
+}
+
+fn default_circuit_seconds() -> u64 {
+    15
 }
 
 fn default_rpc_urls() -> Vec<String> {
@@ -168,10 +248,64 @@ impl Default for RpcConfig {
             commitment: default_commitment(),
             timeout_ms: default_timeout_ms(),
             max_retries: default_retries(),
+            endpoints: Vec::new(),
+            circuit_breaker_seconds: default_circuit_seconds(),
             jupiter_quote_url: default_jupiter_lite(),
             jupiter_swap_instructions_url: default_jupiter_lite(),
         }
     }
+}
+
+impl RpcConfig {
+    /// Effective endpoint list. An empty `[[rpc.endpoints]]` table promotes the
+    /// legacy `urls` list to fallback endpoints so nothing breaks.
+    pub fn effective_endpoints(&self) -> Vec<RpcEndpointConfig> {
+        if !self.endpoints.is_empty() {
+            let mut endpoints = self.endpoints.clone();
+            endpoints.sort_by_key(|endpoint| endpoint.priority);
+            return endpoints;
+        }
+        self.urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| RpcEndpointConfig {
+                name: format!("legacy-{index}"),
+                url: url.clone(),
+                role: EndpointRole::Fallback,
+                max_rps: default_endpoint_rps(),
+                heavy_rps: default_heavy_rps(),
+                monthly_call_budget: 0,
+                priority: default_priority(),
+            })
+            .collect()
+    }
+}
+
+/// Expand `${VAR}` references from the environment.
+///
+/// RPC keys must never be written into `config.toml` (which is committed and
+/// shared); they come from the shell environment or a `.env` file instead.
+pub fn expand_env(value: &str, env: &HashMap<String, String>) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let name = &after[..end];
+        match env.get(name) {
+            Some(value) => output.push_str(value),
+            None => {
+                output.push_str(&rest[start..start + 2 + end + 1]);
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    output.push_str(rest);
+    output
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,6 +608,7 @@ pub struct SafetyConfig {
 }
 
 impl Default for SafetyConfig {
+    #[allow(clippy::derivable_impls)]
     fn default() -> Self {
         Self {
             allow_unguarded_live: false,
@@ -1118,7 +1253,51 @@ fn apply_env(
         })?;
         set_nested(root, &path, value);
     }
+    expand_rpc_urls(root, env, warnings);
     Ok(())
+}
+
+/// Expand `${VAR}` references inside RPC URLs.
+///
+/// API keys must not be committed to `config.toml`, so endpoints reference
+/// environment variables instead: `url = "https://.../?api-key=${DRPC_KEY}"`.
+fn expand_rpc_urls(
+    root: &mut toml::Value,
+    env: &HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) {
+    let expand = |value: &str, warnings: &mut Vec<String>| -> String {
+        let expanded = expand_env(value, env);
+        if expanded.contains("${") {
+            warnings.push(format!(
+                "rpc URL references an unset environment variable: {value}"
+            ));
+        }
+        expanded
+    };
+    let Some(rpc) = root.get_mut("rpc").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    if let Some(urls) = rpc.get_mut("urls").and_then(toml::Value::as_array_mut) {
+        let expanded: Vec<String> = urls
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(|url| expand(url, warnings))
+            .collect();
+        *urls = expanded.into_iter().map(toml::Value::String).collect();
+    }
+    if let Some(endpoints) = rpc.get_mut("endpoints").and_then(toml::Value::as_array_mut) {
+        let expanded: Vec<String> = endpoints
+            .iter()
+            .filter_map(|endpoint| endpoint.get("url").and_then(toml::Value::as_str))
+            .map(|url| expand(url, warnings))
+            .collect();
+        for (endpoint, url) in endpoints.iter_mut().zip(expanded) {
+            if let Some(table) = endpoint.as_table_mut() {
+                table.insert("url".to_string(), toml::Value::String(url));
+            }
+        }
+    }
 }
 
 fn get_nested<'a>(root: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
@@ -1272,6 +1451,41 @@ impl BeastConfig {
                 )));
             }
         }
+        let mut endpoint_names = std::collections::HashSet::new();
+        for endpoint in &self.rpc.endpoints {
+            if endpoint.name.trim().is_empty() {
+                return Err(BeastError::Config(
+                    "rpc.endpoints name must not be empty".into(),
+                ));
+            }
+            if !endpoint_names.insert(endpoint.name.clone()) {
+                return Err(BeastError::Config(format!(
+                    "duplicate rpc endpoint name {}",
+                    endpoint.name
+                )));
+            }
+            if !(endpoint.url.starts_with("https://")
+                || endpoint.url.starts_with("http://127.0.0.1")
+                || endpoint.url.starts_with("http://localhost"))
+            {
+                return Err(BeastError::Config(format!(
+                    "rpc endpoint URL must use https (or localhost http): {}",
+                    endpoint.url
+                )));
+            }
+            if endpoint.max_rps == 0 || endpoint.heavy_rps == 0 {
+                return Err(BeastError::Config(format!(
+                    "rpc endpoint {} must set max_rps and heavy_rps above zero",
+                    endpoint.name
+                )));
+            }
+            if endpoint.url.contains("${") {
+                return Err(BeastError::Config(format!(
+                    "rpc endpoint {} references an unset environment variable: {}",
+                    endpoint.name, endpoint.url
+                )));
+            }
+        }
         if self.rpc.timeout_ms < 250 {
             return Err(BeastError::Config("rpc.timeout_ms must be >= 250".into()));
         }
@@ -1355,9 +1569,13 @@ impl BeastConfig {
                     "guard.min_profit_lamports must be > 0".into(),
                 ));
             }
-            if self.guard.mode == GuardMode::Program && self.guard.program_id.len() < 32 {
+            if self.guard.mode == GuardMode::Program
+                && self.guard.program_id.len() < 32
+                && !self.safety.allow_unguarded_live
+            {
                 return Err(BeastError::Config(
-                    "guard.program_id is required in program mode".into(),
+                    "guard.program_id is required in program mode (or set safety.allow_unguarded_live = true)"
+                        .into(),
                 ));
             }
         }
@@ -1477,6 +1695,91 @@ mod tests {
         assert_eq!(cfg.config_version, 2);
         assert_eq!(cfg.runtime.mode, Mode::Radar);
         assert_eq!(cfg.strategies["cross_dex_arb"].mode, Mode::Radar);
+    }
+
+    #[test]
+    fn expands_environment_references_in_rpc_endpoint_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        fs::write(
+            &cfg,
+            r#"
+config_version = 2
+
+[[rpc.endpoints]]
+name = "drpc"
+url = "https://solana.drpc.org"
+role = "feed"
+max_rps = 8
+heavy_rps = 3
+monthly_call_budget = 8000000
+
+[[rpc.endpoints]]
+name = "helius"
+url = "https://mainnet.helius-rpc.com/?api-key=${HELIUS_TEST_KEY}"
+role = "exec"
+max_rps = 5
+heavy_rps = 3
+monthly_call_budget = 400000
+"#,
+        )
+        .unwrap();
+        let secrets = temp_secrets(dir.path());
+        let env = env(&[
+            ("BEAST_SECRETS", secrets.to_str().unwrap()),
+            ("HELIUS_TEST_KEY", "secret-key-value"),
+        ]);
+        let loaded = load_with_env(Some(&cfg), false, &env).unwrap();
+        assert_eq!(loaded.config.rpc.endpoints.len(), 2);
+        assert_eq!(loaded.config.rpc.endpoints[0].name, "drpc");
+        assert_eq!(
+            loaded.config.rpc.endpoints[1].url,
+            "https://mainnet.helius-rpc.com/?api-key=secret-key-value"
+        );
+        // Roles route independently and each endpoint keeps its own limits.
+        assert!(loaded.config.rpc.effective_endpoints()[0]
+            .role
+            .as_str()
+            .eq_ignore_ascii_case("feed"));
+    }
+
+    #[test]
+    fn unset_environment_reference_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        fs::write(
+            &cfg,
+            r#"
+config_version = 2
+
+[[rpc.endpoints]]
+name = "helius"
+url = "https://mainnet.helius-rpc.com/?api-key=${MISSING_TEST_KEY}"
+"#,
+        )
+        .unwrap();
+        let secrets = temp_secrets(dir.path());
+        let env = env(&[("BEAST_SECRETS", secrets.to_str().unwrap())]);
+        let error = load_with_env(Some(&cfg), false, &env).unwrap_err();
+        assert!(error.to_string().contains("MISSING_TEST_KEY"));
+    }
+
+    #[test]
+    fn legacy_urls_promote_to_fallback_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        fs::write(
+            &cfg,
+            "config_version = 2\n\n[rpc]\nurls = [\"https://legacy.example\"]\n",
+        )
+        .unwrap();
+        let secrets = temp_secrets(dir.path());
+        let env = env(&[("BEAST_SECRETS", secrets.to_str().unwrap())]);
+        let loaded = load_with_env(Some(&cfg), false, &env).unwrap();
+        let endpoints = loaded.config.rpc.effective_endpoints();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].url, "https://legacy.example");
+        assert_eq!(endpoints[0].role, EndpointRole::Fallback);
     }
 
     #[test]

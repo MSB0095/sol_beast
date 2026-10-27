@@ -68,11 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn report(reserve: &FlashReserve) {
-    let fee_ppm = reserve.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6;
-    let fee = if reserve.flash_fee_bits == u64::MAX {
-        "disabled".to_string()
-    } else {
-        format!("{fee_ppm:.4}")
+    let fee = match reserve.fee_ppm() {
+        Some(fee_ppm) => format!("{fee_ppm:.4}"),
+        None => "disabled".to_string(),
     };
     println!(
         "{:<46} {:<46} {:>6} {:>16} {:>12} {:>8}",

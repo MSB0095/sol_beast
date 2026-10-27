@@ -730,8 +730,8 @@ impl Default for RentConfig {
 pub struct FlashConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Provider id. Only `kamino` is verified; unknown ids fail startup
-    /// instead of silently falling back.
+    /// Provider id. `kamino` and `solend` are verified; unknown ids fail
+    /// startup instead of silently falling back.
     #[serde(default = "default_flash_provider")]
     pub provider: String,
     /// Borrowed mint. Any mint with an active reserve works; WSOL is the
@@ -1710,9 +1710,9 @@ impl BeastConfig {
         }
 
         if self.flash.enabled {
-            if self.flash.provider != "kamino" {
+            if !matches!(self.flash.provider.as_str(), "kamino" | "solend") {
                 return Err(BeastError::Config(format!(
-                    "flash.provider {:?} is not verified; only \"kamino\" is supported",
+                    "flash.provider {:?} is not verified; supported providers are \"kamino\" and \"solend\"",
                     self.flash.provider
                 )));
             }
@@ -2102,7 +2102,7 @@ role = "exec"
     fn flash_rejects_an_unverified_provider() {
         let mut cfg = BeastConfig::default();
         cfg.flash.enabled = true;
-        cfg.flash.provider = "solend".into();
+        cfg.flash.provider = "marginfi".into();
         let secrets = Secrets {
             api_bearer_token: Some("a".repeat(24)),
             api_read_token: Some("b".repeat(24)),
@@ -2110,6 +2110,19 @@ role = "exec"
         };
         let error = cfg.validate_with_secrets(&secrets).unwrap_err();
         assert!(error.to_string().contains("not verified"));
+    }
+
+    #[test]
+    fn flash_accepts_the_verified_solend_provider() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = true;
+        cfg.flash.provider = "solend".into();
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        cfg.validate_with_secrets(&secrets).unwrap();
     }
 
     #[test]

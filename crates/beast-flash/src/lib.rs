@@ -29,7 +29,9 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub mod kamilend;
+pub mod solend;
 pub use kamilend::{derive_market_authority, KaminoFlashProvider, KAMINO_KLEND_PROGRAM_ID};
+pub use solend::{SolendFlashProvider, SOLEND_PROGRAM_ID};
 
 /// Jito bundles cap at five transactions; a flash cycle needs the composed
 /// cycle, the guard and the tip, so four swap legs is the safe ceiling.
@@ -55,8 +57,10 @@ pub enum FlashError {
     NoLiquidity(String),
     #[error("insufficient available liquidity: available {available}, requested {requested}")]
     InsufficientLiquidity { available: u64, requested: u64 },
-    #[error("flash fee of {fee_bits} (2^60 scale) is disabled or too high")]
+    #[error("flash fee of {fee_bits} is disabled or too high")]
     FeeDisabled { fee_bits: u64 },
+    #[error("flash fee ({fee}) is not smaller than the borrowed amount ({amount})")]
+    FeeExceedsAmount { fee: u64, amount: u64 },
     #[error("arithmetic overflow computing the flash repayment")]
     Overflow,
     #[error("transaction assembly failed: {0}")]
@@ -64,6 +68,21 @@ pub enum FlashError {
 }
 
 pub type Result<T> = std::result::Result<T, FlashError>;
+
+/// How a protocol stores and rounds its flash fee.
+///
+/// The two verified Solana lenders use different fixed-point scales, and
+/// guessing one from the other silently misprices every borrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FlashFeeModel {
+    /// A 2^60 fraction, rounded **up**. Kamino KLend.
+    #[default]
+    FixedPoint60Ceiling,
+    /// A 1e18 WAD fraction, rounded to nearest with a protocol minimum.
+    /// Solend/Save. A zero fee is a genuinely free flash loan, not disabled.
+    Wad18Round,
+}
 
 /// A pool of borrowable liquidity, resolved on-chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,39 +92,75 @@ pub struct FlashReserve {
     pub supply_vault: Address,
     pub fee_vault: Address,
     pub lending_market: Address,
-    /// Derived from `["lma", lending_market]` and pinned by a unit test against
-    /// the authority observed in a real transaction.
+    /// Derived from `["lma", lending_market]` on Kamino and `[lending_market]`
+    /// on Solend; pinned by each adapter's unit tests against a live account.
     pub lending_market_authority: Address,
     /// SPL Token or Token-2022, read from the reserve account.
     pub token_program: Address,
-    /// Flash fee as a 2^60 fixed-point fraction. `u64::MAX` means disabled.
+    /// Raw fee field. Its scale is defined by [`Self::fee_model`].
     pub flash_fee_bits: u64,
+    /// How to interpret and round [`Self::flash_fee_bits`].
+    pub fee_model: FlashFeeModel,
+    /// Percentage of the fee routed to a host/frontend account (Solend only).
+    pub host_fee_percentage: u8,
     /// Borrowable amount right now.
     pub available: u64,
     pub decimals: u8,
-    /// Reserve status: 0 is active on Kamino.
+    /// Reserve status: 0 is active on Kamino; Solend has no status byte and is
+    /// reported as 0 when decoded.
     pub status: u8,
 }
 
 impl FlashReserve {
-    /// The exact fee Kamino charges for `amount`, rounded **up**.
+    /// The exact fee the protocol charges for `amount`.
     ///
-    /// The fee is stored as a 2^60 fixed-point fraction, not basis points:
-    /// the observed main-market value `11_529_215_046_068` is exactly
-    /// `floor(2^60 / 100_000)`, i.e. 10 ppm. A 1 SOL borrow was simulated and
-    /// charged 10,000 lamports; 234,451,759 lamports was charged 2,345.
+    /// Kamino stores a 2^60 fraction and rounds **up**: the observed
+    /// main-market value `11_529_215_046_068` is exactly `floor(2^60 / 100_000)`,
+    /// i.e. 10 ppm. A 1 SOL borrow was simulated and charged 10,000 lamports.
+    ///
+    /// Solend stores a 1e18 WAD fraction and rounds to nearest, with a minimum
+    /// of two token units when a host fee is configured. The verified WSOL
+    /// reserve charges 500 ppm: 100,000,000 lamports cost 50,000, split 40,000
+    /// to the reserve and 10,000 to the host.
     pub fn flash_fee(&self, amount: u64) -> Result<u64> {
         if self.flash_fee_bits == u64::MAX {
             return Err(FlashError::FeeDisabled {
                 fee_bits: self.flash_fee_bits,
             });
         }
-        let scale = 1u128 << 60;
-        let product = (amount as u128)
-            .checked_mul(self.flash_fee_bits as u128)
-            .ok_or(FlashError::Overflow)?;
-        let fee = product.checked_add(scale - 1).ok_or(FlashError::Overflow)? / scale;
-        u64::try_from(fee).map_err(|_| FlashError::Overflow)
+        match self.fee_model {
+            FlashFeeModel::FixedPoint60Ceiling => {
+                let scale = 1u128 << 60;
+                let product = (amount as u128)
+                    .checked_mul(self.flash_fee_bits as u128)
+                    .ok_or(FlashError::Overflow)?;
+                let fee = product.checked_add(scale - 1).ok_or(FlashError::Overflow)? / scale;
+                u64::try_from(fee).map_err(|_| FlashError::Overflow)
+            }
+            FlashFeeModel::Wad18Round => {
+                // The on-chain branch is `fee_rate > 0 && amount > 0`; a zero
+                // rate is a free loan, not the disabled marker.
+                if self.flash_fee_bits == 0 || amount == 0 {
+                    return Ok(0);
+                }
+                let scale = 1_000_000_000_000_000_000u128;
+                // u64 * u64 always fits in u128.
+                let product = (amount as u128) * (self.flash_fee_bits as u128);
+                let minimum_units = if self.host_fee_percentage > 0 { 2 } else { 1 };
+                let fee_decimal = product.max(minimum_units * scale);
+                if fee_decimal >= (amount as u128) * scale {
+                    return Err(FlashError::FeeExceedsAmount {
+                        fee: u64::try_from(fee_decimal / scale).unwrap_or(u64::MAX),
+                        amount,
+                    });
+                }
+                let rounded = fee_decimal
+                    .checked_add(scale / 2)
+                    .ok_or(FlashError::Overflow)?
+                    / scale;
+                u64::try_from(rounded).map_err(|_| FlashError::Overflow)
+            }
+        }
     }
 
     /// Principal plus the protocol fee. The repay instruction itself takes the
@@ -114,6 +169,19 @@ impl FlashReserve {
         amount
             .checked_add(self.flash_fee(amount)?)
             .ok_or(FlashError::Overflow)
+    }
+
+    /// Fee rate in parts per million, for display. `None` when the reserve has
+    /// disabled flash loans (`u64::MAX`).
+    pub fn fee_ppm(&self) -> Option<f64> {
+        if self.flash_fee_bits == u64::MAX {
+            return None;
+        }
+        let scale = match self.fee_model {
+            FlashFeeModel::FixedPoint60Ceiling => (1u64 << 60) as f64,
+            FlashFeeModel::Wad18Round => 1_000_000_000_000_000_000.0,
+        };
+        Some(self.flash_fee_bits as f64 / scale * 1e6)
     }
 
     /// Whether this reserve can currently serve a flash loan.
@@ -232,6 +300,7 @@ mod tests {
         let bits = 11_529_215_046_068u64;
         let reserve = FlashReserve {
             flash_fee_bits: bits,
+            fee_model: FlashFeeModel::FixedPoint60Ceiling,
             status: 0,
             available: u64::MAX,
             ..test_reserve()
@@ -244,6 +313,56 @@ mod tests {
             reserve.repayment_amount(1_000_000_000).unwrap(),
             1_000_010_000
         );
+        assert!((reserve.fee_ppm().unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn solend_wad_fee_rounds_with_a_host_minimum() {
+        // Verified on-chain value for Solend's WSOL reserve: 0.05% with a 20%
+        // host cut. A 100,000,000-lamport simulation paid exactly 50,000.
+        let reserve = FlashReserve {
+            flash_fee_bits: 500_000_000_000_000,
+            fee_model: FlashFeeModel::Wad18Round,
+            host_fee_percentage: 20,
+            available: u64::MAX,
+            ..test_reserve()
+        };
+        assert_eq!(reserve.flash_fee(100_000_000).unwrap(), 50_000);
+        assert_eq!(reserve.repayment_amount(100_000_000).unwrap(), 100_050_000);
+        assert!((reserve.fee_ppm().unwrap() - 500.0).abs() < 1e-9);
+        // Round to nearest: 10,000 lamports * 5e-4 = 5 lamports exactly.
+        assert_eq!(reserve.flash_fee(10_000).unwrap(), 5);
+        // The protocol enforces a two-unit minimum when a host fee is owed.
+        assert_eq!(reserve.flash_fee(10).unwrap(), 2);
+        // `BorrowTooSmall`: the minimum fee must be strictly below the borrow.
+        assert!(matches!(
+            reserve.flash_fee(2),
+            Err(FlashError::FeeExceedsAmount { .. })
+        ));
+        // Zero is a free loan, not the disabled marker.
+        let free = FlashReserve {
+            flash_fee_bits: 0,
+            ..reserve.clone()
+        };
+        assert_eq!(free.flash_fee(1_000_000).unwrap(), 0);
+        assert_eq!(free.repayment_amount(1_000_000).unwrap(), 1_000_000);
+        assert!(free.flash_enabled());
+    }
+
+    #[test]
+    fn solend_rejects_a_fee_larger_than_the_borrow() {
+        let reserve = FlashReserve {
+            // 200% fee.
+            flash_fee_bits: 2_000_000_000_000_000_000,
+            fee_model: FlashFeeModel::Wad18Round,
+            host_fee_percentage: 20,
+            available: u64::MAX,
+            ..test_reserve()
+        };
+        assert!(matches!(
+            reserve.flash_fee(1_000),
+            Err(FlashError::FeeExceedsAmount { .. })
+        ));
     }
 
     #[test]
@@ -269,6 +388,8 @@ mod tests {
             lending_market_authority: Address::ZERO,
             token_program: Address::ZERO,
             flash_fee_bits: 0,
+            fee_model: FlashFeeModel::FixedPoint60Ceiling,
+            host_fee_percentage: 0,
             available: 0,
             decimals: 9,
             status: 0,

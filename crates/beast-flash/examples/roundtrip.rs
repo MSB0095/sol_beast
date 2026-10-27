@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reserve.decimals,
         reserve.token_program,
         reserve.flash_fee_bits,
-        reserve.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6,
+        reserve.fee_ppm().unwrap_or(f64::NAN),
         reserve.flash_fee(amount)?,
     );
 

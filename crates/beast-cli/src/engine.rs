@@ -19,7 +19,9 @@ use beast_exec::{
     DEFAULT_TRANSACTION_FEE_LAMPORTS, WSOL_MINT,
 };
 use beast_feed::{FeedConfig, PoolFeed, WatchedPool};
-use beast_flash::{kamilend::KaminoFlashProvider, FlashProvider, FlashReserve};
+use beast_flash::{
+    kamilend::KaminoFlashProvider, solend::SolendFlashProvider, FlashProvider, FlashReserve,
+};
 use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::{AttemptRecord, AttemptUpdate, BundleRecord, Store};
 use chrono::Utc;
@@ -392,9 +394,9 @@ pub async fn run(options: RunOptions) -> Result<()> {
                 "decimals": deepest.map(|reserve| reserve.decimals),
                 "available": deepest.map(|reserve| reserve.available),
                 "flash_fee_bits": deepest.map(|reserve| reserve.flash_fee_bits),
-                "fee_ppm": deepest.map(|reserve| {
-                    reserve.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6
-                }),
+                "fee_model": deepest.map(|reserve| reserve.fee_model),
+                "host_fee_percentage": deepest.map(|reserve| reserve.host_fee_percentage),
+                "fee_ppm": deepest.and_then(|reserve| reserve.fee_ppm()),
                 "max_borrow_lamports": config.flash.max_borrow_lamports,
                 "lamport_guard": config.guard.enabled
                     && config
@@ -413,7 +415,9 @@ pub async fn run(options: RunOptions) -> Result<()> {
                         "decimals": reserve.decimals,
                         "available": reserve.available,
                         "flash_fee_bits": reserve.flash_fee_bits,
-                        "fee_ppm": reserve.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6,
+                        "fee_model": reserve.fee_model,
+                        "host_fee_percentage": reserve.host_fee_percentage,
+                        "fee_ppm": reserve.fee_ppm(),
                     }))
                     .collect::<Vec<_>>(),
             })
@@ -521,9 +525,12 @@ pub(crate) async fn build_flash_runtime(
     if !config.flash.enabled {
         return Ok(None);
     }
-    let provider = match config.flash.provider.as_str() {
-        "kamino" => KaminoFlashProvider::mainnet(),
-        other => bail!("flash.provider {other:?} is not verified; only \"kamino\" is supported"),
+    let provider: Arc<dyn FlashProvider> = match config.flash.provider.as_str() {
+        "kamino" => Arc::new(KaminoFlashProvider::mainnet()),
+        "solend" => Arc::new(SolendFlashProvider::mainnet()),
+        other => bail!(
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\" and \"solend\""
+        ),
     };
     let configured_mint = if config.flash.mint.trim().is_empty() {
         None
@@ -549,7 +556,12 @@ pub(crate) async fn build_flash_runtime(
             .ok_or_else(|| anyhow::anyhow!("flash.reserve {key} not found on chain"))?;
         let reserve = provider
             .decode_reserve(&key, &account.account.data)
-            .with_context(|| format!("flash.reserve {key} is not a valid Kamino reserve"))?;
+            .with_context(|| {
+                format!(
+                    "flash.reserve {key} is not a valid {} reserve",
+                    provider.id()
+                )
+            })?;
         if let Some(mint) = configured_mint {
             if reserve.mint != mint {
                 bail!(
@@ -561,15 +573,18 @@ pub(crate) async fn build_flash_runtime(
         }
         reserves.push(reserve);
     } else if let Some(mint) = configured_mint {
-        reserves = provider
-            .reserves_for_mint(rpc, &mint)
+        reserves = discover_provider_reserves(&config.flash.provider, rpc, Some(mint))
             .await
-            .with_context(|| format!("no active Kamino flash reserve for {mint}"))?;
+            .with_context(|| {
+                format!(
+                    "no active {} flash reserve for {mint}",
+                    config.flash.provider
+                )
+            })?;
     } else {
-        reserves = provider
-            .discover_reserves(rpc)
+        reserves = discover_provider_reserves(&config.flash.provider, rpc, None)
             .await
-            .context("discover Kamino flash reserves")?;
+            .with_context(|| format!("discover {} flash reserves", config.flash.provider))?;
     }
     // Keep only reserves that can actually be borrowed and, per mint, only the
     // deepest one. A second reserve for the same mint adds no routing choice:
@@ -595,7 +610,8 @@ pub(crate) async fn build_flash_runtime(
     }
     if best_by_mint.is_empty() {
         bail!(
-            "flash is enabled but no active Kamino reserve matched {}",
+            "flash is enabled but no active {} reserve matched {}",
+            config.flash.provider,
             configured_mint
                 .map(|mint| mint.to_string())
                 .unwrap_or_else(|| "any mint".into())
@@ -606,20 +622,52 @@ pub(crate) async fn build_flash_runtime(
         .max_by_key(|reserve| reserve.available)
         .expect("non-empty");
     info!(
-        provider = "kamino",
+        provider = provider.id(),
         reserves = best_by_mint.len(),
         deepest = %deepest.reserve,
         mint = %deepest.mint,
         available = deepest.available,
         decimals = deepest.decimals,
+        fee_model = ?deepest.fee_model,
         fee_bits = deepest.flash_fee_bits,
-        fee_ppm = deepest.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6,
+        host_fee_percentage = deepest.host_fee_percentage,
+        fee_ppm = ?deepest.fee_ppm(),
         "flash provider ready"
     );
     Ok(Some(Arc::new(FlashRuntime {
-        provider: Arc::new(provider),
+        provider,
         reserves: best_by_mint,
     })))
+}
+
+/// Dispatch discovery to the selected adapter. Reserve decoders differ per
+/// protocol, so discovery cannot live on the synchronous `FlashProvider`
+/// trait; keeping it here also makes an unknown id a startup error instead of
+/// a silent empty set.
+async fn discover_provider_reserves(
+    provider_id: &str,
+    rpc: &Arc<RpcClient>,
+    mint: Option<Address>,
+) -> Result<Vec<FlashReserve>> {
+    match provider_id {
+        "kamino" => {
+            let adapter = KaminoFlashProvider::mainnet();
+            match mint {
+                Some(mint) => Ok(adapter.reserves_for_mint(rpc, &mint).await?),
+                None => Ok(adapter.discover_reserves(rpc).await?),
+            }
+        }
+        "solend" => {
+            let adapter = SolendFlashProvider::mainnet();
+            match mint {
+                Some(mint) => Ok(adapter.reserves_for_mint(rpc, &mint).await?),
+                None => Ok(adapter.discover_reserves(rpc).await?),
+            }
+        }
+        other => bail!(
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\" and \"solend\""
+        ),
+    }
 }
 
 fn load_wallet(
@@ -777,11 +825,12 @@ fn router_config(config: &BeastConfig) -> RouterConfig {
             }
         }
     }
-    // An empty flash mint means "every reserve Kamino serves". In that mode
-    // the router must consider every mint in the watchlist, not only the mints
-    // named by the capital-funded strategies. `RouterConfig` treats an empty
-    // start list as "all indexed mints", and per-strategy filters still stop a
-    // capital-funded arm from trading a mint it did not configure.
+    // An empty flash mint means "every reserve the selected provider serves";
+    // in that mode the router must consider every mint in the watchlist, not
+    // only the mints named by the capital-funded strategies. `RouterConfig`
+    // treats an empty start list as "all indexed mints", and per-strategy
+    // filters still stop a capital-funded arm from trading a mint it did not
+    // configure.
     let flash_all_mints = config.flash.enabled && config.flash.mint.trim().is_empty();
     if flash_all_mints {
         start_mints.clear();

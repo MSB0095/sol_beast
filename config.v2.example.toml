@@ -158,8 +158,9 @@ max_accounts = 48
 restrict_intermediate_tokens = true
 
 [flash]
-# Kamino is the only verified provider. Enabled here with an empty mint so the
-# engine loads the deepest active reserve per mint; set a mint to restrict it.
+# `kamino` and `solend` are verified by mainnet borrow → repay simulations.
+# Enabled here with an empty mint so the engine loads the deepest active
+# reserve per mint; set a mint to restrict discovery.
 enabled = true
 provider = "kamino"
 mint = ""

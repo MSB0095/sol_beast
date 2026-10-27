@@ -40,9 +40,10 @@ profitability without live settlement data.**
   `catalogued`, `disabled`.
 - **Six strategies** — `cross_dex_arb`, `triangular_arb`, `lst_arb`,
   `stable_arb`, `flash_arb`, `rent_reclaim`.
-- **Kamino flash loans** — borrow, swap and repay in one transaction, so an
-  unprofitable cycle reverts instead of leaving a debt. Verified by a mainnet
-  borrow → repay simulation; see [docs/FLASH_LOANS.md](docs/FLASH_LOANS.md).
+- **Kamino and Solend flash loans** — borrow, swap and repay in one
+  transaction, so an unprofitable cycle reverts instead of leaving a debt. Both
+  are verified by a mainnet borrow → repay simulation; see
+  [docs/FLASH_LOANS.md](docs/FLASH_LOANS.md).
 - **Jito bundle execution** — 2–3 leg closed cycles, one swap transaction per
   leg, an on-chain guard transaction, then the tip. Jito caps bundles at 5
   transactions; longer and flash cycles are composed into one v0 transaction.

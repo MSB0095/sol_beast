@@ -28,8 +28,8 @@ reverts instead of paying the tip.
 The original pump.fun sniper still ships as the legacy root `sol_beast` binary.
 It is documented separately in [docs/LEGACY.md](docs/LEGACY.md).
 
-**No sandwiches. No frontrunning. No pool manipulation. No flash loans. No
-claims of live profitability without live settlement data.**
+**No sandwiches. No frontrunning. No pool manipulation. No claims of live
+profitability without live settlement data.**
 
 ## What ships
 
@@ -38,11 +38,14 @@ claims of live profitability without live settlement data.**
 - **60-program venue registry** — every program ID checked mainnet-executable.
   Coverage is explicit: `modeled`, `decoded`, `stake_pool`, `quote_only`,
   `catalogued`, `disabled`.
-- **Five working strategies** — `cross_dex_arb`, `triangular_arb`, `lst_arb`,
-  `stable_arb`, `rent_reclaim`.
-- **Jito bundle execution** — 2–3 leg closed WSOL cycles, one swap transaction
-  per leg, an on-chain guard transaction, then the tip. Jito caps bundles at 5
-  transactions.
+- **Six strategies** — `cross_dex_arb`, `triangular_arb`, `lst_arb`,
+  `stable_arb`, `flash_arb`, `rent_reclaim`.
+- **Kamino flash loans** — borrow, swap and repay in one transaction, so an
+  unprofitable cycle reverts instead of leaving a debt. Verified by a mainnet
+  borrow → repay simulation; see [docs/FLASH_LOANS.md](docs/FLASH_LOANS.md).
+- **Jito bundle execution** — 2–3 leg closed cycles, one swap transaction per
+  leg, an on-chain guard transaction, then the tip. Jito caps bundles at 5
+  transactions; longer and flash cycles are composed into one v0 transaction.
 - **Native guard program** — no admin, no upgrade authority, no token accounts.
   Deploy-time program ID, documented build/deploy steps.
 - **Settlement from chain** — real pre/post balance deltas, model-error
@@ -54,8 +57,8 @@ claims of live profitability without live settlement data.**
 - **React dashboard** — login, dashboard, radar, execution, rent, venues,
   pools, strategies and settings, all wired to the real API.
 
-Not shipped and not presented as adapters: flash-loan execution, liquidation
-auctions, backrunning, oracle-lag trading, sandwiching and pool manipulation.
+Not shipped and not presented as adapters: liquidation auctions, backrunning,
+oracle-lag trading, sandwiching and pool manipulation.
 
 ## Safety model
 
@@ -68,7 +71,16 @@ Live execution requires **all** of:
 5. `guard.mode = "program"` with a deployed `guard.program_id`.
 
 Otherwise the engine stays in Radar/Canary and only simulates. The API signing
-endpoints are disabled unless those gates are satisfied.
+endpoints are disabled unless those gates are satisfied. `safety.allow_unguarded_live`
+can deliberately remove gate 5; that path has no on-chain revert guarantee and is
+off by default.
+
+A flash cycle always keeps its borrow and repayment in the same transaction, so
+the program itself rejects a cycle that cannot repay principal plus fee. WSOL
+flash cycles additionally use the guard. Non-WSOL flash cycles keep profit in
+the borrowed mint, which a lamport guard cannot observe; they are reported with
+`lamport_guard = false` and rely on the enforced final minimum out plus the
+repayment instruction.
 
 The guard enforces, at instruction execution time:
 
@@ -134,13 +146,16 @@ Registration is not a claim of local execution.
 
 ## Execution pipeline
 
-1. Reject non-closed routes, non-WSOL start/end mints, or more than 3 legs.
+1. Reject open routes and routes longer than 3 legs; capital-funded routes must
+   start and end at WSOL, while a flash route must start and end at its borrowed
+   mint.
 2. Check wallet balance against input + `risk.balance_floor_lamports`.
 3. Request direct Jupiter quotes; require `minOut > 0` and cycle output > input.
-4. Price all costs: `(legs + 2) * 5,000` lamport base fees, intermediate ATA
-   rent, Jito tip and minimum profit.
+4. Price all costs: base fees, intermediate ATA rent, Jito tip, minimum profit
+   and, for flash cycles, the reserve fee.
 5. Refuse if the tip floor, fees, rent and profit cannot be covered.
-6. Build signed swap transactions, a guard transaction and a tip transaction.
+6. Build signed swap transactions, a guard transaction and a tip transaction —
+   or one composed v0 transaction plus guard and tip for triangular/flash cycles.
 7. Simulate the bundle via Jito.
 8. Submit only when every live gate is satisfied.
 9. Poll status, reconcile from on-chain balance deltas, persist settlements and
@@ -204,6 +219,10 @@ CI runs the same checks.
 
 - [docs/V2.md](docs/V2.md) — architecture, config, API, venues, execution,
   guard, rent, testing and known gates.
+- [docs/FLASH_LOANS.md](docs/FLASH_LOANS.md) — verified Kamino adapter, fee math
+  and the providers that are deliberately not enabled.
+- [docs/RPC.md](docs/RPC.md) — free-tier provider assessment, role routing and
+  zero-cost configuration.
 - [docs/LEGACY.md](docs/LEGACY.md) — original pump.fun sniper.
 - [SOL_BEAST_ROADMAP.md](SOL_BEAST_ROADMAP.md) — design roadmap. Future phases
   are plans, not shipped features.

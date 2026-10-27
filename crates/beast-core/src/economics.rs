@@ -110,6 +110,7 @@ impl CostModel {
             base_fee_lamports: self.base_fee_lamports(),
             rent_lamports: self.amortized_rent_lamports(),
             guard_lamports: self.guard_cu_lamports,
+            flash_fee_lamports: 0,
         }
     }
 }

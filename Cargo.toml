@@ -10,6 +10,8 @@ license = "MIT"
 repository = "https://github.com/MSB0095/sol_beast"
 
 [workspace.dependencies]
+async-trait = "0.1"
+
 anyhow = "1.0"
 base64 = "0.22"
 borsh = { version = "1.5", features = ["derive"] }

@@ -506,7 +506,7 @@ pub async fn refresh_pool(
         .get_account_info(watched.address)
         .await?
         .ok_or(FeedError::NotFound(watched.address))?;
-    let pending = begin_decode(&watched, venue, info, refresh_reserves)?;
+    let pending = begin_decode(watched, venue, info, refresh_reserves)?;
     let aux_addresses = pending.aux_addresses();
     let accounts = if aux_addresses.is_empty() {
         Vec::new()

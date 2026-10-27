@@ -61,6 +61,8 @@ pub struct BeastConfig {
     #[serde(default)]
     pub rent: RentConfig,
     #[serde(default)]
+    pub flash: FlashConfig,
+    #[serde(default)]
     pub strategies: BTreeMap<String, StrategyConfig>,
 }
 
@@ -162,7 +164,7 @@ pub struct RpcEndpointConfig {
     #[serde(default = "default_role")]
     pub role: EndpointRole,
     /// Sustained requests/second allowed on this endpoint. Free plans range
-    /// from ~4 (public per-method) to ~100 (dRPC).
+    /// from ~4 (public per-method) to ~25 (Alchemy).
     #[serde(default = "default_endpoint_rps")]
     pub max_rps: u32,
     /// Separate limit for heavy methods (`getProgramAccounts`,
@@ -717,6 +719,56 @@ impl Default for RentConfig {
     }
 }
 
+/// Atomic flash-loan borrowing.
+///
+/// Solana has no callback flash loan: the borrow and the repayment live in the
+/// same transaction, so a cycle that does not return the principal plus fee
+/// reverts entirely. Disabled by default; enabling it also requires the
+/// `flash_arb` strategy to be armed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlashConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider id. Only `kamino` is verified; unknown ids fail startup
+    /// instead of silently falling back.
+    #[serde(default = "default_flash_provider")]
+    pub provider: String,
+    /// Borrowed mint. Any mint with an active reserve works; WSOL is the
+    /// default because its profit can be closed back to lamports.
+    #[serde(default = "default_flash_mint")]
+    pub mint: String,
+    /// Hard ceiling on one borrow. The radar route is capped to this value.
+    #[serde(default = "default_flash_max_borrow")]
+    pub max_borrow_lamports: u64,
+    /// Optional pinned reserve. When empty, the deepest active reserve for the
+    /// mint is discovered on-chain at startup.
+    #[serde(default)]
+    pub reserve: String,
+}
+
+fn default_flash_provider() -> String {
+    "kamino".into()
+}
+fn default_flash_mint() -> String {
+    "So11111111111111111111111111111111111111112".into()
+}
+fn default_flash_max_borrow() -> u64 {
+    1_000_000_000
+}
+
+impl Default for FlashConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_flash_provider(),
+            mint: default_flash_mint(),
+            max_borrow_lamports: default_flash_max_borrow(),
+            reserve: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
     #[serde(default)]
@@ -820,6 +872,10 @@ pub struct Secrets {
     pub jupiter_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub helius_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alchemy_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drpc_api_key: Option<String>,
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
@@ -846,6 +902,14 @@ impl fmt::Debug for Secrets {
             .field(
                 "helius_api_key",
                 &self.helius_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "alchemy_api_key",
+                &self.alchemy_api_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "drpc_api_key",
+                &self.drpc_api_key.as_ref().map(|_| "<redacted>"),
             )
             .field("path", &self.path)
             .finish()
@@ -886,6 +950,34 @@ impl Secrets {
         if let Some(v) = env.get("BEAST_HELIUS_API_KEY") {
             self.helius_api_key = Some(v.clone());
         }
+        if let Some(v) = env.get("BEAST_ALCHEMY_API_KEY") {
+            self.alchemy_api_key = Some(v.clone());
+        }
+        if let Some(v) = env.get("BEAST_DRPC_API_KEY") {
+            self.drpc_api_key = Some(v.clone());
+        }
+    }
+
+    /// Map secret fields onto the names `${...}` references use.
+    ///
+    /// This is what lets `config.toml` contain
+    /// `url = "https://.../?api-key=${HELIUS_API_KEY}"` while the key itself
+    /// lives only in the 0600 secrets file.
+    fn expansion_env(&self, env: &HashMap<String, String>) -> HashMap<String, String> {
+        let mut merged = env.clone();
+        for (name, value) in [
+            ("HELIUS_API_KEY", self.helius_api_key.as_ref()),
+            ("ALCHEMY_API_KEY", self.alchemy_api_key.as_ref()),
+            ("DRPC_API_KEY", self.drpc_api_key.as_ref()),
+            ("JUPITER_API_KEY", self.jupiter_api_key.as_ref()),
+        ] {
+            if let Some(value) = value {
+                merged
+                    .entry(name.to_string())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        merged
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1039,15 +1131,6 @@ pub fn load_with_env(
         }
     }
 
-    apply_env(&mut root, env, &mut warnings)?;
-
-    let config: BeastConfig = root.try_into().map_err(|e| {
-        BeastError::Config(format!(
-            "configuration does not match schema v{}: {e}",
-            crate::CONFIG_VERSION
-        ))
-    })?;
-
     let secrets_path = env
         .get("BEAST_SECRETS")
         .map(PathBuf::from)
@@ -1059,8 +1142,20 @@ pub fn load_with_env(
         })
         .unwrap_or_else(|| PathBuf::from("./secrets.toml"));
 
+    // Load secrets before expanding `${...}` so config.toml can reference
+    // HELIUS_API_KEY/ALCHEMY_API_KEY/DRPC_API_KEY without committing them.
     let mut secrets = Secrets::load(&secrets_path)?;
     secrets.apply_env(env);
+    let expansion_env = secrets.expansion_env(env);
+    apply_env(&mut root, &expansion_env, &mut warnings)?;
+
+    let config: BeastConfig = root.try_into().map_err(|e| {
+        BeastError::Config(format!(
+            "configuration does not match schema v{}: {e}",
+            crate::CONFIG_VERSION
+        ))
+    })?;
+
     let generated_secrets = if config.api.enabled {
         secrets.ensure_tokens()?
     } else {
@@ -1228,6 +1323,8 @@ fn apply_env(
         "BEAST_WALLET_KEYPAIR_JSON",
         "BEAST_JUPITER_API_KEY",
         "BEAST_HELIUS_API_KEY",
+        "BEAST_ALCHEMY_API_KEY",
+        "BEAST_DRPC_API_KEY",
     ];
     for (key, raw) in env {
         let Some(rest) = key.strip_prefix("BEAST_") else {
@@ -1270,7 +1367,7 @@ fn expand_rpc_urls(
         let expanded = expand_env(value, env);
         if expanded.contains("${") {
             warnings.push(format!(
-                "rpc URL references an unset environment variable: {value}"
+                "rpc URL references an unset environment variable or secret: {value}"
             ));
         }
         expanded
@@ -1298,6 +1395,19 @@ fn expand_rpc_urls(
             }
         }
     }
+}
+
+fn validate_pubkey(name: &str, value: &str) -> Result<()> {
+    let decoded = bs58::decode(value)
+        .into_vec()
+        .map_err(|error| BeastError::Config(format!("{name} is not valid base58: {error}")))?;
+    if decoded.len() != 32 {
+        return Err(BeastError::Config(format!(
+            "{name} must decode to 32 bytes, got {}",
+            decoded.len()
+        )));
+    }
+    Ok(())
 }
 
 fn get_nested<'a>(root: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
@@ -1586,6 +1696,37 @@ impl BeastConfig {
         if self.rent.dust_burn && self.rent.dust_threshold_usd < 0.0 {
             return Err(BeastError::Config(
                 "rent.dust_threshold_usd must be >= 0".into(),
+            ));
+        }
+
+        if self.flash.enabled {
+            if self.flash.provider != "kamino" {
+                return Err(BeastError::Config(format!(
+                    "flash.provider {:?} is not verified; only \"kamino\" is supported",
+                    self.flash.provider
+                )));
+            }
+            if !self.flash.mint.trim().is_empty() {
+                validate_pubkey("flash.mint", &self.flash.mint)?;
+            }
+            if self.flash.max_borrow_lamports == 0 {
+                return Err(BeastError::Config(
+                    "flash.max_borrow_lamports must be > 0".into(),
+                ));
+            }
+            if !self.flash.reserve.is_empty() {
+                validate_pubkey("flash.reserve", &self.flash.reserve)?;
+            }
+        }
+        if self
+            .strategies
+            .get(StrategyKind::FlashArb.as_str())
+            .map(|strategy| strategy.mode != Mode::Off)
+            .unwrap_or(false)
+            && !self.flash.enabled
+        {
+            return Err(BeastError::Config(
+                "flash_arb strategy requires [flash] enabled=true".into(),
             ));
         }
 
@@ -1921,6 +2062,74 @@ max_notional_lamports = 1
             let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn secret_keys_expand_in_config_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        fs::write(
+            &cfg_path,
+            r#"
+config_version = 2
+[[rpc.endpoints]]
+name = "helius"
+url = "https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+role = "exec"
+"#,
+        )
+        .unwrap();
+        let secrets_path = temp_secrets(dir.path());
+        fs::write(&secrets_path, "helius_api_key = \"secret-test-key\"\n").unwrap();
+        let env = env(&[("BEAST_SECRETS", secrets_path.to_str().unwrap())]);
+        let loaded = load_with_env(Some(&cfg_path), false, &env).unwrap();
+        assert!(loaded.config.rpc.endpoints[0]
+            .url
+            .contains("secret-test-key"));
+    }
+
+    #[test]
+    fn flash_rejects_an_unverified_provider() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = true;
+        cfg.flash.provider = "solend".into();
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        let error = cfg.validate_with_secrets(&secrets).unwrap_err();
+        assert!(error.to_string().contains("not verified"));
+    }
+
+    #[test]
+    fn flash_arb_requires_flash_enabled() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = false;
+        cfg.strategies
+            .get_mut("flash_arb")
+            .expect("default flash arm")
+            .mode = Mode::Radar;
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        let error = cfg.validate_with_secrets(&secrets).unwrap_err();
+        assert!(error.to_string().contains("flash_arb strategy requires"));
+    }
+
+    #[test]
+    fn flash_accepts_an_empty_mint_for_all_reserves() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = true;
+        cfg.flash.mint = String::new();
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        cfg.validate_with_secrets(&secrets).unwrap();
     }
 
     #[test]

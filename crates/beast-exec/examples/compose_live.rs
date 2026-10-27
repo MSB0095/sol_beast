@@ -120,7 +120,7 @@ async fn resolve(
             return Err("ALT too small".into());
         }
         let remainder = account.data.len() - meta;
-        if remainder % 32 != 0 {
+        if !remainder.is_multiple_of(32) {
             return Err("ALT data not address-aligned".into());
         }
         let count = remainder / 32;

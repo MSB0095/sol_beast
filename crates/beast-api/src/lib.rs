@@ -149,6 +149,9 @@ pub struct ApiState {
     pub signing_enabled: bool,
     /// Latest RPC endpoint health snapshot (refreshed by the engine loop).
     pub rpc_health: Option<Arc<std::sync::Mutex<Vec<beast_rpc::EndpointHealth>>>>,
+    /// Flash-loan runtime status (provider, reserve, fee). Absent when flash
+    /// borrowing is disabled, which is the default.
+    pub flash: Option<Value>,
     auth: Arc<ApiAuth>,
     read_gate: RateGate,
     admin_gate: RateGate,
@@ -195,6 +198,7 @@ impl ApiState {
             rent: None,
             signing_enabled: false,
             rpc_health: None,
+            flash: None,
             auth,
             read_gate: RateGate::new(config.api.read_rate_limit_per_sec),
             admin_gate: RateGate::new(config.api.rate_limit_per_sec),
@@ -390,19 +394,41 @@ pub fn build_router(state: Arc<ApiState>) -> Result<Router> {
     }
 }
 
+/// Bind the configured API address.
+///
+/// The engine calls this before starting any loop so a port conflict is a
+/// startup error instead of a task that dies silently while the dashboard
+/// claims the API is enabled.
+pub async fn bind(state: &ApiState) -> std::io::Result<TcpListener> {
+    let bind = state.config.api.bind.clone();
+    let listener = TcpListener::bind(&bind).await?;
+    tracing::info!(address = %listener.local_addr()?, "API listening");
+    Ok(listener)
+}
+
+/// Serve an already-bound listener. Used by the engine after `bind`.
+pub async fn serve_on<F>(
+    listener: TcpListener,
+    state: Arc<ApiState>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let app = build_router(state).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
 pub async fn serve<F>(state: Arc<ApiState>, shutdown: F) -> std::io::Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let bind = state.config.api.bind.clone();
-    let app = build_router(state).map_err(|error| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
-    })?;
-    let listener = TcpListener::bind(&bind).await?;
-    tracing::info!(address = %listener.local_addr()?, "API listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
+    let listener = bind(&state).await?;
+    serve_on(listener, state, shutdown).await
 }
 
 async fn read_auth(
@@ -527,6 +553,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Value>> {
         "metrics": state.metrics.snapshot(),
         "jupiter_configured": state.jupiter.is_some(),
         "rent_configured": state.rent.is_some(),
+        "flash": state.flash,
         "guard": {
             "enabled": state.config.guard.enabled,
             "mode": state.config.guard.mode,
@@ -544,10 +571,13 @@ async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Value>> {
             .map(|endpoint| json!({
                 "name": endpoint.name,
                 "url": endpoint.url,
-                "role": "fallback",
+                "role": endpoint.role,
                 "max_rps": endpoint.max_rps,
                 "heavy_rps": endpoint.heavy_rps,
                 "total_calls": endpoint.total_calls,
+                "budget_calls": endpoint.budget_calls,
+                "monthly_call_budget": endpoint.monthly_call_budget,
+                "priority": endpoint.priority,
                 "rate_limited": endpoint.rate_limited,
                 "circuit_open": endpoint.circuit_open,
                 "circuit_remaining_ms": endpoint.circuit_remaining_ms,
@@ -613,6 +643,7 @@ async fn dashboard(
             "metrics": state.metrics.snapshot(),
             "jupiter_configured": state.jupiter.is_some(),
             "rent_configured": state.rent.is_some(),
+            "flash": state.flash,
             "guard": {
                 "enabled": state.config.guard.enabled,
                 "mode": state.config.guard.mode,

@@ -15,6 +15,7 @@ beast-api = { path = "../beast-api" }
 beast-core = { path = "../beast-core" }
 beast-dex = { path = "../beast-dex" }
 beast-exec = { path = "../beast-exec" }
+beast-flash = { path = "../beast-flash" }
 beast-feed = { path = "../beast-feed" }
 beast-rpc = { path = "../beast-rpc" }
 beast-store = { path = "../beast-store" }

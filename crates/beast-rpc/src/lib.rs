@@ -75,6 +75,10 @@ pub struct SimulationResult {
     pub logs: Vec<String>,
     pub units_consumed: Option<u64>,
     pub return_data: Option<Value>,
+    /// Post-execution account snapshots, requested through
+    /// `simulate_transaction_with_accounts`. Empty when not requested or when
+    /// the simulation failed before accounts could be captured.
+    pub post_accounts: Vec<Option<Value>>,
 }
 
 /// The subset of `getTransaction` needed for settlement reconciliation.
@@ -101,14 +105,44 @@ impl TransactionDetails {
     }
 }
 
+/// What an endpoint is best at. The client routes each JSON-RPC method to a
+/// matching endpoint first and only spills to other roles when none is healthy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointRole {
+    Feed,
+    Exec,
+    Discovery,
+    Rent,
+    Fallback,
+}
+
+impl EndpointRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Feed => "feed",
+            Self::Exec => "exec",
+            Self::Discovery => "discovery",
+            Self::Rent => "rent",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EndpointOptions {
     pub name: String,
     pub url: String,
+    pub role: EndpointRole,
     /// Sustained requests/second allowed on this endpoint.
     pub max_rps: u32,
     /// Separate limit for heavy methods that free tiers throttle harder.
     pub heavy_rps: u32,
+    /// Process-local call budget. 0 disables it. The window resets after 30
+    /// days of uptime; it is a safety margin, not provider-side accounting.
+    pub monthly_call_budget: u64,
+    /// Lower wins when several endpoints serve the same role.
+    pub priority: u8,
 }
 
 impl EndpointOptions {
@@ -116,14 +150,44 @@ impl EndpointOptions {
         Self {
             name: name.into(),
             url: url.into(),
+            role: EndpointRole::Fallback,
             max_rps: 5,
             heavy_rps: 2,
+            monthly_call_budget: 0,
+            priority: 10,
         }
+    }
+
+    pub fn with_role(mut self, role: EndpointRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Set the role from its configuration spelling (`feed`, `exec`, ...).
+    pub fn with_role_name(mut self, role: &str) -> Self {
+        self.role = match role {
+            "feed" => EndpointRole::Feed,
+            "exec" => EndpointRole::Exec,
+            "discovery" => EndpointRole::Discovery,
+            "rent" => EndpointRole::Rent,
+            _ => EndpointRole::Fallback,
+        };
+        self
     }
 
     pub fn with_rps(mut self, max_rps: u32, heavy_rps: u32) -> Self {
         self.max_rps = max_rps.max(1);
         self.heavy_rps = heavy_rps.max(1);
+        self
+    }
+
+    pub fn with_budget(mut self, monthly_call_budget: u64) -> Self {
+        self.monthly_call_budget = monthly_call_budget;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
         self
     }
 }
@@ -133,9 +197,13 @@ impl EndpointOptions {
 pub struct EndpointHealth {
     pub name: String,
     pub url: String,
+    pub role: &'static str,
     pub max_rps: u32,
     pub heavy_rps: u32,
     pub total_calls: u64,
+    pub budget_calls: u64,
+    pub monthly_call_budget: u64,
+    pub priority: u8,
     pub rate_limited: u64,
     pub circuit_open: bool,
     /// Milliseconds until the circuit breaker closes. 0 when healthy.
@@ -145,6 +213,10 @@ pub struct EndpointHealth {
 #[derive(Debug, Default)]
 struct EndpointState {
     calls: AtomicU64,
+    /// Calls counted against `monthly_call_budget` in the current window.
+    budget_calls: AtomicU64,
+    /// Unix millis at which the current budget window started.
+    budget_window_start: AtomicU64,
     rate_limited: AtomicU64,
     /// Unix millis until which this endpoint is skipped after a rate limit.
     cooldown_until: AtomicU64,
@@ -257,9 +329,13 @@ impl RpcClient {
                 EndpointHealth {
                     name: self.endpoints[index].name.clone(),
                     url: self.endpoints[index].url.clone(),
+                    role: self.endpoints[index].role.as_str(),
                     max_rps: self.endpoints[index].max_rps,
                     heavy_rps: self.endpoints[index].heavy_rps,
                     total_calls: state.calls.load(Ordering::Relaxed),
+                    budget_calls: state.budget_calls.load(Ordering::Relaxed),
+                    monthly_call_budget: self.endpoints[index].monthly_call_budget,
+                    priority: self.endpoints[index].priority,
                     rate_limited: state.rate_limited.load(Ordering::Relaxed),
                     circuit_open: cooldown > now,
                     circuit_remaining_ms: cooldown.saturating_sub(now),
@@ -315,23 +391,102 @@ impl RpcClient {
         }
     }
 
-    /// Pick the next healthy endpoint. Endpoints on cooldown are skipped.
-    fn pick(&self) -> Option<usize> {
+    /// Pick the next healthy endpoint for `role`.
+    ///
+    /// Routing is strict about preference and loose about survival:
+    /// 1. an endpoint whose configured role matches the call;
+    /// 2. a `fallback` endpoint, which may serve any role;
+    /// 3. any healthy endpoint, so a misconfigured or exhausted provider can
+    ///    never make the process look dead.
+    fn pick(&self, role: EndpointRole) -> Option<usize> {
         let now = now_ms();
         let count = self.endpoints.len();
-        for _ in 0..count {
-            let index = self.cursor.fetch_add(1, Ordering::Relaxed) % count;
-            if self.states[index].cooldown_until.load(Ordering::Relaxed) <= now {
+        if count == 0 {
+            return None;
+        }
+        let healthy = |index: usize| {
+            if self.states[index].cooldown_until.load(Ordering::Relaxed) > now {
+                return false;
+            }
+            let budget = self.endpoints[index].monthly_call_budget;
+            if budget == 0 {
+                return true;
+            }
+            let window = self.states[index]
+                .budget_window_start
+                .load(Ordering::Relaxed);
+            if window == 0 || now.saturating_sub(window) >= 30 * 24 * 60 * 60 * 1_000 {
+                // Start a fresh window on first use and after 30 days.
+                if window == 0 {
+                    let _ = self.states[index].budget_window_start.compare_exchange(
+                        0,
+                        now,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                } else {
+                    self.states[index]
+                        .budget_window_start
+                        .store(now, Ordering::Relaxed);
+                    self.states[index].budget_calls.store(0, Ordering::Relaxed);
+                }
+                return true;
+            }
+            self.states[index].budget_calls.load(Ordering::Relaxed) < budget
+        };
+        for pass in 0..3 {
+            let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+            let mut best: Option<(u8, usize)> = None;
+            for offset in 0..count {
+                let index = (start + offset) % count;
+                if !healthy(index) {
+                    continue;
+                }
+                let matches = match pass {
+                    0 => self.endpoints[index].role == role,
+                    1 => self.endpoints[index].role == EndpointRole::Fallback,
+                    _ => true,
+                };
+                if !matches {
+                    continue;
+                }
+                let priority = self.endpoints[index].priority;
+                if best
+                    .map(|(best_priority, _)| priority < best_priority)
+                    .unwrap_or(true)
+                {
+                    best = Some((priority, index));
+                }
+            }
+            if let Some((_, index)) = best {
                 return Some(index);
             }
         }
         None
     }
 
+    /// Which endpoint role a JSON-RPC method is routed to by default.
+    fn role_for_method(method: &str) -> EndpointRole {
+        match method {
+            "getProgramAccounts" | "getTokenLargestAccounts" => EndpointRole::Discovery,
+            "getTokenAccountsByOwner" | "getTokenAccountsByDelegate" => EndpointRole::Rent,
+            "sendTransaction"
+            | "sendRawTransaction"
+            | "simulateTransaction"
+            | "getLatestBlockhash"
+            | "isBlockhashValid"
+            | "getSignatureStatuses"
+            | "getTransaction"
+            | "getBalance"
+            | "getAccountInfo" => EndpointRole::Exec,
+            _ => EndpointRole::Feed,
+        }
+    }
+
     async fn call<T: for<'de> Deserialize<'de>>(&self, method: &str, params: Value) -> Result<T> {
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
-            let Some(index) = self.pick() else {
+            let Some(index) = self.pick(Self::role_for_method(method)) else {
                 let cooldown = self
                     .states
                     .iter()
@@ -339,7 +494,7 @@ impl RpcClient {
                     .max()
                     .unwrap_or(0);
                 return Err(RpcError::Http(format!(
-                    "all {} RPC endpoints are cooling down for {}ms",
+                    "no RPC endpoint available: {} endpoints are cooling down or over budget (next cooldown ends in {}ms)",
                     self.endpoints.len(),
                     cooldown.saturating_sub(now_ms())
                 )));
@@ -353,6 +508,11 @@ impl RpcClient {
                 "params": params,
             });
             self.states[index].calls.fetch_add(1, Ordering::Relaxed);
+            if self.endpoints[index].monthly_call_budget > 0 {
+                self.states[index]
+                    .budget_calls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             let result = self
                 .http
                 .post(url)
@@ -726,19 +886,36 @@ impl RpcClient {
         &self,
         encoded_transaction: &str,
     ) -> Result<SimulationResult> {
+        self.simulate_transaction_with_accounts(encoded_transaction, &[], false)
+            .await
+    }
+
+    /// Simulate and additionally return post-execution snapshots of `addresses`.
+    ///
+    /// This is how a live probe can observe the *effect* of an instruction
+    /// (for example, the exact tokens credited by a flash borrow) instead of
+    /// inferring it from logs.
+    pub async fn simulate_transaction_with_accounts(
+        &self,
+        encoded_transaction: &str,
+        addresses: &[String],
+        include_inner_instructions: bool,
+    ) -> Result<SimulationResult> {
+        let mut config = json!({
+            "encoding": "base64",
+            "sigVerify": false,
+            "replaceRecentBlockhash": true,
+            "commitment": "processed",
+            "innerInstructions": include_inner_instructions,
+        });
+        if !addresses.is_empty() {
+            config["accounts"] = json!({
+                "encoding": "base64",
+                "addresses": addresses,
+            });
+        }
         let result: Value = self
-            .call(
-                "simulateTransaction",
-                json!([
-                    encoded_transaction,
-                    {
-                        "encoding": "base64",
-                        "sigVerify": false,
-                        "replaceRecentBlockhash": true,
-                        "commitment": "processed"
-                    }
-                ]),
-            )
+            .call("simulateTransaction", json!([encoded_transaction, config]))
             .await?;
         let value = result
             .get("value")
@@ -757,6 +934,16 @@ impl RpcClient {
                 .unwrap_or_default(),
             units_consumed: value.get("unitsConsumed").and_then(Value::as_u64),
             return_data: value.get("returnData").cloned(),
+            post_accounts: value
+                .get("accounts")
+                .and_then(Value::as_array)
+                .map(|accounts| {
+                    accounts
+                        .iter()
+                        .map(|account| (!account.is_null()).then(|| account.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 
@@ -1168,6 +1355,74 @@ mod tests {
         let account = parse_account(&value).unwrap();
         assert_eq!(account.lamports, 123);
         assert_eq!(account.data, vec![1, 2, 3]);
+    }
+
+    fn client(roles: &[EndpointRole]) -> RpcClient {
+        RpcClient::with_endpoints(
+            roles
+                .iter()
+                .enumerate()
+                .map(|(index, role)| {
+                    EndpointOptions::new(format!("e{index}"), "http://localhost").with_role(*role)
+                })
+                .collect(),
+            "confirmed",
+            1_000,
+            0,
+            0,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn methods_map_to_their_roles() {
+        assert_eq!(
+            RpcClient::role_for_method("getProgramAccounts"),
+            EndpointRole::Discovery
+        );
+        assert_eq!(
+            RpcClient::role_for_method("getTokenAccountsByOwner"),
+            EndpointRole::Rent
+        );
+        assert_eq!(
+            RpcClient::role_for_method("simulateTransaction"),
+            EndpointRole::Exec
+        );
+        assert_eq!(
+            RpcClient::role_for_method("getAccountInfo"),
+            EndpointRole::Exec
+        );
+        assert_eq!(
+            RpcClient::role_for_method("getMultipleAccounts"),
+            EndpointRole::Feed
+        );
+    }
+
+    #[test]
+    fn routing_prefers_the_matching_role() {
+        let rpc = client(&[
+            EndpointRole::Feed,
+            EndpointRole::Discovery,
+            EndpointRole::Exec,
+        ]);
+        let picked = rpc.pick(EndpointRole::Discovery).unwrap();
+        assert_eq!(rpc.endpoints[picked].role, EndpointRole::Discovery);
+        let picked = rpc.pick(EndpointRole::Exec).unwrap();
+        assert_eq!(rpc.endpoints[picked].role, EndpointRole::Exec);
+    }
+
+    #[test]
+    fn routing_uses_fallback_before_crossing_roles() {
+        let rpc = client(&[EndpointRole::Feed, EndpointRole::Fallback]);
+        let picked = rpc.pick(EndpointRole::Exec).unwrap();
+        assert_eq!(rpc.endpoints[picked].role, EndpointRole::Fallback);
+    }
+
+    #[test]
+    fn routing_still_survives_without_a_fallback() {
+        let rpc = client(&[EndpointRole::Feed]);
+        let picked = rpc.pick(EndpointRole::Exec).unwrap();
+        assert_eq!(rpc.endpoints[picked].role, EndpointRole::Feed);
     }
 
     #[test]

@@ -122,6 +122,29 @@ fn to_instruction(instruction: &RawInstruction, index: usize) -> Result<Instruct
 
 use std::str::FromStr;
 
+/// Controls which Jupiter-provided instructions survive composition.
+///
+/// Flash cycles need both switches off: the engine sets its own compute budget
+/// (the borrow/repay add compute units Jupiter did not quote), and Jupiter's
+/// final cleanup must not run because it unwraps/closes the token account that
+/// the repayment instruction is about to spend from.
+#[derive(Debug, Clone, Copy)]
+pub struct ComposeOptions {
+    /// Keep the final leg's cleanup instruction (closes/unwraps WSOL).
+    pub include_final_cleanup: bool,
+    /// Keep Jupiter's compute-budget instructions.
+    pub include_compute_budget: bool,
+}
+
+impl Default for ComposeOptions {
+    fn default() -> Self {
+        Self {
+            include_final_cleanup: true,
+            include_compute_budget: true,
+        }
+    }
+}
+
 /// Assemble all legs into one ordered instruction list.
 ///
 /// The rules are what make composition safe rather than merely compact:
@@ -129,6 +152,22 @@ use std::str::FromStr;
 /// set its budget once), and only the last leg contributes a cleanup (earlier
 /// cleanups would destroy the accounts the next leg needs).
 pub fn compose_cycle(legs: &[CycleLeg]) -> Result<ComposedCycle> {
+    compose_cycle_with(legs, ComposeOptions::default(), &[], &[])
+}
+
+/// Compose a cycle with engine-owned instructions before and after the swaps.
+///
+/// `preamble` runs before every Jupiter instruction (used for ATA creation and
+/// the flash borrow), and `postamble` runs after the last swap (used for the
+/// flash repayment and, for wrapped SOL, closing the account). Both are native
+/// instructions, so their account requirements are part of the composed
+/// transaction's static key list.
+pub fn compose_cycle_with(
+    legs: &[CycleLeg],
+    options: ComposeOptions,
+    preamble: &[Instruction],
+    postamble: &[Instruction],
+) -> Result<ComposedCycle> {
     if legs.is_empty() {
         return Err(ComposeError::Empty);
     }
@@ -150,27 +189,33 @@ pub fn compose_cycle(legs: &[CycleLeg]) -> Result<ComposedCycle> {
         }
     }
 
+    for instruction in preamble {
+        estimated_bytes += size_of(instruction);
+        instructions.push(instruction.clone());
+    }
+
     for (index, leg) in legs.iter().enumerate() {
         // First leg owns the compute budget for the whole transaction.
         // Only the first leg may set the compute budget: a transaction can
         // raise its limit once, and a second budget instruction silently
         // overrides the first, which is worse than not having it.
-        let preamble = if index == 0 {
-            leg.instructions.preamble()
-        } else {
-            leg.instructions
-                .preamble()
-                .into_iter()
-                .filter(|instruction| {
-                    !leg.instructions
-                        .compute_budget_instructions
-                        .iter()
-                        .map(|budget| budget.program_id)
-                        .any(|budget| budget == instruction.program_id)
-                })
-                .collect::<Vec<_>>()
-        };
-        for instruction in preamble {
+        let keep_budget = index == 0 && options.include_compute_budget;
+        let mut raw_preamble: Vec<&beast_dex::jupiter::RawInstruction> =
+            leg.instructions.preamble();
+        if !keep_budget {
+            let budget_programs: Vec<&beast_dex::Address> = leg
+                .instructions
+                .compute_budget_instructions
+                .iter()
+                .map(|budget| &budget.program_id)
+                .collect();
+            raw_preamble.retain(|instruction| {
+                !budget_programs
+                    .iter()
+                    .any(|program| **program == instruction.program_id)
+            });
+        }
+        for instruction in raw_preamble {
             let instruction = to_instruction(instruction, index)?;
             estimated_bytes += size_of(&instruction);
             instructions.push(instruction);
@@ -193,13 +238,18 @@ pub fn compose_cycle(legs: &[CycleLeg]) -> Result<ComposedCycle> {
 
         // Only the last leg unwraps/closes: earlier legs would delete the
         // token account the following leg spends from.
-        if leg.is_final {
+        if leg.is_final && options.include_final_cleanup {
             if let Some(cleanup) = &leg.instructions.cleanup_instruction {
                 let instruction = to_instruction(cleanup, index)?;
                 estimated_bytes += size_of(&instruction);
                 instructions.push(instruction);
             }
         }
+    }
+
+    for instruction in postamble {
+        estimated_bytes += size_of(instruction);
+        instructions.push(instruction.clone());
     }
 
     if estimated_bytes > MAX_TRANSACTION_BYTES {
@@ -554,6 +604,64 @@ mod tests {
             .instructions
             .iter()
             .any(|instruction| instruction.program_id.to_string() == final_cleanup));
+    }
+
+    #[test]
+    fn flash_hooks_wrap_every_jupiter_instruction() {
+        use super::native_key;
+        let borrow = solana_sdk::instruction::Instruction {
+            program_id: native_key(&pubkey(200)),
+            accounts: Vec::new(),
+            data: vec![1, 2, 3],
+        };
+        let repay = solana_sdk::instruction::Instruction {
+            program_id: native_key(&pubkey(201)),
+            accounts: Vec::new(),
+            data: vec![4, 5, 6],
+        };
+        let composed = compose_cycle_with(
+            &legs(2),
+            ComposeOptions {
+                include_final_cleanup: false,
+                include_compute_budget: false,
+            },
+            std::slice::from_ref(&borrow),
+            std::slice::from_ref(&repay),
+        )
+        .expect("flash cycle composes");
+        assert_eq!(composed.instructions.first().unwrap().data, vec![1, 2, 3]);
+        assert_eq!(composed.instructions.last().unwrap().data, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn flash_options_drop_budget_and_cleanup() {
+        let composed = compose_cycle_with(
+            &legs(2),
+            ComposeOptions {
+                include_final_cleanup: false,
+                include_compute_budget: false,
+            },
+            &[],
+            &[],
+        )
+        .expect("flash cycle composes");
+        assert!(!composed
+            .instructions
+            .iter()
+            .any(|instruction| instruction.program_id.to_string() == BUDGET_PROGRAM));
+        let cleanups: std::collections::HashSet<String> = legs(2)
+            .iter()
+            .filter_map(|leg| {
+                leg.instructions
+                    .cleanup_instruction
+                    .as_ref()
+                    .map(|instruction| instruction.program_id.to_string())
+            })
+            .collect();
+        assert!(!composed
+            .instructions
+            .iter()
+            .any(|instruction| cleanups.contains(&instruction.program_id.to_string())));
     }
 
     #[test]

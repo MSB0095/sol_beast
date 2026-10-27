@@ -124,10 +124,10 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RpcCommand {
-    /// Add one provider endpoint (`beast rpc add --provider drpc --key-env DRPC_KEY --role feed`).
+    /// Add one provider endpoint (`beast rpc add --provider helius --key-env HELIUS_API_KEY --role exec`).
     Add {
-        /// Provider preset: drpc | helius | alchemy | quicknode | chainstack | public
-        #[arg(long, default_value = "drpc")]
+        /// Provider preset: helius | alchemy | quicknode | chainstack | public
+        #[arg(long, default_value = "helius")]
         provider: String,
         /// Environment variable holding the API key. Leave empty for `public`.
         #[arg(long)]

@@ -90,6 +90,13 @@ jupiter_swap_instructions_url = "https://lite-api.jup.ag/swap/v1/swap-instructio
 max_accounts = 48
 restrict_intermediate_tokens = true
 
+[flash]
+enabled = false
+provider = "kamino"
+mint = "So11111111111111111111111111111111111111112"
+max_borrow_lamports = 1000000000
+reserve = ""
+
 [rent]
 enabled = true
 batch_size = 20
@@ -173,6 +180,25 @@ max_attempts_per_min = 6
 daily_cost_cap_lamports = 5_000_000
 max_inflight = 1
 ttl_slots = 10
+start_mints = []
+venues = []
+pair_allowlist = []
+pair_denylist = []
+
+[strategies.flash_arb]
+mode = "off"
+min_net_lamports = 20000
+max_notional_lamports = 1000000000
+max_price_impact_bps = 80
+tip_alpha_initial = 0.5
+tip_cap_lamports = 2000000
+max_attempts_per_min = 15
+daily_cost_cap_lamports = 20000000
+max_inflight = 1
+ttl_slots = 2
+# `[flash] mint` controls discovery. An empty start list lets the router index
+# every pool mint when flash.mint is empty; per-strategy start lists would
+# otherwise hide borrowable mints.
 start_mints = []
 venues = []
 pair_allowlist = []

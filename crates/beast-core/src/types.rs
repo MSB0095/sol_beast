@@ -16,15 +16,18 @@ pub enum StrategyKind {
     LstArb,
     StableArb,
     RentReclaim,
+    /// A cycle funded by an atomic flash loan instead of wallet capital.
+    FlashArb,
 }
 
 impl StrategyKind {
-    pub const ALL: [StrategyKind; 5] = [
+    pub const ALL: [StrategyKind; 6] = [
         Self::CrossDexArb,
         Self::TriangularArb,
         Self::LstArb,
         Self::StableArb,
         Self::RentReclaim,
+        Self::FlashArb,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -34,6 +37,7 @@ impl StrategyKind {
             Self::LstArb => "lst_arb",
             Self::StableArb => "stable_arb",
             Self::RentReclaim => "rent_reclaim",
+            Self::FlashArb => "flash_arb",
         }
     }
 
@@ -186,6 +190,10 @@ pub struct CostBreakdown {
     pub base_fee_lamports: u64,
     pub rent_lamports: u64,
     pub guard_lamports: u64,
+    /// Protocol fee charged by the flash-loan reserve. Zero for cycles that
+    /// spend wallet capital.
+    #[serde(default)]
+    pub flash_fee_lamports: u64,
 }
 
 impl CostBreakdown {
@@ -195,6 +203,7 @@ impl CostBreakdown {
             .saturating_add(self.base_fee_lamports)
             .saturating_add(self.rent_lamports)
             .saturating_add(self.guard_lamports)
+            .saturating_add(self.flash_fee_lamports)
     }
 }
 
@@ -353,6 +362,7 @@ mod tests {
                 base_fee_lamports: 5_000,
                 rent_lamports: 0,
                 guard_lamports: 0,
+                flash_fee_lamports: 0,
             },
             est_net_lamports: 0,
             confidence: 1.0,
@@ -365,6 +375,19 @@ mod tests {
         assert_eq!(opp.est_net_lamports, 54_000);
         assert!(opp.is_profitable(50_000));
         assert!(!opp.is_profitable(60_000));
+    }
+
+    #[test]
+    fn flash_fee_is_part_of_total_cost() {
+        let costs = CostBreakdown {
+            tip_lamports: 1_000,
+            priority_fee_lamports: 2_000,
+            base_fee_lamports: 5_000,
+            rent_lamports: 7_000,
+            guard_lamports: 0,
+            flash_fee_lamports: 11_000,
+        };
+        assert_eq!(costs.total(), 26_000);
     }
 
     #[test]

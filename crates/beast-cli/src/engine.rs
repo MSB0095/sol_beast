@@ -11,13 +11,15 @@ use beast_core::types::{
     StrategyKind,
 };
 use beast_dex::catalog;
-use beast_dex::jupiter::JupiterClient;
+use beast_dex::jupiter::{JupiterClient, QuoteRequest};
 use beast_dex::router::{Router, RouterConfig};
 use beast_dex::Address;
 use beast_exec::{
-    ExecutionConfig, Executor, RentReclaimer, Wallet, DEFAULT_TRANSACTION_FEE_LAMPORTS, WSOL_MINT,
+    ExecutionConfig, ExecutionError, Executor, RentReclaimer, Wallet,
+    DEFAULT_TRANSACTION_FEE_LAMPORTS, WSOL_MINT,
 };
 use beast_feed::{FeedConfig, PoolFeed, WatchedPool};
+use beast_flash::{kamilend::KaminoFlashProvider, FlashProvider, FlashReserve};
 use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::{AttemptRecord, AttemptUpdate, BundleRecord, Store};
 use chrono::Utc;
@@ -40,6 +42,110 @@ pub struct RunOptions {
     pub radar_interval_ms: u64,
 }
 
+struct FlashRuntime {
+    provider: Arc<dyn FlashProvider>,
+    /// Deepest verified reserve per borrowable mint.
+    reserves: HashMap<Address, FlashReserve>,
+}
+
+impl FlashRuntime {
+    fn reserve_for(&self, mint: Address) -> Option<&FlashReserve> {
+        self.reserves.get(&mint)
+    }
+
+    fn deepest(&self) -> Option<&FlashReserve> {
+        self.reserves
+            .values()
+            .max_by_key(|reserve| reserve.available)
+    }
+
+    /// True when this route can be funded by one of the loaded flash reserves.
+    ///
+    /// The route must start and end at the same mint, fit both the configured
+    /// borrow ceiling and that reserve's observed liquidity. Anything else keeps
+    /// its normal capital-funded strategy instead of being dropped.
+    fn matches(&self, route: &beast_dex::model::RouteQuote, config: &BeastConfig) -> bool {
+        let Some(reserve) = self.reserve_for(route.start_mint) else {
+            return false;
+        };
+        route.end_mint == route.start_mint
+            && route.amount_in > 0
+            && route.amount_in <= config.flash.max_borrow_lamports
+            && route.amount_in <= reserve.available
+            && reserve.flash_enabled()
+    }
+}
+
+/// Converts raw token amounts into a conservative lamport value.
+///
+/// A cycle that starts at a non-WSOL mint earns its profit in that mint, but
+/// every cost and every risk limit is denominated in lamports. Without this
+/// conversion, one raw USDC unit (0.000001 USDC) would be counted as one
+/// lamport and a losing cycle could look profitable.
+struct TokenPricer {
+    jupiter: Arc<JupiterClient>,
+    cache: Mutex<HashMap<Address, (u64, Instant)>>,
+}
+
+impl TokenPricer {
+    fn new(jupiter: Arc<JupiterClient>) -> Self {
+        Self {
+            jupiter,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn raw_per_sol(&self, mint: Address) -> Option<u64> {
+        let wsol = WSOL_MINT.parse::<Address>().ok()?;
+        if mint == wsol {
+            return Some(1_000_000_000);
+        }
+        if let Ok(cache) = self.cache.lock() {
+            if let Some((value, at)) = cache.get(&mint) {
+                if at.elapsed() < Duration::from_secs(60) {
+                    return Some(*value);
+                }
+            }
+        }
+        // Probe with a modest notional so a thin pool is not moved by the
+        // price check itself, then fall back to a smaller probe.
+        for probe in [100_000_000u64, 10_000_000u64] {
+            let mut request = QuoteRequest::new(wsol, mint, probe);
+            request.slippage_bps = 100;
+            request.only_direct_routes = false;
+            let Ok(quote) = self.jupiter.quote(&request).await else {
+                continue;
+            };
+            let Ok(out) = quote.amount_out() else {
+                continue;
+            };
+            if out == 0 {
+                continue;
+            }
+            let raw_per_sol = (out as u128)
+                .checked_mul(1_000_000_000u128)?
+                .checked_div(probe as u128)?;
+            let raw_per_sol = u64::try_from(raw_per_sol).ok()?;
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.insert(mint, (raw_per_sol, Instant::now()));
+            }
+            return Some(raw_per_sol);
+        }
+        None
+    }
+
+    async fn lamports(&self, mint: Address, amount: u64) -> Option<u64> {
+        if amount == 0 {
+            return Some(0);
+        }
+        let raw_per_sol = self.raw_per_sol(mint).await?;
+        let value = (amount as u128)
+            .checked_mul(1_000_000_000u128)?
+            .checked_div(raw_per_sol as u128)?;
+        u64::try_from(value).ok()
+    }
+}
+
 struct RadarContext {
     config: Arc<BeastConfig>,
     feed: Arc<PoolFeed>,
@@ -49,6 +155,8 @@ struct RadarContext {
     executor: Option<Arc<Executor>>,
     controls: ControlPlane,
     rpc: Arc<RpcClient>,
+    pricer: Arc<TokenPricer>,
+    flash: Option<Arc<FlashRuntime>>,
     real: bool,
     cli_real: bool,
     interval_ms: u64,
@@ -105,7 +213,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
             .into_iter()
             .map(|endpoint| {
                 EndpointOptions::new(endpoint.name, endpoint.url)
+                    .with_role_name(endpoint.role.as_str())
                     .with_rps(endpoint.max_rps, endpoint.heavy_rps)
+                    .with_budget(endpoint.monthly_call_budget)
+                    .with_priority(endpoint.priority)
             })
             .collect(),
         config.rpc.commitment.clone(),
@@ -133,6 +244,8 @@ pub async fn run(options: RunOptions) -> Result<()> {
             }
         });
     }
+    let flash = build_flash_runtime(&config, &rpc).await?;
+
     let jupiter_base = if config.rpc.jupiter_quote_url.trim().is_empty() {
         "https://lite-api.jup.ag/swap/v1".to_string()
     } else {
@@ -142,6 +255,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         jupiter_base,
         loaded.secrets.jupiter_api_key.clone(),
     )?);
+    let pricer = Arc::new(TokenPricer::new(jupiter.clone()));
     let jito = if config.jito.enabled {
         Some(Arc::new(JitoClient::new(
             config.jito.block_engine_urls.clone(),
@@ -260,6 +374,39 @@ pub async fn run(options: RunOptions) -> Result<()> {
         state.rent = rent.clone();
         state.signing_enabled = options.real && config.runtime.real;
         state.rpc_health = Some(rpc_health.clone());
+        state.flash = flash.as_ref().map(|flash| {
+            let deepest = flash.deepest();
+            let mut reserves: Vec<&FlashReserve> = flash.reserves.values().collect();
+            reserves.sort_by_key(|reserve| std::cmp::Reverse(reserve.available));
+            json!({
+                "provider": flash.provider.id(),
+                "program_id": flash.provider.program_id().to_string(),
+                "reserve": deepest.map(|reserve| reserve.reserve.to_string()),
+                "mint": deepest.map(|reserve| reserve.mint.to_string()),
+                "decimals": deepest.map(|reserve| reserve.decimals),
+                "available": deepest.map(|reserve| reserve.available),
+                "flash_fee_bits": deepest.map(|reserve| reserve.flash_fee_bits),
+                "fee_ppm": deepest.map(|reserve| {
+                    reserve.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6
+                }),
+                "max_borrow_lamports": config.flash.max_borrow_lamports,
+                "lamport_guard": config.guard.enabled
+                    && flash.reserves.keys().any(|mint| mint.to_string() == WSOL_MINT),
+                "reserve_count": reserves.len(),
+                "reserves": reserves
+                    .iter()
+                    .take(24)
+                    .map(|reserve| json!({
+                        "reserve": reserve.reserve.to_string(),
+                        "mint": reserve.mint.to_string(),
+                        "decimals": reserve.decimals,
+                        "available": reserve.available,
+                        "flash_fee_bits": reserve.flash_fee_bits,
+                        "fee_ppm": reserve.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6,
+                    }))
+                    .collect::<Vec<_>>(),
+            })
+        });
         let state = Arc::new(state);
         let controls = ControlPlane {
             mode: state.mode.clone(),
@@ -272,12 +419,20 @@ pub async fn run(options: RunOptions) -> Result<()> {
     };
 
     let shutdown = CancellationToken::new();
-    let api_handle = api_state.map(|state| {
-        let token = shutdown.clone();
-        tokio::spawn(async move {
-            beast_api::serve(state, async move { token.cancelled().await }).await
-        })
-    });
+    let api_handle = match api_state {
+        Some(state) => {
+            // Bind before any loop starts: a port conflict must fail startup,
+            // not leave a dead API task behind a "started" log line.
+            let listener = beast_api::bind(&state)
+                .await
+                .with_context(|| format!("bind API on {}", config.api.bind))?;
+            let token = shutdown.clone();
+            Some(tokio::spawn(async move {
+                beast_api::serve_on(listener, state, async move { token.cancelled().await }).await
+            }))
+        }
+        None => None,
+    };
     let feed_handle = {
         let feed = feed.clone();
         let token = shutdown.clone();
@@ -293,6 +448,8 @@ pub async fn run(options: RunOptions) -> Result<()> {
         executor,
         controls,
         rpc: rpc.clone(),
+        pricer,
+        flash,
         real: options.real && config.runtime.real,
         cli_real: options.real,
         interval_ms: options.radar_interval_ms.max(250),
@@ -339,6 +496,119 @@ pub async fn run(options: RunOptions) -> Result<()> {
     }
     info!("SOL BEAST stopped");
     Ok(())
+}
+
+/// Resolve the configured flash provider and reserve before the radar starts.
+///
+/// A flash-enabled configuration that cannot resolve an active reserve fails
+/// startup: silently running without the advertised capability would be worse
+/// than refusing to start.
+async fn build_flash_runtime(
+    config: &BeastConfig,
+    rpc: &Arc<RpcClient>,
+) -> Result<Option<Arc<FlashRuntime>>> {
+    if !config.flash.enabled {
+        return Ok(None);
+    }
+    let provider = match config.flash.provider.as_str() {
+        "kamino" => KaminoFlashProvider::mainnet(),
+        other => bail!("flash.provider {other:?} is not verified; only \"kamino\" is supported"),
+    };
+    let configured_mint = if config.flash.mint.trim().is_empty() {
+        None
+    } else {
+        Some(
+            config
+                .flash
+                .mint
+                .parse::<Address>()
+                .map_err(|error| anyhow::anyhow!("flash.mint: {error}"))?,
+        )
+    };
+    let mut reserves = Vec::new();
+    if !config.flash.reserve.is_empty() {
+        let key = config
+            .flash
+            .reserve
+            .parse::<Address>()
+            .map_err(|error| anyhow::anyhow!("flash.reserve: {error}"))?;
+        let account = rpc
+            .get_account_info(key)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("flash.reserve {key} not found on chain"))?;
+        let reserve = provider
+            .decode_reserve(&key, &account.account.data)
+            .with_context(|| format!("flash.reserve {key} is not a valid Kamino reserve"))?;
+        if let Some(mint) = configured_mint {
+            if reserve.mint != mint {
+                bail!(
+                    "flash reserve {} is for {}, but flash.mint is {mint}",
+                    reserve.reserve,
+                    reserve.mint
+                );
+            }
+        }
+        reserves.push(reserve);
+    } else if let Some(mint) = configured_mint {
+        reserves = provider
+            .reserves_for_mint(rpc, &mint)
+            .await
+            .with_context(|| format!("no active Kamino flash reserve for {mint}"))?;
+    } else {
+        reserves = provider
+            .discover_reserves(rpc)
+            .await
+            .context("discover Kamino flash reserves")?;
+    }
+    // Keep only reserves that can actually be borrowed and, per mint, only the
+    // deepest one. A second reserve for the same mint adds no routing choice:
+    // the borrow uses one reserve in one transaction.
+    let mut best_by_mint: HashMap<Address, FlashReserve> = HashMap::new();
+    for reserve in reserves {
+        if !reserve.flash_enabled() {
+            continue;
+        }
+        if let Some(mint) = configured_mint {
+            if reserve.mint != mint {
+                continue;
+            }
+        }
+        best_by_mint
+            .entry(reserve.mint)
+            .and_modify(|current| {
+                if reserve.available > current.available {
+                    *current = reserve.clone();
+                }
+            })
+            .or_insert(reserve);
+    }
+    if best_by_mint.is_empty() {
+        bail!(
+            "flash is enabled but no active Kamino reserve matched {}",
+            configured_mint
+                .map(|mint| mint.to_string())
+                .unwrap_or_else(|| "any mint".into())
+        );
+    }
+    let deepest = best_by_mint
+        .values()
+        .max_by_key(|reserve| reserve.available)
+        .expect("non-empty");
+    info!(
+        provider = "kamino",
+        reserves = best_by_mint.len(),
+        deepest = %deepest.reserve,
+        mint = %deepest.mint,
+        available = deepest.available,
+        decimals = deepest.decimals,
+        fee_bits = deepest.flash_fee_bits,
+        fee_ppm = deepest.flash_fee_bits as f64 / (1u64 << 60) as f64 * 1e6,
+        "flash provider ready"
+    );
+    Ok(Some(Arc::new(FlashRuntime {
+        provider: Arc::new(provider),
+        reserves: best_by_mint,
+    })))
 }
 
 fn load_wallet(
@@ -495,7 +765,15 @@ fn router_config(config: &BeastConfig) -> RouterConfig {
             }
         }
     }
-    if start_mints.is_empty() {
+    // An empty flash mint means "every reserve Kamino serves". In that mode
+    // the router must consider every mint in the watchlist, not only the mints
+    // named by the capital-funded strategies. `RouterConfig` treats an empty
+    // start list as "all indexed mints", and per-strategy filters still stop a
+    // capital-funded arm from trading a mint it did not configure.
+    let flash_all_mints = config.flash.enabled && config.flash.mint.trim().is_empty();
+    if flash_all_mints {
+        start_mints.clear();
+    } else if start_mints.is_empty() && !flash_all_mints {
         if let Ok(wsol) = WSOL_MINT.parse::<Address>() {
             start_mints.push(wsol);
         }
@@ -554,7 +832,20 @@ async fn radar_loop(ctx: RadarContext, shutdown: CancellationToken) {
         let now = Instant::now();
         seen.retain(|_, observed| now.duration_since(*observed) < Duration::from_secs(30));
         for route in routes {
-            let strategy = classify_route(&route);
+            let mut strategy = classify_route(&route);
+            if let Some(flash) = &ctx.flash {
+                // Only take over the route when the flash arm is armed and the
+                // route actually fits the reserve; otherwise the normal
+                // capital-funded strategy remains available.
+                if ctx
+                    .config
+                    .strategy_mode(StrategyKind::FlashArb.as_str(), ctx.cli_real)
+                    != Mode::Off
+                    && flash.matches(&route, &ctx.config)
+                {
+                    strategy = StrategyKind::FlashArb;
+                }
+            }
             let strategy_name = strategy.as_str();
             let mut strategy_mode = strategy_modes
                 .get(strategy_name)
@@ -564,8 +855,16 @@ async fn radar_loop(ctx: RadarContext, shutdown: CancellationToken) {
             if strategy_mode == Mode::Off {
                 continue;
             }
-            let Some(opportunity) =
-                build_opportunity(&ctx.config, &route, strategy, strategy_mode, max_slot)
+            let Some(opportunity) = build_opportunity(
+                &ctx.config,
+                &route,
+                strategy,
+                strategy_mode,
+                max_slot,
+                ctx.flash.as_deref(),
+                ctx.pricer.as_ref(),
+            )
+            .await
             else {
                 continue;
             };
@@ -604,12 +903,14 @@ async fn radar_loop(ctx: RadarContext, shutdown: CancellationToken) {
     }
 }
 
-fn build_opportunity(
+async fn build_opportunity(
     config: &BeastConfig,
     route: &beast_dex::model::RouteQuote,
     strategy: StrategyKind,
     mode: Mode,
     slot: u64,
+    flash: Option<&FlashRuntime>,
+    pricer: &TokenPricer,
 ) -> Option<Opportunity> {
     let strategy_config = config.strategy_or_default(strategy.as_str());
     if !strategy_config.start_mints.is_empty() {
@@ -644,7 +945,38 @@ fn build_opportunity(
         return None;
     }
 
-    let gross = route.gross_profit;
+    // A flash opportunity must fit the configured provider and reserve. The
+    // fee is charged on top of the principal, so it is part of the cost model.
+    let flash_fee_units = if strategy == StrategyKind::FlashArb {
+        let flash = flash?;
+        if !flash.matches(route, config) {
+            return None;
+        }
+        let reserve = flash.reserve_for(route.start_mint)?;
+        let fee = reserve.flash_fee(route.amount_in).ok()?;
+        if route.gross_profit <= fee as i64 {
+            return None;
+        }
+        fee
+    } else {
+        0
+    };
+
+    // Non-WSOL cycles earn their gross profit in the start mint. Convert both
+    // the profit and the loan fee before comparing them with lamport costs.
+    let gross = if route.start_mint.to_string() == WSOL_MINT {
+        route.gross_profit
+    } else {
+        let raw = u64::try_from(route.gross_profit.max(0)).ok()?;
+        i64::try_from(pricer.lamports(route.start_mint, raw).await?).ok()?
+    };
+    let flash_fee_lamports = if flash_fee_units == 0 {
+        0
+    } else if route.start_mint.to_string() == WSOL_MINT {
+        flash_fee_units
+    } else {
+        pricer.lamports(route.start_mint, flash_fee_units).await?
+    };
     let tip = strategy_config
         .tip_policy(beast_core::economics::MIN_JITO_TIP_LAMPORTS)
         .tip_for(gross);
@@ -659,7 +991,10 @@ fn build_opportunity(
     // A composed (single-transaction) cycle pays one network fee for the whole
     // cycle rather than one per leg, so the estimate must use the same shape as
     // the executor or the model and the guard disagree about profitability.
-    let base_fee_transactions = if strategy == StrategyKind::TriangularArb {
+    let base_fee_transactions = if matches!(
+        strategy,
+        StrategyKind::TriangularArb | StrategyKind::FlashArb
+    ) {
         3 // composed cycle + guard + tip
     } else {
         route.legs.len() + 2 // one tx per leg + guard + tip
@@ -669,6 +1004,7 @@ fn build_opportunity(
         base_fee_lamports: DEFAULT_TRANSACTION_FEE_LAMPORTS
             .saturating_mul(base_fee_transactions as u64),
         rent_lamports: rent,
+        flash_fee_lamports,
         ..CostBreakdown::default()
     };
     let net = gross.saturating_sub(costs.total() as i64);
@@ -713,6 +1049,8 @@ fn build_opportunity(
         "gross_lamports": gross,
         "costs": costs,
         "rent_accounts": intermediates.len(),
+        "flash_fee_lamports": flash_fee_lamports,
+        "flash_fee_units": flash_fee_units,
     });
     Some(Opportunity {
         id: Uuid::new_v4(),
@@ -858,7 +1196,29 @@ async fn maybe_execute(
     // Triangular and longer routes run as one composed transaction: a single
     // network fee instead of one per leg, and more legs than the Jito
     // five-transaction bundle cap would otherwise allow.
-    let prepare = if opportunity.strategy == StrategyKind::TriangularArb {
+    let prepare = if opportunity.strategy == StrategyKind::FlashArb {
+        match ctx.flash.as_ref() {
+            Some(flash) => {
+                let mint = opportunity
+                    .legs
+                    .first()
+                    .and_then(|leg| leg.mint_in.parse::<Address>().ok());
+                match mint.and_then(|mint| flash.reserve_for(mint)) {
+                    Some(reserve) => {
+                        executor
+                            .prepare_flash_cycle(opportunity, flash.provider.as_ref(), reserve)
+                            .await
+                    }
+                    None => Err(ExecutionError::Unsupported(
+                        "no flash reserve matches the cycle start mint".into(),
+                    )),
+                }
+            }
+            None => Err(ExecutionError::Unsupported(
+                "flash runtime is not configured".into(),
+            )),
+        }
+    } else if opportunity.strategy == StrategyKind::TriangularArb {
         executor.prepare_composed_cycle(opportunity).await
     } else {
         executor.prepare_cycle(opportunity).await
@@ -1363,6 +1723,18 @@ mod tests {
             .start_mints
             .iter()
             .any(|mint| mint.to_string() == WSOL_MINT));
+    }
+
+    #[test]
+    fn empty_flash_mint_scans_every_indexed_mint() {
+        let mut config = BeastConfig::default();
+        config.flash.enabled = true;
+        config.flash.mint = String::new();
+        let config = router_config(&config);
+        assert!(
+            config.start_mints.is_empty(),
+            "an empty flash mint must clear strategy start mints so the router indexes every pool mint"
+        );
     }
 
     #[test]

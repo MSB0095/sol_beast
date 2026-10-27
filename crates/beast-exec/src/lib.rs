@@ -22,6 +22,7 @@ use beast_core::economics::{TipPolicy, MIN_JITO_TIP_LAMPORTS, SPL_TOKEN_ACCOUNT_
 use beast_core::types::{Mode, Opportunity};
 use beast_dex::jupiter::{JupiterClient, JupiterQuote, QuoteRequest, SwapRequest};
 use beast_dex::Address;
+use beast_flash::{FlashProvider, FlashReserve};
 use beast_rpc::{JitoClient, RpcClient};
 use bincode::serialize;
 use serde::{Deserialize, Serialize};
@@ -85,6 +86,8 @@ pub enum ExecutionError {
     InsufficientBalance(String),
     #[error("guard: {0}")]
     Guard(String),
+    #[error("flash: {0}")]
+    Flash(#[from] beast_flash::FlashError),
 }
 
 impl From<solana_sdk::signer::SignerError> for ExecutionError {
@@ -283,6 +286,30 @@ pub struct BundlePlan {
     /// instead of one transaction per leg.
     #[serde(default)]
     pub composed: bool,
+    /// Present only when the cycle was funded by an atomic flash loan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flash: Option<FlashPlanInfo>,
+}
+
+/// The flash loan that funded a prepared cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlashPlanInfo {
+    pub provider: String,
+    pub reserve: Address,
+    pub mint: Address,
+    /// Principal borrowed and repaid.
+    pub borrowed: u64,
+    /// Protocol fee charged on top of the principal.
+    pub fee: u64,
+    /// `borrowed + fee`: what the cycle must return to the token account.
+    pub repayment: u64,
+    /// Reserve liquidity observed when the plan was built.
+    pub available: u64,
+    /// True when the separate lamport guard was included. Non-WSOL cycles keep
+    /// their profit in the borrowed token and therefore cannot use a lamport
+    /// guard; their safety comes from the enforced final Jupiter min-out plus
+    /// the flash repayment.
+    pub lamport_guard: bool,
 }
 
 pub struct Executor {
@@ -473,6 +500,7 @@ impl Executor {
             encoded_transactions,
             signatures,
             composed: false,
+            flash: None,
         })
     }
 
@@ -668,7 +696,483 @@ impl Executor {
             encoded_transactions,
             signatures,
             composed: true,
+            flash: None,
         })
+    }
+
+    /// Prepare a capital-free cycle funded by an atomic flash loan.
+    ///
+    /// The transaction shape is:
+    ///
+    /// ```text
+    /// compute budget
+    /// [create the borrowed mint's ATA]
+    /// flash borrow                     <- index recorded for the repay
+    /// leg 1 ... leg N                  <- Jupiter, wrap/unwrap disabled
+    /// flash repay (principal)
+    /// [close the ATA]                  <- WSOL only: realises profit in lamports
+    /// ```
+    ///
+    /// Safety is enforced *inside* the cycle, which is stronger than a separate
+    /// guard transaction:
+    /// * the final leg is re-quoted so its on-chain min-out is at least
+    ///   `principal + fee + min_profit + fees + tip` (converted to the borrowed
+    ///   token for non-WSOL); Jupiter reverts below that;
+    /// * the flash repayment itself reverts if the token account is short.
+    ///
+    /// For WSOL the ATA is closed after repayment, so the profit lands in the
+    /// wallet as lamports and the separate guard transaction can verify it. For
+    /// other mints the profit stays in the token account; the lamport guard is
+    /// deliberately omitted (and reported as `lamport_guard=false`) rather than
+    /// pretending to verify something it cannot see.
+    pub async fn prepare_flash_cycle(
+        &self,
+        opportunity: &Opportunity,
+        provider: &dyn FlashProvider,
+        configured_reserve: &FlashReserve,
+    ) -> Result<BundlePlan> {
+        if !provider.enabled() {
+            return Err(ExecutionError::Unsupported(format!(
+                "flash provider {} is not verified",
+                provider.id()
+            )));
+        }
+        let legs = &opportunity.legs;
+        if !(2..=MAX_COMPOSED_LEGS).contains(&legs.len()) {
+            return Err(ExecutionError::Unsupported(format!(
+                "flash cycles support 2..={MAX_COMPOSED_LEGS} legs, got {}",
+                legs.len()
+            )));
+        }
+
+        let start = parse_mint(&legs[0].mint_in, "start mint")?;
+        let mut mints = Vec::with_capacity(legs.len() + 1);
+        let mut expected_in = start;
+        for (index, leg) in legs.iter().enumerate() {
+            let mint_in = parse_mint(&leg.mint_in, "leg input")?;
+            let mint_out = parse_mint(&leg.mint_out, "leg output")?;
+            if mint_in != expected_in {
+                return Err(ExecutionError::Unsupported(format!(
+                    "leg {index} starts at {mint_in}, expected {expected_in}"
+                )));
+            }
+            mints.push(mint_in);
+            expected_in = mint_out;
+        }
+        if expected_in != start {
+            return Err(ExecutionError::Unsupported(
+                "flash cycles must be closed (end mint == start mint)".into(),
+            ));
+        }
+        mints.push(start);
+
+        // Re-read the reserve immediately before building. Availability and
+        // the fee are governance-controlled state; a cached snapshot must never
+        // decide whether a live borrow is safe.
+        let account = self
+            .rpc
+            .get_account_info(configured_reserve.reserve)
+            .await?
+            .ok_or_else(|| {
+                ExecutionError::Unsupported(format!(
+                    "flash reserve {} not found",
+                    configured_reserve.reserve
+                ))
+            })?;
+        let reserve =
+            provider.decode_reserve(&configured_reserve.reserve, &account.account.data)?;
+        if reserve.mint != start {
+            return Err(ExecutionError::Unsupported(format!(
+                "flash reserve {} is for {}, but the cycle starts at {start}",
+                reserve.reserve, reserve.mint
+            )));
+        }
+        if !reserve.flash_enabled() {
+            return Err(ExecutionError::Unsupported(format!(
+                "flash reserve {} is not borrowable (status {}, fee bits {}, available {})",
+                reserve.reserve, reserve.status, reserve.flash_fee_bits, reserve.available
+            )));
+        }
+
+        let amount = legs[0].amount_in;
+        if amount == 0 {
+            return Err(ExecutionError::Unprofitable("zero flash amount".into()));
+        }
+        if amount > reserve.available {
+            return Err(ExecutionError::InsufficientBalance(format!(
+                "flash reserve {} has {} available, cycle wants {amount}",
+                reserve.reserve, reserve.available
+            )));
+        }
+        let fee = provider.flash_fee(&reserve, amount)?;
+        let principal_plus_fee = provider.repayment_amount(&reserve, amount)?;
+        let is_wsol = start.to_string() == WSOL_MINT;
+
+        // Quote every leg from the previous leg's enforced minimum out.
+        let mut quotes = Vec::with_capacity(legs.len());
+        let mut leg_amount = amount;
+        for index in 0..legs.len() {
+            let mut request = QuoteRequest::new(mints[index], mints[index + 1], leg_amount);
+            request.slippage_bps = self.config.slippage_bps;
+            request.only_direct_routes = true;
+            let quote = self.jupiter.quote(&request).await?;
+            let min_out = quote.minimum_out()?;
+            if min_out == 0 {
+                return Err(ExecutionError::Unprofitable(format!(
+                    "flash leg {index} minOut=0"
+                )));
+            }
+            leg_amount = min_out;
+            quotes.push(quote);
+        }
+
+        let expected_out = quotes.last().expect("at least two legs").amount_out()?;
+        if expected_out <= principal_plus_fee {
+            return Err(ExecutionError::Unprofitable(format!(
+                "flash cycle expected out {expected_out} does not cover principal+fee {principal_plus_fee}"
+            )));
+        }
+        let gross_after_fee = expected_out - principal_plus_fee;
+        // Tips are quoted in lamports. For a non-WSOL cycle the profit is in
+        // the borrowed token, so convert it (with a haircut) before choosing.
+        let gross_lamports = if is_wsol {
+            gross_after_fee
+        } else {
+            self.lamports_equivalent(&reserve.mint, gross_after_fee)
+                .await?
+        };
+
+        // Non-WSOL cycles keep their profit in the borrowed token, so the
+        // separate lamport guard cannot observe it. WSOL is closed back to
+        // lamports and keeps the guard.
+        let guard_applicable = is_wsol && self.config.guard_enabled();
+        let transaction_count = if guard_applicable { 3 } else { 2 };
+        let intermediate_accounts = legs.len() - 1;
+        let rent_lamports = self
+            .config
+            .ata_rent_lamports
+            .checked_mul(intermediate_accounts as u64)
+            .ok_or_else(|| ExecutionError::Config("ATA rent overflow".into()))?;
+        let fees_lamports = self
+            .config
+            .transaction_fee_lamports
+            .saturating_mul(transaction_count as u64)
+            .checked_add(rent_lamports)
+            .ok_or_else(|| ExecutionError::Config("flash cost overflow".into()))?;
+        let tip_lamports = self.choose_tip(gross_lamports, fees_lamports)?;
+
+        // The cycle must return enough to repay principal+fee and pay every
+        // SOL-denominated cost, even at the enforced minimum output.
+        let required_out = if is_wsol {
+            principal_plus_fee
+                .checked_add(self.config.min_profit_lamports)
+                .and_then(|value| value.checked_add(fees_lamports))
+                .and_then(|value| value.checked_add(tip_lamports))
+                .ok_or_else(|| ExecutionError::Config("flash required out overflow".into()))?
+        } else {
+            let sol_costs = self
+                .config
+                .min_profit_lamports
+                .checked_add(fees_lamports)
+                .and_then(|value| value.checked_add(tip_lamports))
+                .ok_or_else(|| ExecutionError::Config("flash cost overflow".into()))?;
+            let token_costs = self.token_equivalent(&reserve.mint, sol_costs).await?;
+            principal_plus_fee
+                .checked_add(token_costs)
+                .ok_or_else(|| ExecutionError::Config("flash required token overflow".into()))?
+        };
+
+        let final_index = quotes.len() - 1;
+        quotes[final_index] = self
+            .quote_with_min_out(&quotes[final_index], required_out)
+            .await?;
+        let final_min = quotes[final_index].minimum_out()?;
+        if final_min < required_out {
+            return Err(ExecutionError::Unprofitable(format!(
+                "flash final min-out {final_min} is below required {required_out}"
+            )));
+        }
+
+        let start_balance = self.rpc.get_balance(self.wallet.address()).await?;
+        let required_balance = self
+            .config
+            .balance_floor_lamports
+            .checked_add(fees_lamports)
+            .and_then(|value| value.checked_add(tip_lamports))
+            .ok_or_else(|| ExecutionError::Config("flash balance requirement overflow".into()))?;
+        if start_balance < required_balance {
+            return Err(ExecutionError::InsufficientBalance(format!(
+                "flash cycle needs {required_balance} lamports for fees/tip/floor; wallet has {start_balance}"
+            )));
+        }
+
+        let wallet = self.wallet.pubkey();
+        let token_program = beast_flash::pubkey(&reserve.token_program);
+        let mint = beast_flash::pubkey(&reserve.mint);
+        let destination =
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                &wallet,
+                &mint,
+                &token_program,
+            );
+        let destination_address = beast_flash::address(&destination);
+        let ata_exists = self
+            .rpc
+            .get_account_info(destination_address)
+            .await?
+            .is_some();
+
+        let mut preamble = Vec::new();
+        preamble.push(
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+        );
+        if !ata_exists {
+            preamble.push(
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &wallet,
+                    &wallet,
+                    &mint,
+                    &token_program,
+                ),
+            );
+        }
+        let borrow_index = u8::try_from(preamble.len()).map_err(|_| {
+            ExecutionError::Config("flash preamble exceeds 255 instructions".into())
+        })?;
+        let borrow = provider.borrow(&reserve, wallet, destination, amount, borrow_index)?;
+        preamble.push(borrow.instruction);
+        let repay = provider.repay(&reserve, wallet, destination, amount, borrow.index)?;
+        let mut postamble = vec![repay.instruction];
+        if is_wsol {
+            // Closing sends the remaining wrapped SOL (profit + rent) to the
+            // wallet as lamports, which is what makes the lamport guard usable.
+            postamble.push(
+                spl_token::instruction::close_account(
+                    &token_program,
+                    &destination,
+                    &wallet,
+                    &wallet,
+                    &[],
+                )
+                .map_err(|error| {
+                    ExecutionError::Transaction(format!("close WSOL account: {error}"))
+                })?,
+            );
+        }
+
+        // Jupiter must not wrap/unwrap around the flash amount: the borrowed
+        // WSOL is already in the ATA and the repay reads that same account.
+        let mut cycle_legs = Vec::with_capacity(quotes.len());
+        for (index, quote) in quotes.into_iter().enumerate() {
+            let mut request = SwapRequest::new(self.wallet.pubkey_string(), quote);
+            request.as_legacy_transaction = true;
+            request.wrap_and_unwrap_sol = false;
+            let instructions = self.jupiter.swap_instructions(&request).await?;
+            tracing::debug!(
+                leg = index,
+                bytes = instructions.payload_bytes(),
+                tables = instructions.address_lookup_table_addresses.len(),
+                "flash leg instruction set"
+            );
+            cycle_legs.push(compose::CycleLeg {
+                instructions,
+                is_final: index + 1 == legs.len(),
+            });
+        }
+
+        let composed = compose::compose_cycle_with(
+            &cycle_legs,
+            compose::ComposeOptions {
+                include_final_cleanup: false,
+                include_compute_budget: false,
+            },
+            &preamble,
+            &postamble,
+        )?;
+        let table_keys: Vec<Address> = composed
+            .lookup_tables
+            .iter()
+            .filter_map(|key| key.parse::<Address>().ok())
+            .collect();
+        let tables = resolve_lookup_tables(&self.rpc, &table_keys).await?;
+
+        let (blockhash_string, _) = self.rpc.get_latest_blockhash().await?;
+        let blockhash = parse_hash(&blockhash_string)?;
+        let transaction = build_composed_transaction(
+            &composed,
+            self.wallet.pubkey(),
+            blockhash,
+            &self.wallet.keypair,
+            &tables,
+        )?;
+        let cycle_encoded = base64::engine::general_purpose::STANDARD.encode(
+            bincode::serialize(&transaction)
+                .map_err(|error| ExecutionError::Transaction(format!("serialize v0: {error}")))?,
+        );
+
+        let mut encoded_transactions = vec![cycle_encoded];
+        let mut signatures = vec![transaction.signatures[0].to_string()];
+        let guard_required = if guard_applicable {
+            let guard = build_guard_transaction(
+                &self.config.guard_program,
+                self.wallet.pubkey(),
+                start_balance,
+                self.config.min_profit_lamports,
+                tip_lamports,
+                self.config.transaction_fee_lamports,
+                blockhash,
+                &self.wallet.keypair,
+            )?;
+            encoded_transactions.push(guard.encoded);
+            signatures.push(guard.signature);
+            self.config.guard_threshold(
+                start_balance,
+                tip_lamports,
+                self.config.transaction_fee_lamports,
+            )?
+        } else {
+            0
+        };
+        let tip_account = self.choose_tip_account().await?;
+        let tip = build_tip_transaction(
+            self.wallet.pubkey(),
+            tip_account,
+            tip_lamports,
+            blockhash,
+            &self.wallet.keypair,
+        )?;
+        encoded_transactions.push(tip.encoded);
+        signatures.push(tip.signature);
+
+        tracing::info!(
+            provider = provider.id(),
+            reserve = %reserve.reserve,
+            borrowed = amount,
+            fee,
+            repayment = principal_plus_fee,
+            required_out,
+            final_min,
+            tip = tip_lamports,
+            lamport_guard = guard_applicable,
+            "prepared flash cycle"
+        );
+
+        Ok(BundlePlan {
+            opportunity_id: opportunity.id.to_string(),
+            mode: opportunity.mode,
+            route_mints: mints,
+            amount_in: amount,
+            quoted_out_min: final_min,
+            expected_start_lamports: start_balance,
+            min_profit_lamports: self.config.min_profit_lamports,
+            tip_lamports,
+            tip_account,
+            fees_lamports,
+            guard_required_lamports: guard_required,
+            blockhash: blockhash_string,
+            encoded_transactions,
+            signatures,
+            composed: true,
+            flash: Some(FlashPlanInfo {
+                provider: provider.id().to_string(),
+                reserve: reserve.reserve,
+                mint: reserve.mint,
+                borrowed: amount,
+                fee,
+                repayment: principal_plus_fee,
+                available: reserve.available,
+                lamport_guard: guard_applicable,
+            }),
+        })
+    }
+
+    /// Re-quote one leg with the tightest slippage that still enforces
+    /// `required_min_out`, retrying because Jupiter's rounding is not
+    /// guaranteed to be exactly `out * (1 - bps/10_000)`.
+    async fn quote_with_min_out(
+        &self,
+        quote: &JupiterQuote,
+        required_min_out: u64,
+    ) -> Result<JupiterQuote> {
+        let expected = quote.amount_out()?;
+        if expected < required_min_out {
+            return Err(ExecutionError::Unprofitable(format!(
+                "expected out {expected} is below required {required_min_out}"
+            )));
+        }
+        let mut slippage = (((expected - required_min_out) as u128 * 10_000) / expected as u128)
+            .min(u16::MAX as u128) as u16;
+        for _ in 0..8 {
+            let input = quote.amount_in()?;
+            let input_mint = quote
+                .input_mint
+                .parse::<Address>()
+                .map_err(|error| ExecutionError::Config(format!("quote input mint: {error}")))?;
+            let output_mint = quote
+                .output_mint
+                .parse::<Address>()
+                .map_err(|error| ExecutionError::Config(format!("quote output mint: {error}")))?;
+            let mut request = QuoteRequest::new(input_mint, output_mint, input);
+            request.slippage_bps = slippage;
+            request.only_direct_routes = true;
+            let candidate = self.jupiter.quote(&request).await?;
+            if candidate.minimum_out()? >= required_min_out {
+                return Ok(candidate);
+            }
+            if slippage == 0 {
+                break;
+            }
+            slippage -= 1;
+        }
+        Err(ExecutionError::Unprofitable(format!(
+            "cannot quote a final leg whose enforced minimum out covers {required_min_out}"
+        )))
+    }
+
+    /// Convert a SOL amount into raw units of `mint` for cost accounting.
+    ///
+    /// Quoted at a probe size of at least 0.01 SOL so thin routes still return a
+    /// price, then scaled down. A 20% buffer absorbs quote movement between the
+    /// cost conversion and the final-leg quote.
+    async fn token_equivalent(&self, mint: &Address, lamports: u64) -> Result<u64> {
+        if *mint == parse_mint(WSOL_MINT, "WSOL")? {
+            return Ok(lamports);
+        }
+        let probe = lamports.max(10_000_000);
+        let mut request = QuoteRequest::new(parse_mint(WSOL_MINT, "WSOL")?, *mint, probe);
+        request.slippage_bps = 100;
+        request.only_direct_routes = false;
+        let quote = self.jupiter.quote(&request).await?;
+        let probe_out = quote.amount_out()? as u128;
+        let scaled = probe_out
+            .checked_mul(lamports as u128)
+            .ok_or_else(|| ExecutionError::Config("flash cost conversion overflow".into()))?
+            / probe as u128;
+        let buffered = scaled
+            .checked_mul(120)
+            .ok_or_else(|| ExecutionError::Config("flash cost buffer overflow".into()))?
+            / 100;
+        u64::try_from(buffered)
+            .map_err(|_| ExecutionError::Config("flash cost conversion exceeds u64".into()))
+    }
+
+    /// Convert raw units of `mint` into a conservative lamport value.
+    ///
+    /// Used only for tip sizing, so it deliberately under-values the profit
+    /// (80% of the quoted output) rather than overpaying a tip the cycle may
+    /// not actually have earned.
+    async fn lamports_equivalent(&self, mint: &Address, amount: u64) -> Result<u64> {
+        if *mint == parse_mint(WSOL_MINT, "WSOL")? {
+            return Ok(amount);
+        }
+        if amount == 0 {
+            return Ok(0);
+        }
+        let mut request = QuoteRequest::new(*mint, parse_mint(WSOL_MINT, "WSOL")?, amount);
+        request.slippage_bps = 100;
+        request.only_direct_routes = false;
+        let quote = self.jupiter.quote(&request).await?;
+        Ok(quote.amount_out()?.saturating_mul(80) / 100)
     }
 
     fn choose_tip(&self, gross_min: u64, fees_lamports: u64) -> Result<u64> {

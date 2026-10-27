@@ -389,7 +389,10 @@ async fn probe_capabilities(config: &BeastConfig) -> Vec<CapabilityProbe> {
         beast_rpc::RpcClient::with_endpoints(
             vec![
                 EndpointOptions::new(endpoint.name.clone(), endpoint.url.clone())
-                    .with_rps(endpoint.max_rps, endpoint.heavy_rps),
+                    .with_role_name(endpoint.role.as_str())
+                    .with_rps(endpoint.max_rps, endpoint.heavy_rps)
+                    .with_budget(endpoint.monthly_call_budget)
+                    .with_priority(endpoint.priority),
             ],
             config.rpc.commitment.clone(),
             config.rpc.timeout_ms,
@@ -400,19 +403,25 @@ async fn probe_capabilities(config: &BeastConfig) -> Vec<CapabilityProbe> {
 
     let mut probes = Vec::new();
 
-    // getProgramAccounts against the SOL/SPL token program (small account count
-    // per owner filter, so it stays cheap even on nodes with a full index).
+    // Probe the exact call the flash runtime makes: KLend reserves filtered by
+    // their 8624-byte account size. Filtering by an unfiltered token program
+    // requests millions of accounts and modern providers reject it outright,
+    // which would report a false capability failure.
     let discovery = by_role(EndpointRole::Discovery).or_else(|| by_role(EndpointRole::Fallback));
     if let Some(endpoint) = discovery {
-        let program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        let program = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
             .parse::<beast_dex::Address>()
-            .expect("token program id");
+            .expect("KLend program id");
         let result = client_for(endpoint);
         probes.push(match result {
             Ok(client) => {
                 let started = std::time::Instant::now();
                 match client
-                    .get_program_accounts(program, Vec::new(), Some((0, 0)))
+                    .get_program_accounts(
+                        program,
+                        vec![serde_json::json!({"dataSize": 8624})],
+                        Some((0, 0)),
+                    )
                     .await
                 {
                     Ok(accounts) => CapabilityProbe {
@@ -450,8 +459,10 @@ async fn probe_capabilities(config: &BeastConfig) -> Vec<CapabilityProbe> {
     // returns a small, deterministic payload.
     let rent = by_role(EndpointRole::Rent).or_else(|| by_role(EndpointRole::Fallback));
     if let Some(endpoint) = rent {
-        // A well-known active wallet; only used to test method availability.
-        let owner = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+        // A wallet with no token accounts at the time of writing, so the
+        // probe stays small and deterministic; it is only used to test method
+        // availability, never to sign.
+        let owner = "EtW8SkG2fFiLWzLpuFawvaESLTtn4qkQKvGa8cyBfV6x"
             .parse::<beast_dex::Address>()
             .expect("probe owner");
         let token_program = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
@@ -604,7 +615,10 @@ pub async fn doctor(path: Option<&Path>, json_output: bool, no_network: bool) ->
             let client = beast_rpc::RpcClient::with_endpoints(
                 vec![
                     EndpointOptions::new(endpoint.name.clone(), endpoint.url.clone())
-                        .with_rps(endpoint.max_rps, endpoint.heavy_rps),
+                        .with_role_name(endpoint.role.as_str())
+                        .with_rps(endpoint.max_rps, endpoint.heavy_rps)
+                        .with_budget(endpoint.monthly_call_budget)
+                        .with_priority(endpoint.priority),
                 ],
                 config.rpc.commitment.clone(),
                 config.rpc.timeout_ms,
@@ -803,17 +817,11 @@ struct ProviderPreset {
     caveat: &'static str,
 }
 
+// dRPC is deliberately absent: `https://solana.drpc.org` answers a free key
+// with JSON-RPC error 35, "chain is not available on free plan, please upgrade
+// to paid plan". A paid dRPC account can be added by hand; shipping it as a
+// free preset would send operators into a wall the preset promised was open.
 const PROVIDER_PRESETS: &[ProviderPreset] = &[
-    ProviderPreset {
-        id: "drpc",
-        url: "https://solana.drpc.org",
-        public_url: None,
-        max_rps: 80,
-        heavy_rps: 5,
-        monthly_budget: 8_000_000,
-        caveat:
-            "210M CU/30d at 20 CU/call: ~10.5M calls/month. Biggest free tier; no gRPC at any plan.",
-    },
     ProviderPreset {
         id: "helius",
         url: "https://mainnet.helius-rpc.com/?api-key=${KEY}",
@@ -899,7 +907,7 @@ pub fn rpc_add(
     let needs_key = preset.public_url.is_none();
     if needs_key && key_env.is_none() {
         bail!(
-            "provider {} needs --key-env (e.g. --key-env DRPC_KEY)",
+            "provider {} needs --key-env (e.g. --key-env HELIUS_API_KEY)",
             preset.id
         );
     }

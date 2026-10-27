@@ -81,6 +81,30 @@ export interface GuardStatus {
   unguarded_live_allowed: boolean
 }
 
+export interface FlashReserveStatus {
+  reserve: string
+  mint: string
+  decimals: number
+  available: number
+  flash_fee_bits: number
+  fee_ppm: number
+}
+
+export interface FlashStatus {
+  provider: string
+  program_id: string
+  reserve: string | null
+  mint: string | null
+  decimals: number | null
+  available: number | null
+  flash_fee_bits: number | null
+  fee_ppm: number | null
+  max_borrow_lamports: number
+  lamport_guard: boolean
+  reserve_count: number
+  reserves: FlashReserveStatus[]
+}
+
 export interface Status {
   service: string
   version: string
@@ -96,6 +120,7 @@ export interface Status {
   metrics: MetricsSnapshot
   jupiter_configured: boolean
   rent_configured: boolean
+  flash: FlashStatus | null
   guard: GuardStatus
   jito_enabled: boolean
   api: { enabled: boolean; bind: string }
@@ -145,6 +170,7 @@ export interface CostBreakdown {
   base_fee_lamports: number
   rent_lamports: number
   guard_lamports: number
+  flash_fee_lamports?: number
 }
 
 export interface Attempt {

@@ -484,6 +484,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base58"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6107fe1be6682a68940da878d9e9f5e90ca5745b3dec9fd1bb393c8777d4f581"
+
+[[package]]
 name = "base64"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -541,6 +547,7 @@ dependencies = [
  "beast-dex",
  "beast-exec",
  "beast-feed",
+ "beast-flash",
  "beast-rpc",
  "beast-store",
  "chrono",
@@ -561,6 +568,7 @@ name = "beast-core"
 version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
+ "bs58",
  "chrono",
  "rand 0.8.5",
  "serde",
@@ -598,6 +606,7 @@ dependencies = [
  "base64 0.22.1",
  "beast-core",
  "beast-dex",
+ "beast-flash",
  "beast-rpc",
  "beast-store",
  "bincode",
@@ -605,6 +614,8 @@ dependencies = [
  "serde",
  "serde_json",
  "solana-sdk",
+ "spl-associated-token-account 7.0.0",
+ "spl-token 8.0.0",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
@@ -626,6 +637,26 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "beast-flash"
+version = "0.2.0"
+dependencies = [
+ "base58",
+ "base64 0.22.1",
+ "beast-dex",
+ "beast-rpc",
+ "bincode",
+ "serde",
+ "serde_json",
+ "solana-sdk",
+ "spl-associated-token-account 7.0.0",
+ "spl-token 8.0.0",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
  "tracing",
 ]
 
@@ -4076,7 +4107,7 @@ dependencies = [
  "solana-client",
  "solana-program",
  "solana-sdk",
- "spl-associated-token-account",
+ "spl-associated-token-account 4.0.0",
  "spl-token 6.0.0",
  "thiserror 2.0.17",
  "tokio",
@@ -6205,6 +6236,32 @@ dependencies = [
  "spl-token 6.0.0",
  "spl-token-2022 4.0.1",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "spl-associated-token-account"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae179d4a26b3c7a20c839898e6aed84cb4477adf108a366c95532f058aea041b"
+dependencies = [
+ "borsh 1.5.7",
+ "num-derive 0.4.2",
+ "num-traits",
+ "solana-program",
+ "spl-associated-token-account-client",
+ "spl-token 8.0.0",
+ "spl-token-2022 8.0.1",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "spl-associated-token-account-client"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f8349dbcbe575f354f9a533a21f272f3eb3808a49e2fdc1c34393b88ba76cb"
+dependencies = [
+ "solana-instruction",
+ "solana-pubkey",
 ]
 
 [[package]]

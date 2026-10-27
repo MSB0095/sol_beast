@@ -29,8 +29,12 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub mod kamilend;
+pub mod marginfi;
 pub mod solend;
 pub use kamilend::{derive_market_authority, KaminoFlashProvider, KAMINO_KLEND_PROGRAM_ID};
+pub use marginfi::{
+    MarginfiFlashProvider, MARGINFI_MAIN_GROUP, MARGINFI_PROGRAM_ID, MARGINFI_WSOL_BANK,
+};
 pub use solend::{SolendFlashProvider, SOLEND_PROGRAM_ID};
 
 /// Jito bundles cap at five transactions; a flash cycle needs the composed
@@ -82,6 +86,10 @@ pub enum FlashFeeModel {
     /// A 1e18 WAD fraction, rounded to nearest with a protocol minimum.
     /// Solend/Save. A zero fee is a genuinely free flash loan, not disabled.
     Wad18Round,
+    /// No flash fee at all. Marginfi v2 inside a `start_flashloan` flag:
+    /// normal borrow interest does not accrue within one atomic transaction,
+    /// and the bank's origination fee is rejected unless it is exactly zero.
+    NoFee,
 }
 
 /// A pool of borrowable liquidity, resolved on-chain.
@@ -97,6 +105,11 @@ pub struct FlashReserve {
     pub lending_market_authority: Address,
     /// SPL Token or Token-2022, read from the reserve account.
     pub token_program: Address,
+    /// Extra read-only accounts the borrow instruction requires after its
+    /// fixed account list. Marginfi needs the bank and its oracle/integration
+    /// keys here; Kamino and Solend leave it empty.
+    #[serde(default)]
+    pub remaining_accounts: Vec<Address>,
     /// Raw fee field. Its scale is defined by [`Self::fee_model`].
     pub flash_fee_bits: u64,
     /// How to interpret and round [`Self::flash_fee_bits`].
@@ -123,6 +136,9 @@ impl FlashReserve {
     /// reserve charges 500 ppm: 100,000,000 lamports cost 50,000, split 40,000
     /// to the reserve and 10,000 to the host.
     pub fn flash_fee(&self, amount: u64) -> Result<u64> {
+        if self.fee_model == FlashFeeModel::NoFee {
+            return Ok(0);
+        }
         if self.flash_fee_bits == u64::MAX {
             return Err(FlashError::FeeDisabled {
                 fee_bits: self.flash_fee_bits,
@@ -160,6 +176,7 @@ impl FlashReserve {
                     / scale;
                 u64::try_from(rounded).map_err(|_| FlashError::Overflow)
             }
+            FlashFeeModel::NoFee => Ok(0),
         }
     }
 
@@ -180,6 +197,7 @@ impl FlashReserve {
         let scale = match self.fee_model {
             FlashFeeModel::FixedPoint60Ceiling => (1u64 << 60) as f64,
             FlashFeeModel::Wad18Round => 1_000_000_000_000_000_000.0,
+            FlashFeeModel::NoFee => return Some(0.0),
         };
         Some(self.flash_fee_bits as f64 / scale * 1e6)
     }
@@ -206,6 +224,22 @@ pub struct FlashInstruction {
     /// the borrow's index, and it must be computed after the whole preamble is
     /// known (a hardcoded 3 was wrong as soon as an ATA creation was added).
     pub index: u8,
+}
+
+/// Per-cycle account state for providers whose flash loan is not a bare
+/// borrow/repay pair.
+///
+/// Marginfi wraps the borrow in a `start_flashloan` flag on a temporary PDA
+/// account. That account is created and closed inside the same transaction,
+/// and every instruction that touches it must derive the exact same address.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlashLifecycle {
+    /// Temporary account created for this cycle, when the provider uses one.
+    pub account: Option<Address>,
+    /// Protocol-specific seed used to derive `account` (Marginfi account index).
+    pub account_index: u16,
+    /// Protocol-specific namespace/third-party id (Marginfi third-party id).
+    pub third_party_id: u16,
 }
 
 /// What a provider needs in order to borrow and repay atomically.
@@ -247,6 +281,90 @@ pub trait FlashProvider: Send + Sync {
     /// Protocol fee for `amount`.
     fn flash_fee(&self, reserve: &FlashReserve, amount: u64) -> Result<u64> {
         reserve.flash_fee(amount)
+    }
+
+    /// Derive the temporary account this provider would create for `wallet` at
+    /// `index`, if it needs one. The executor probes indexes in order and picks
+    /// the first derived account that does not already exist, so a leftover
+    /// account from another tool cannot permanently block a cycle.
+    fn lifecycle_account(
+        &self,
+        _reserve: &FlashReserve,
+        _wallet: Pubkey,
+        _index: u16,
+    ) -> Option<Address> {
+        None
+    }
+
+    /// Lamports temporarily locked by creating the lifecycle account. The
+    /// account is closed in the same atomic transaction, so this is a balance
+    /// float requirement, not a cost. Zero for bare borrow/repay providers.
+    fn temporary_rent_lamports(&self) -> u64 {
+        0
+    }
+
+    /// Instructions that must run before the borrow, such as account
+    /// initialization or a flashloan flag. Empty by default.
+    fn pre_borrow(
+        &self,
+        _reserve: &FlashReserve,
+        _wallet: Pubkey,
+        _destination: Pubkey,
+        _amount: u64,
+        _lifecycle: &FlashLifecycle,
+    ) -> Result<Vec<Instruction>> {
+        Ok(Vec::new())
+    }
+
+    /// Instructions that must run after the repayment, such as clearing the
+    /// flashloan flag and closing the temporary account. Empty by default.
+    fn post_repay(
+        &self,
+        _reserve: &FlashReserve,
+        _wallet: Pubkey,
+        _destination: Pubkey,
+        _amount: u64,
+        _lifecycle: &FlashLifecycle,
+    ) -> Result<Vec<Instruction>> {
+        Ok(Vec::new())
+    }
+
+    /// Patch provider instructions after composition. Marginfi's
+    /// `start_flashloan` stores the absolute index of `end_flashloan`, which is
+    /// only known once every swap and postamble instruction is in place.
+    fn finalize(
+        &self,
+        _instructions: &mut [Instruction],
+        _lifecycle: &FlashLifecycle,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Lifecycle-aware borrow. Providers that need the temporary account
+    /// override this; the default keeps the bare borrow behavior.
+    fn borrow_with_lifecycle(
+        &self,
+        reserve: &FlashReserve,
+        wallet: Pubkey,
+        destination: Pubkey,
+        amount: u64,
+        index: u8,
+        _lifecycle: &FlashLifecycle,
+    ) -> Result<FlashInstruction> {
+        self.borrow(reserve, wallet, destination, amount, index)
+    }
+
+    /// Lifecycle-aware repay. Defaults to the bare repay.
+    fn repay_with_lifecycle(
+        &self,
+        reserve: &FlashReserve,
+        wallet: Pubkey,
+        source: Pubkey,
+        amount: u64,
+        borrow_index: u8,
+        _lifecycle: &FlashLifecycle,
+    ) -> Result<FlashInstruction> {
+        self.repay(reserve, wallet, source, amount, borrow_index)
     }
 }
 
@@ -366,6 +484,22 @@ mod tests {
     }
 
     #[test]
+    fn no_fee_model_charges_nothing_and_is_still_enabled() {
+        let reserve = FlashReserve {
+            fee_model: FlashFeeModel::NoFee,
+            available: 1_000_000_000,
+            ..test_reserve()
+        };
+        assert_eq!(reserve.flash_fee(1_000_000_000).unwrap(), 0);
+        assert_eq!(
+            reserve.repayment_amount(1_000_000_000).unwrap(),
+            1_000_000_000
+        );
+        assert_eq!(reserve.fee_ppm(), Some(0.0));
+        assert!(reserve.flash_enabled());
+    }
+
+    #[test]
     fn fee_disabled_is_rejected() {
         let reserve = FlashReserve {
             flash_fee_bits: u64::MAX,
@@ -387,6 +521,7 @@ mod tests {
             lending_market: Address::ZERO,
             lending_market_authority: Address::ZERO,
             token_program: Address::ZERO,
+            remaining_accounts: Vec::new(),
             flash_fee_bits: 0,
             fee_model: FlashFeeModel::FixedPoint60Ceiling,
             host_fee_percentage: 0,

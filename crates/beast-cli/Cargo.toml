@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+bincode.workspace = true
 beast-api = { path = "../beast-api" }
 beast-core = { path = "../beast-core" }
 beast-dex = { path = "../beast-dex" }

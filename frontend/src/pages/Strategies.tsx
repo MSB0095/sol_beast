@@ -154,8 +154,10 @@ export function StrategiesPage({
               <span>REPAYMENT</span>
               <strong>atomic</strong>
               <p>
-                Principal and the 2<sup>60</sup>-fixed-point fee are debited in the same instruction. A cycle that
-                cannot repay reverts; the separate lamport guard is {data.status.flash.lamport_guard ? 'used for WSOL cycles and omitted for non-WSOL cycles' : 'omitted because no WSOL reserve is loaded'}.
+                {data.status.flash.provider === 'marginfi'
+                  ? 'Principal and any origination fee are debited inside the flashloan flag, which skips the health check. A cycle that cannot repay reverts.'
+                  : 'Principal and the reserve fee are debited in the same instruction. A cycle that cannot repay reverts.'}{' '}
+                The separate lamport guard is {data.status.flash.lamport_guard ? 'used for WSOL cycles and omitted for non-WSOL cycles' : 'omitted because no WSOL reserve is loaded'}.
               </p>
             </div>
           </div>

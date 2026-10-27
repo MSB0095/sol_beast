@@ -132,6 +132,11 @@ pub struct ComposeOptions {
     pub include_final_cleanup: bool,
     /// Keep Jupiter's compute-budget instructions.
     pub include_compute_budget: bool,
+    /// Skip the pre-flight static-key estimate. Use only when the caller adds
+    /// an address lookup table after composition: the estimate charges every
+    /// key at 32 bytes, while the exact assembled size is still enforced by
+    /// `build_composed_transaction` before signing.
+    pub skip_size_estimate: bool,
 }
 
 impl Default for ComposeOptions {
@@ -139,6 +144,7 @@ impl Default for ComposeOptions {
         Self {
             include_final_cleanup: true,
             include_compute_budget: true,
+            skip_size_estimate: false,
         }
     }
 }
@@ -244,7 +250,30 @@ pub fn compose_cycle_with(
     }
 
     let estimated_bytes = estimate_bytes(&instructions);
-    if estimated_bytes > MAX_TRANSACTION_BYTES {
+    tracing::debug!(
+        instructions = instructions.len(),
+        unique_keys = {
+            let mut keys = std::collections::HashSet::new();
+            for instruction in &instructions {
+                keys.insert(instruction.program_id);
+                for meta in &instruction.accounts {
+                    keys.insert(meta.pubkey);
+                }
+            }
+            keys.len()
+        },
+        account_metas = instructions
+            .iter()
+            .map(|instruction| instruction.accounts.len())
+            .sum::<usize>(),
+        data_bytes = instructions
+            .iter()
+            .map(|instruction| instruction.data.len())
+            .sum::<usize>(),
+        estimated_bytes,
+        "composing cycle"
+    );
+    if !options.skip_size_estimate && estimated_bytes > MAX_TRANSACTION_BYTES {
         return Err(ComposeError::TooLarge {
             needed: estimated_bytes,
         });
@@ -345,14 +374,19 @@ pub fn assemble_v0(
 ) -> Result<VersionedTransaction> {
     use std::collections::{BTreeMap, HashMap, HashSet};
 
+    // Two legs may cite the same table; one lookup must cover it. Preserve
+    // first-seen order because that is the order the runtime loads addresses.
+    let mut unique_tables: Vec<&AddressLookupTable> = Vec::new();
+    let mut seen_tables: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
+    for table in tables {
+        if seen_tables.insert(native_key(&table.key)) {
+            unique_tables.push(table);
+        }
+    }
+
     // Row lookup for every table-resident account.
     let mut row_of: HashMap<solana_sdk::pubkey::Pubkey, (usize, usize)> = HashMap::new();
-    let mut seen_tables: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
-    for (table_index, table) in tables.iter().enumerate() {
-        if !seen_tables.insert(native_key(&table.key)) {
-            // Two legs may cite the same table; a single lookup may cover it.
-            continue;
-        }
+    for (table_index, table) in unique_tables.iter().enumerate() {
         for (row, address) in table.addresses.iter().enumerate() {
             row_of
                 .entry(native_key(address))
@@ -365,6 +399,7 @@ pub fn assemble_v0(
     // the message is rejected as inconsistent.
     let mut referenced: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
     let mut writable: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
+    let mut program_ids: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
     referenced.insert(wallet);
     writable.insert(wallet);
     for instruction in &composed.instructions {
@@ -373,16 +408,20 @@ pub fn assemble_v0(
             writable.insert(meta.pubkey);
         }
         referenced.insert(instruction.program_id);
+        program_ids.insert(instruction.program_id);
     }
 
     // Static keys: the sole signer first, then writable, then read-only.
+    // Program ids must stay static: the runtime rejects a program id loaded
+    // from a lookup table.
     let mut static_keys: Vec<solana_sdk::pubkey::Pubkey> = vec![wallet];
     let mut static_seen: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
     static_seen.insert(wallet);
     let mut ordered = referenced.iter().copied().collect::<Vec<_>>();
     ordered.sort_by_key(|address| (!writable.contains(address), *address));
     for address in &ordered {
-        if row_of.contains_key(address) || static_seen.contains(address) {
+        let table_resident = row_of.contains_key(address) && !program_ids.contains(address);
+        if table_resident || static_seen.contains(address) {
             continue;
         }
         static_seen.insert(*address);
@@ -393,15 +432,18 @@ pub fn assemble_v0(
     }
 
     // Group each table's referenced rows into writable and readonly sets.
+    // Sort each set by row so position in the list is deterministic; the
+    // runtime loads addresses in *list order*, not row order.
     let mut writable_rows: BTreeMap<solana_sdk::pubkey::Pubkey, Vec<u8>> = BTreeMap::new();
     let mut readonly_rows: BTreeMap<solana_sdk::pubkey::Pubkey, Vec<u8>> = BTreeMap::new();
-    let mut table_referenced: HashSet<solana_sdk::pubkey::Pubkey> = HashSet::new();
     for address in &referenced {
+        if program_ids.contains(address) {
+            continue;
+        }
         let Some((table_index, row)) = row_of.get(address) else {
             continue;
         };
-        table_referenced.insert(*address);
-        let table = &tables[*table_index];
+        let table = unique_tables[*table_index];
         let Ok(row) = u8::try_from(*row) else {
             return Err(ComposeError::TooManyStaticKeys);
         };
@@ -417,21 +459,33 @@ pub fn assemble_v0(
                 .push(row);
         }
     }
+    for rows in writable_rows.values_mut().chain(readonly_rows.values_mut()) {
+        rows.sort_unstable();
+        rows.dedup();
+    }
 
-    // Instruction index offsets: static keys, then writable rows, then readonly
-    // rows, walking tables in the order they will be written into the message.
+    // Instruction index offsets. The v0 spec concatenates the static keys,
+    // then every table's writable addresses in lookup order, then every
+    // table's readonly addresses in lookup order. It is *not* writable-then-
+    // readonly per table, which is only equivalent with a single table.
     let mut writable_offset: HashMap<solana_sdk::pubkey::Pubkey, usize> = HashMap::new();
     let mut readonly_offset: HashMap<solana_sdk::pubkey::Pubkey, usize> = HashMap::new();
     let mut cursor = static_keys.len();
-    for table in tables {
-        if !seen_tables.contains(&native_key(&table.key)) {
-            continue;
-        }
+    for table in &unique_tables {
         let native = native_key(&table.key);
-        let writable_len = writable_rows.get(&native).map(Vec::len).unwrap_or(0);
-        writable_offset.insert(native, cursor);
-        readonly_offset.insert(native, cursor + writable_len);
-        cursor += writable_len + readonly_rows.get(&native).map(Vec::len).unwrap_or(0);
+        let len = writable_rows.get(&native).map(Vec::len).unwrap_or(0);
+        if len > 0 {
+            writable_offset.insert(native, cursor);
+            cursor += len;
+        }
+    }
+    for table in &unique_tables {
+        let native = native_key(&table.key);
+        let len = readonly_rows.get(&native).map(Vec::len).unwrap_or(0);
+        if len > 0 {
+            readonly_offset.insert(native, cursor);
+            cursor += len;
+        }
     }
 
     let static_position: HashMap<solana_sdk::pubkey::Pubkey, usize> = static_keys
@@ -447,14 +501,20 @@ pub fn assemble_v0(
             .get(&address)
             .copied()
             .ok_or(ComposeError::AccountNotInTable)?;
-        let table = &tables[table_index];
+        let table = unique_tables[table_index];
         let native = native_key(&table.key);
-        u8::try_from(if writable.contains(&address) {
-            writable_offset.get(&native).copied().unwrap_or(0) + row
+        let row = u8::try_from(row).map_err(|_| ComposeError::TooManyStaticKeys)?;
+        let (offset, rows) = if writable.contains(&address) {
+            (writable_offset.get(&native), writable_rows.get(&native))
         } else {
-            readonly_offset.get(&native).copied().unwrap_or(0) + row
-        })
-        .map_err(|_| ComposeError::TooManyStaticKeys)
+            (readonly_offset.get(&native), readonly_rows.get(&native))
+        };
+        let offset = offset.ok_or(ComposeError::AccountNotInTable)?;
+        let rows = rows.ok_or(ComposeError::AccountNotInTable)?;
+        let position = rows
+            .binary_search(&row)
+            .map_err(|_| ComposeError::AccountNotInTable)?;
+        u8::try_from(offset + position).map_err(|_| ComposeError::TooManyStaticKeys)
     };
 
     let instructions = composed
@@ -473,18 +533,22 @@ pub fn assemble_v0(
         })
         .collect::<Result<Vec<CompiledInstruction>>>()?;
 
-    let address_table_lookups = tables
+    let address_table_lookups = unique_tables
         .iter()
-        .map(|table| MessageAddressTableLookup {
-            account_key: native_key(&table.key),
-            writable_indexes: writable_rows
-                .get(&native_key(&table.key))
-                .cloned()
-                .unwrap_or_default(),
-            readonly_indexes: readonly_rows
-                .get(&native_key(&table.key))
-                .cloned()
-                .unwrap_or_default(),
+        .filter_map(|table| {
+            let native = native_key(&table.key);
+            let writable_indexes = writable_rows.get(&native).cloned().unwrap_or_default();
+            let readonly_indexes = readonly_rows.get(&native).cloned().unwrap_or_default();
+            // The v0 sanitizer rejects an empty lookup, so omit tables this
+            // cycle does not actually reference.
+            if writable_indexes.is_empty() && readonly_indexes.is_empty() {
+                return None;
+            }
+            Some(MessageAddressTableLookup {
+                account_key: native,
+                writable_indexes,
+                readonly_indexes,
+            })
         })
         .collect::<Vec<_>>();
 
@@ -640,6 +704,7 @@ mod tests {
             ComposeOptions {
                 include_final_cleanup: false,
                 include_compute_budget: false,
+                skip_size_estimate: false,
             },
             std::slice::from_ref(&borrow),
             std::slice::from_ref(&repay),
@@ -656,6 +721,7 @@ mod tests {
             ComposeOptions {
                 include_final_cleanup: false,
                 include_compute_budget: false,
+                skip_size_estimate: false,
             },
             &[],
             &[],
@@ -774,8 +840,15 @@ mod tests {
         let solana_sdk::message::VersionedMessage::V0(message) = &transaction.message else {
             panic!("expected a v0 message");
         };
-        // The wallet is the only static key: everything else is in the table.
-        assert_eq!(message.account_keys.len(), 1);
+        // Program ids are always static (the runtime forbids loading them from
+        // a table); non-program accounts live in the table.
+        assert_eq!(message.account_keys[0], wallet);
+        for instruction in &composed.instructions {
+            assert!(
+                message.account_keys.contains(&instruction.program_id),
+                "program ids must stay static"
+            );
+        }
         assert_eq!(message.header.num_required_signatures, 1);
         assert_eq!(message.address_table_lookups.len(), 1);
         assert!(!message.address_table_lookups[0].writable_indexes.is_empty());
@@ -829,6 +902,99 @@ mod tests {
                 assert!(
                     (*index as usize) < total,
                     "account index {index} out of range {total}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v0_lookup_indices_resolve_to_the_original_accounts() {
+        use super::native_key;
+
+        // A v0 lookup consumes addresses in *list order*. Referencing table
+        // rows out of order used to encode `offset + row` while writing a
+        // hash-ordered list, so the program received a different account.
+        fn resolve(
+            message: &solana_sdk::message::v0::Message,
+            tables: &[AddressLookupTable],
+        ) -> Vec<solana_sdk::pubkey::Pubkey> {
+            let mut keys = message.account_keys.clone();
+            let by_key: std::collections::HashMap<_, _> = tables
+                .iter()
+                .map(|table| (native_key(&table.key), table))
+                .collect();
+            for lookup in &message.address_table_lookups {
+                let table = by_key[&lookup.account_key];
+                for index in &lookup.writable_indexes {
+                    keys.push(native_key(&table.addresses[*index as usize]));
+                }
+            }
+            for lookup in &message.address_table_lookups {
+                let table = by_key[&lookup.account_key];
+                for index in &lookup.readonly_indexes {
+                    keys.push(native_key(&table.addresses[*index as usize]));
+                }
+            }
+            keys
+        }
+
+        let wallet = native_key(&pubkey(200));
+        let program = native_key(&pubkey(201));
+        let address = |seed: u8| native_key(&pubkey(seed));
+        let table_a = AddressLookupTable {
+            key: pubkey(250),
+            addresses: (10u8..16).map(pubkey).collect(),
+        };
+        let table_b = AddressLookupTable {
+            key: pubkey(249),
+            addresses: (20u8..23).map(pubkey).collect(),
+        };
+        let call = |accounts: Vec<solana_sdk::pubkey::Pubkey>| Instruction {
+            program_id: program,
+            accounts: accounts
+                .into_iter()
+                .map(|pubkey| AccountMeta {
+                    pubkey,
+                    is_signer: false,
+                    is_writable: true,
+                })
+                .collect(),
+            data: vec![1],
+        };
+        // Deliberately non-monotonic rows, and a second table whose rows start
+        // after the first table's writable list.
+        let composed = ComposedCycle {
+            instructions: vec![
+                call(vec![address(15)]),
+                call(vec![address(12)]),
+                call(vec![address(10)]),
+                call(vec![address(22)]),
+                call(vec![address(13)]),
+            ],
+            signatures_required: 1,
+            lookup_tables: vec![table_a.key.to_string(), table_b.key.to_string()],
+            estimated_bytes: 0,
+        };
+        let transaction = assemble_v0(
+            &composed,
+            wallet,
+            solana_sdk::hash::Hash::new_unique(),
+            &[table_b.clone(), table_a.clone()],
+        )
+        .expect("v0 assembly succeeds");
+        let solana_sdk::message::VersionedMessage::V0(message) = &transaction.message else {
+            panic!("expected a v0 message");
+        };
+        let resolved = resolve(message, &[table_b, table_a]);
+        for (instruction, compiled) in composed.instructions.iter().zip(&message.instructions) {
+            assert_eq!(
+                resolved[compiled.program_id_index as usize], instruction.program_id,
+                "program index must resolve to the program id"
+            );
+            for (meta, index) in instruction.accounts.iter().zip(&compiled.accounts) {
+                assert_eq!(
+                    resolved[*index as usize], meta.pubkey,
+                    "account index must resolve to the referenced account"
                 );
             }
         }

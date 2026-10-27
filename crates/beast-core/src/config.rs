@@ -730,8 +730,8 @@ impl Default for RentConfig {
 pub struct FlashConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Provider id. `kamino` and `solend` are verified; unknown ids fail
-    /// startup instead of silently falling back.
+    /// Provider id. `kamino`, `solend` and `marginfi` are verified; unknown
+    /// ids fail startup instead of silently falling back.
     #[serde(default = "default_flash_provider")]
     pub provider: String,
     /// Borrowed mint. Any mint with an active reserve works; WSOL is the
@@ -751,6 +751,13 @@ pub struct FlashConfig {
     /// fresh executor quote. It is not added to the on-chain swap minimum.
     #[serde(default = "default_flash_slippage")]
     pub slippage_bps: u16,
+    /// Optional address lookup table for flash cycles whose static instruction
+    /// set exceeds Solana's 1232-byte transaction limit. The table must be
+    /// owned by the wallet and contain the provider's stable accounts; create
+    /// it with `beast flash-alt` and put its address here. Empty means the
+    /// cycle must fit without lookups.
+    #[serde(default)]
+    pub lookup_table: String,
 }
 
 fn default_flash_provider() -> String {
@@ -775,6 +782,7 @@ impl Default for FlashConfig {
             max_borrow_lamports: default_flash_max_borrow(),
             reserve: String::new(),
             slippage_bps: default_flash_slippage(),
+            lookup_table: String::new(),
         }
     }
 }
@@ -1710,9 +1718,12 @@ impl BeastConfig {
         }
 
         if self.flash.enabled {
-            if !matches!(self.flash.provider.as_str(), "kamino" | "solend") {
+            if !matches!(
+                self.flash.provider.as_str(),
+                "kamino" | "solend" | "marginfi"
+            ) {
                 return Err(BeastError::Config(format!(
-                    "flash.provider {:?} is not verified; supported providers are \"kamino\" and \"solend\"",
+                    "flash.provider {:?} is not verified; supported providers are \"kamino\", \"solend\" and \"marginfi\"",
                     self.flash.provider
                 )));
             }
@@ -1726,6 +1737,9 @@ impl BeastConfig {
             }
             if !self.flash.reserve.is_empty() {
                 validate_pubkey("flash.reserve", &self.flash.reserve)?;
+            }
+            if !self.flash.lookup_table.is_empty() {
+                validate_pubkey("flash.lookup_table", &self.flash.lookup_table)?;
             }
         }
         if self
@@ -2102,7 +2116,7 @@ role = "exec"
     fn flash_rejects_an_unverified_provider() {
         let mut cfg = BeastConfig::default();
         cfg.flash.enabled = true;
-        cfg.flash.provider = "marginfi".into();
+        cfg.flash.provider = "drift".into();
         let secrets = Secrets {
             api_bearer_token: Some("a".repeat(24)),
             api_read_token: Some("b".repeat(24)),
@@ -2110,6 +2124,19 @@ role = "exec"
         };
         let error = cfg.validate_with_secrets(&secrets).unwrap_err();
         assert!(error.to_string().contains("not verified"));
+    }
+
+    #[test]
+    fn flash_accepts_the_verified_marginfi_provider() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = true;
+        cfg.flash.provider = "marginfi".into();
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        cfg.validate_with_secrets(&secrets).unwrap();
     }
 
     #[test]

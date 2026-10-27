@@ -87,7 +87,7 @@ export interface FlashReserveStatus {
   decimals: number
   available: number
   flash_fee_bits: number
-  fee_model: 'fixed_point60_ceiling' | 'wad18_round'
+  fee_model: 'fixed_point60_ceiling' | 'wad18_round' | 'no_fee'
   host_fee_percentage: number
   fee_ppm: number | null
 }
@@ -100,7 +100,7 @@ export interface FlashStatus {
   decimals: number | null
   available: number | null
   flash_fee_bits: number | null
-  fee_model: 'fixed_point60_ceiling' | 'wad18_round' | null
+  fee_model: 'fixed_point60_ceiling' | 'wad18_round' | 'no_fee' | null
   host_fee_percentage: number | null
   fee_ppm: number | null
   max_borrow_lamports: number

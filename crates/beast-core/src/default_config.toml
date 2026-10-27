@@ -96,6 +96,11 @@ provider = "kamino"
 mint = "So11111111111111111111111111111111111111112"
 max_borrow_lamports = 1000000000
 reserve = ""
+# Freshness guard, not an on-chain minimum. Local CPMM swaps are exact-in.
+slippage_bps = 20
+# Address lookup table for cycles over 1232 bytes (Marginfi needs one).
+# Create with `beast flash-alt`; recover the rent with `beast flash-alt-close`.
+lookup_table = ""
 
 [rent]
 enabled = true

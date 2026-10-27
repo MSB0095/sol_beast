@@ -96,6 +96,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Create an address lookup table carrying the flash provider's stable
+    /// accounts. Some provider lifecycles (Marginfi + CPMM) exceed the
+    /// 1232-byte transaction limit without one. Simulates by default; sends
+    /// only with both --real and --confirm.
+    FlashAlt {
+        /// Sign and send the setup transaction (requires runtime.real=true).
+        #[arg(long)]
+        real: bool,
+        /// Required together with --real before anything is sent.
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deactivate or close a flash lookup table and recover its rent.
+    FlashAltClose {
+        /// Lookup table address (the value of `flash.lookup_table`).
+        #[arg(long)]
+        table: String,
+        /// Sign and send the deactivate/close transaction.
+        #[arg(long)]
+        real: bool,
+        /// Required together with --real before anything is sent.
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Quote a swap through Jupiter.
     Quote {
         #[arg(long)]
@@ -228,6 +256,23 @@ async fn main() -> Result<()> {
                 probe,
             )
             .await
+        }
+        Command::FlashAlt {
+            real,
+            confirm,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::flash_alt(cli.config.as_deref(), real, confirm, json).await
+        }
+        Command::FlashAltClose {
+            table,
+            real,
+            confirm,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::flash_alt_close(cli.config.as_deref(), &table, real, confirm, json).await
         }
         Command::Quote {
             input_mint,

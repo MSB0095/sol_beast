@@ -542,6 +542,7 @@ name = "beast-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "beast-api",
  "beast-core",
  "beast-dex",
@@ -550,6 +551,7 @@ dependencies = [
  "beast-flash",
  "beast-rpc",
  "beast-store",
+ "bincode",
  "chrono",
  "clap",
  "serde",

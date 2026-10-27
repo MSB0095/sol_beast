@@ -470,6 +470,7 @@ impl RpcClient {
         match method {
             "getProgramAccounts" | "getTokenLargestAccounts" => EndpointRole::Discovery,
             "getTokenAccountsByOwner" | "getTokenAccountsByDelegate" => EndpointRole::Rent,
+            "getMinimumBalanceForRentExemption" => EndpointRole::Rent,
             "sendTransaction"
             | "sendRawTransaction"
             | "simulateTransaction"
@@ -602,6 +603,21 @@ impl RpcClient {
             .get("value")
             .and_then(Value::as_u64)
             .ok_or_else(|| RpcError::Decode("getBalance missing value".into()))
+    }
+
+    /// Rent-exempt minimum for an account of `data_len` bytes, as charged by
+    /// the cluster right now. Rent parameters can change between epochs, so
+    /// cost estimates must not use a compiled-in default.
+    pub async fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64> {
+        let result: Value = self
+            .call(
+                "getMinimumBalanceForRentExemption",
+                json!([data_len, {"commitment": self.commitment}]),
+            )
+            .await?;
+        result.as_u64().ok_or_else(|| {
+            RpcError::Decode("getMinimumBalanceForRentExemption missing value".into())
+        })
     }
 
     pub async fn get_account_info(&self, address: Address) -> Result<Option<AccountInfo>> {

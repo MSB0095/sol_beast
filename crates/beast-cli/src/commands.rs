@@ -1,6 +1,7 @@
 //! Non-daemon CLI commands.
 
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
 use beast_core::config::{
     self, BeastConfig, EndpointRole, GuardMode, LoadedConfig, RpcEndpointConfig,
     DEFAULT_CONFIG_TOML,
@@ -16,7 +17,13 @@ use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::Store;
 use serde::Serialize;
 use serde_json::{json, Value};
+#[allow(deprecated)]
+use solana_sdk::address_lookup_table::instruction as alt_instruction;
+#[allow(deprecated)]
+use solana_sdk::address_lookup_table::state::AddressLookupTable as LookupTableState;
+use solana_sdk::clock::Slot;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::transaction::Transaction;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -551,6 +558,334 @@ async fn cpmm_leg_quote(
         0
     };
     Ok((amount_out, impact))
+}
+
+/// `beast flash-alt` — create an address lookup table for the configured
+/// flash provider's stable accounts.
+///
+/// Marginfi wraps borrow/repay in four extra instructions on a temporary
+/// account. With two Raydium CPMM swaps the static-key message exceeds the
+/// 1232-byte limit by about 94 bytes. A table carrying only the provider's
+/// long-lived accounts removes ~30 bytes per account and keeps per-cycle
+/// accounts static.
+///
+/// The table address is derived from the wallet and the creation slot, so no
+/// extra keypair is needed. Simulation is the default; sending requires
+/// `--real --confirm` **and** `runtime.real = true`.
+pub async fn flash_alt(
+    path: Option<&Path>,
+    real: bool,
+    confirm: bool,
+    json_output: bool,
+) -> Result<()> {
+    if confirm && !real {
+        bail!("--confirm requires --real");
+    }
+    let loaded = load(path, real)?;
+    let config = &loaded.config;
+    if !config.flash.enabled {
+        bail!("[flash] enabled=false in config");
+    }
+    if real && !config.runtime.real {
+        bail!("--real requires runtime.real=true in config");
+    }
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required to create a lookup table"))?;
+    let rpc = Arc::new(rpc(config)?);
+    let flash = build_flash_runtime(config, &rpc)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("[flash] enabled=false in config"))?;
+    let wsol: Address = WSOL_MINT.parse().expect("WSOL is a valid address");
+    let reserve = flash
+        .reserve_for(wsol)
+        .or_else(|| {
+            flash
+                .reserves
+                .values()
+                .max_by_key(|reserve| reserve.available)
+        })
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no active flash reserve was loaded"))?;
+
+    // Only long-lived data accounts belong in the table. Signers must stay
+    // static; program ids stay static too, so a table cannot change how a
+    // program is resolved.
+    let provider = flash.provider.clone();
+    let forbidden = [
+        wallet.address(),
+        beast_flash::address(&provider.program_id()),
+        beast_flash::address(&solana_sdk::system_program::ID),
+        beast_flash::address(&solana_sdk::compute_budget::ID),
+    ];
+    let mut addresses: Vec<Address> = Vec::new();
+    let mut push = |address: Address| {
+        if address != Address::ZERO
+            && !forbidden.contains(&address)
+            && !addresses.contains(&address)
+        {
+            addresses.push(address);
+        }
+    };
+    push(reserve.reserve);
+    push(reserve.supply_vault);
+    push(reserve.fee_vault);
+    push(reserve.lending_market);
+    push(reserve.lending_market_authority);
+    for address in &reserve.remaining_accounts {
+        push(*address);
+    }
+    if provider.id() == "marginfi" {
+        push(Address::from(
+            *solana_sdk::sysvar::instructions::ID.as_array(),
+        ));
+    }
+    if addresses.is_empty() {
+        bail!("reserve {} has no table-eligible accounts", reserve.reserve);
+    }
+    if addresses.len() > 20 {
+        bail!(
+            "reserve {} needs {} table accounts; the extend instruction accepts at most 20",
+            reserve.reserve,
+            addresses.len()
+        );
+    }
+
+    let slot = rpc.get_slot().await?;
+    let (create, table) =
+        alt_instruction::create_lookup_table(wallet.pubkey(), wallet.pubkey(), slot);
+    let extend = alt_instruction::extend_lookup_table(
+        table,
+        wallet.pubkey(),
+        Some(wallet.pubkey()),
+        addresses.iter().map(beast_flash::pubkey).collect(),
+    );
+    let (blockhash, _) = rpc.get_latest_blockhash().await?;
+    let blockhash: solana_sdk::hash::Hash = blockhash
+        .parse()
+        .map_err(|error| anyhow::anyhow!("latest blockhash: {error}"))?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[create, extend],
+        Some(&wallet.pubkey()),
+        &[wallet.keypair()],
+        blockhash,
+    );
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(bincode::serialize(&transaction).context("serialize lookup-table setup")?);
+    let size = encoded.len();
+    // Rent is a cluster parameter and changed on mainnet in 2026; query it
+    // instead of assuming `Rent::default()`.
+    let rent = rpc
+        .get_minimum_balance_for_rent_exemption(56 + 32 * addresses.len())
+        .await?;
+    let fee = 5_000u64; // one signature at the base rate
+    let wallet_balance = rpc.get_balance(wallet.address()).await?;
+    let total = rent.saturating_add(fee);
+    let remaining = wallet_balance.saturating_sub(total);
+    let simulation = rpc.simulate_transaction(&encoded).await?;
+    let simulation_error = simulation.err.clone();
+    let mut signature: Option<String> = None;
+    let mut sent = false;
+    if simulation_error.is_none() && real && confirm {
+        signature = Some(rpc.send_transaction(&encoded, false).await?);
+        sent = true;
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "table": table.to_string(),
+                "slot": slot,
+                "provider": provider.id(),
+                "reserve": reserve.reserve.to_string(),
+                "addresses": addresses.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "rent_lamports": rent,
+                "fee_lamports": fee,
+                "total_cost_lamports": total,
+                "wallet_balance": wallet_balance,
+                "wallet_after": remaining,
+                "transaction_bytes": size,
+                "simulation": simulation,
+                "sent": sent,
+                "signature": signature,
+                "config_line": format!("lookup_table = \"{table}\""),
+            }))?
+        );
+    } else {
+        println!("provider : {}", provider.id());
+        println!("reserve  : {}", reserve.reserve);
+        println!("table    : {table} (derived from wallet + slot {slot})");
+        println!("accounts : {}", addresses.len());
+        for address in &addresses {
+            println!("  {address}");
+        }
+        println!(
+            "cost     : {rent} lamports rent + {fee} lamports fee = {total} \
+             (wallet {wallet_balance} -> {remaining})"
+        );
+        println!("tx bytes : {size} (simulated)");
+        if let Some(error) = &simulation_error {
+            println!("simulation FAILED: {error}");
+        } else {
+            println!("simulation: ok");
+        }
+        if let Some(signature) = &signature {
+            println!("sent: {signature}");
+            println!(
+                "wait one slot, then set `lookup_table = \"{table}\"` and run the flash probe"
+            );
+        } else if simulation_error.is_none() {
+            println!("\nAdd this line to [flash] after the table is active:");
+            println!("lookup_table = \"{table}\"");
+            if !real || !confirm {
+                println!("\ndry-run only; add --real --confirm to send the setup transaction");
+            }
+        }
+    }
+    if let Some(error) = simulation_error {
+        return Err(anyhow::anyhow!(
+            "lookup-table setup simulation failed: {error}"
+        ));
+    }
+    Ok(())
+}
+
+/// `beast flash-alt-close` — recover the rent of a flash lookup table.
+///
+/// A table must be deactivated first and then wait out the slot-hash cool-down
+/// (about 512 slots) before it can be closed. The command is idempotent: run it
+/// once to deactivate, then again after the cool-down to close and return the
+/// rent to the wallet. Simulation is the default; sending requires
+/// `--real --confirm` **and** `runtime.real = true`.
+pub async fn flash_alt_close(
+    path: Option<&Path>,
+    table: &str,
+    real: bool,
+    confirm: bool,
+    json_output: bool,
+) -> Result<()> {
+    if confirm && !real {
+        bail!("--confirm requires --real");
+    }
+    let loaded = load(path, real)?;
+    let config = &loaded.config;
+    if real && !config.runtime.real {
+        bail!("--real requires runtime.real=true in config");
+    }
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required to manage a lookup table"))?;
+    let table_key = Pubkey::from_str(table).with_context(|| format!("lookup table {table:?}"))?;
+    let rpc = Arc::new(rpc(config)?);
+    let account = rpc
+        .get_account_info(beast_flash::address(&table_key))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("lookup table {table_key} not found on chain"))?;
+    let program = solana_sdk::address_lookup_table::program::id();
+    if account.account.owner != beast_flash::address(&program) {
+        bail!(
+            "account {table_key} is owned by {}, not the address lookup table program",
+            account.account.owner
+        );
+    }
+    let state = LookupTableState::deserialize(&account.account.data)
+        .map_err(|error| anyhow::anyhow!("decode lookup table {table_key}: {error:?}"))?;
+    let authority = state
+        .meta
+        .authority
+        .ok_or_else(|| anyhow::anyhow!("lookup table {table_key} has no authority"))?;
+    if authority != wallet.pubkey() {
+        bail!(
+            "lookup table {table_key} is controlled by {authority}, not the configured wallet {}",
+            wallet.pubkey()
+        );
+    }
+    let deactivation_slot = state.meta.deactivation_slot;
+    let active = deactivation_slot == Slot::MAX;
+    let instruction = if active {
+        alt_instruction::deactivate_lookup_table(table_key, wallet.pubkey())
+    } else {
+        alt_instruction::close_lookup_table(table_key, wallet.pubkey(), wallet.pubkey())
+    };
+    let (blockhash, _) = rpc.get_latest_blockhash().await?;
+    let blockhash: solana_sdk::hash::Hash = blockhash
+        .parse()
+        .map_err(|error| anyhow::anyhow!("latest blockhash: {error}"))?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[instruction],
+        Some(&wallet.pubkey()),
+        &[wallet.keypair()],
+        blockhash,
+    );
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(bincode::serialize(&transaction).context("serialize lookup-table transaction")?);
+    let simulation = rpc.simulate_transaction(&encoded).await?;
+    let simulation_error = simulation.err.clone();
+    let mut signature: Option<String> = None;
+    if simulation_error.is_none() && real && confirm {
+        signature = Some(rpc.send_transaction(&encoded, false).await?);
+    }
+
+    let action = if active { "deactivate" } else { "close" };
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "table": table_key.to_string(),
+                "action": action,
+                "authority": authority.to_string(),
+                "deactivation_slot": deactivation_slot,
+                "rent_lamports": if active { 0 } else { account.account.lamports },
+                "simulation": simulation,
+                "sent": signature.is_some(),
+                "signature": signature,
+                "next_step": if active {
+                    "run the same command again after about 512 slots to close the table and recover its rent"
+                } else {
+                    "rent returned to the wallet"
+                },
+            }))?
+        );
+    } else if active {
+        println!("table     : {table_key}");
+        println!("authority : {authority}");
+        println!("action    : deactivate (rent stays locked until close)");
+        if let Some(error) = &simulation_error {
+            println!("simulation FAILED: {error}");
+        } else {
+            println!("simulation: ok");
+        }
+        if let Some(signature) = &signature {
+            println!("sent: {signature}");
+            println!("run the same command again after about 512 slots to close it");
+        } else if simulation_error.is_none() {
+            println!("\ndry-run only; add --real --confirm to deactivate");
+        }
+    } else {
+        println!("table     : {table_key}");
+        println!("authority : {authority}");
+        println!("deactivated at slot {deactivation_slot}");
+        println!(
+            "action    : close and return {} lamports",
+            account.account.lamports
+        );
+        if let Some(error) = &simulation_error {
+            println!("simulation FAILED: {error}");
+            println!("the cool-down has not elapsed; wait and run this command again");
+        } else {
+            println!("simulation: ok");
+        }
+        if let Some(signature) = &signature {
+            println!("sent: {signature}");
+        } else if simulation_error.is_none() {
+            println!("\ndry-run only; add --real --confirm to close");
+        }
+    }
+    if let Some(error) = simulation_error {
+        return Err(anyhow::anyhow!(
+            "lookup-table {action} simulation failed: {error}"
+        ));
+    }
+    Ok(())
 }
 
 /// `beast flash-cycle` — prove a two-pool Raydium CPMM flash cycle.

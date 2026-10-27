@@ -20,7 +20,8 @@ use beast_exec::{
 };
 use beast_feed::{FeedConfig, PoolFeed, WatchedPool};
 use beast_flash::{
-    kamilend::KaminoFlashProvider, solend::SolendFlashProvider, FlashProvider, FlashReserve,
+    kamilend::KaminoFlashProvider, marginfi::MarginfiFlashProvider, solend::SolendFlashProvider,
+    FlashProvider, FlashReserve,
 };
 use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::{AttemptRecord, AttemptUpdate, BundleRecord, Store};
@@ -528,8 +529,9 @@ pub(crate) async fn build_flash_runtime(
     let provider: Arc<dyn FlashProvider> = match config.flash.provider.as_str() {
         "kamino" => Arc::new(KaminoFlashProvider::mainnet()),
         "solend" => Arc::new(SolendFlashProvider::mainnet()),
+        "marginfi" => Arc::new(MarginfiFlashProvider::mainnet()),
         other => bail!(
-            "flash.provider {other:?} is not verified; supported providers are \"kamino\" and \"solend\""
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\" and \"marginfi\""
         ),
     };
     let configured_mint = if config.flash.mint.trim().is_empty() {
@@ -664,8 +666,15 @@ async fn discover_provider_reserves(
                 None => Ok(adapter.discover_reserves(rpc).await?),
             }
         }
+        "marginfi" => {
+            let adapter = MarginfiFlashProvider::mainnet();
+            match mint {
+                Some(mint) => Ok(adapter.reserves_for_mint(rpc, &mint).await?),
+                None => Ok(adapter.discover_reserves(rpc).await?),
+            }
+        }
         other => bail!(
-            "flash.provider {other:?} is not verified; supported providers are \"kamino\" and \"solend\""
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\" and \"marginfi\""
         ),
     }
 }
@@ -755,6 +764,7 @@ pub(crate) fn build_executor(
         guard_program: config.guard.program_id.clone(),
         transaction_fee_lamports: DEFAULT_TRANSACTION_FEE_LAMPORTS,
         ata_rent_lamports: SPL_TOKEN_ACCOUNT_RENT_LAMPORTS,
+        flash_lookup_table: config.flash.lookup_table.clone(),
     };
     let tip_accounts: Vec<Address> = config
         .jito

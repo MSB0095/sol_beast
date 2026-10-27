@@ -187,6 +187,7 @@ impl KaminoFlashProvider {
             lending_market,
             lending_market_authority: super::address(&authority),
             token_program: read_address(RESERVE_TOKEN_PROGRAM_OFFSET)?,
+            remaining_accounts: Vec::new(),
             flash_fee_bits: read_u64(RESERVE_FLASH_FEE_OFFSET)?,
             fee_model: super::FlashFeeModel::FixedPoint60Ceiling,
             host_fee_percentage: 0,

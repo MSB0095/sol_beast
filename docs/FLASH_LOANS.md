@@ -25,6 +25,15 @@ implemented, and records why other Solana providers are not enabled yet.
 | Solend fee model | Reserve fee is a 1e18 WAD fraction, rounded to nearest. The main WSOL reserve charges exactly **500 ppm**: borrowing 100,000,000 lamports cost 50,000, split 40,000 reserve / 10,000 host. |
 | Solend WSOL reserve | `8PbodeaosQP19SjYFx855UMqWxH2HynZLdBXmsrbac36`, market `4UpD2fh7xH3VP9QQaXtsS1YY3bxzWhtfpks7FatyKvdY`, about 77,780 SOL available at verification time. |
 | Solend engine integration | `beast flash-cycle --probe` with `provider = "solend"` built and simulated a full Solend borrow → two Raydium CPMM swaps → Solend repay cycle with `ok: true`. |
+| Marginfi v2 program | `MFv2hWf31Z9kbCa1snEPYctwafyhdvnV7FZnsebVacA`, executable on mainnet. |
+| Marginfi flash shape | No dedicated instruction: an account flag (`LendingAccountStartFlashloan` / `LendingAccountEndFlashloan`) wraps a normal borrow/repay pair. Inside the flag `check_account_health` returns `Ok(())`, so a fresh zero-collateral account can borrow and repay. |
+| Marginfi discriminators | All six discriminators (`InitializePda`, `Close`, `StartFlashloan`, `Borrow`, `Repay`, `EndFlashloan`) verified against the Anchor instruction hashes and accepted by mainnet simulation. |
+| Marginfi fee model | `NoFee`. The flash fee is zero; the borrow `protocol_origination_fee` is an I80F48 charged as extra debt. All current WSOL banks report 0, so the adapter rejects nonzero-origination-fee banks. |
+| Marginfi WSOL bank | `CCKtUs6Cgwo4aaQUmBPmyoApH2gUDErxNZCAntD6LYGh` (group `4qp6Fx6tnZkY5Wropq9wUYgtFxXKwE6viZxFHg3rdAG8`, vault `2eicbpitfJXDwqCuFAmPgDP7t2oUotnAzbGzRKLMgSLe`, authority `DD3AeAssFvjqTvRTrRAtpfjkBF8FpVKnFuwnMLN9haXD`, Pyth oracle `7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE`), about 6,243 SOL available at verification time. |
+| Marginfi round trip | `cargo run -p beast-flash --example marginfi_roundtrip` simulates init PDA → start flashloan → borrow → `repay_all` → end → close account → close ATA on mainnet with `err: none`. |
+| Marginfi engine integration | `beast flash-cycle --probe` with `provider = "marginfi"` simulated a full Marginfi borrow → two Raydium CPMM swaps → repay cycle with `ok: true`, using an address lookup table. |
+| Marginfi transaction size | The full lifecycle plus two CPMM swaps is 1326 bytes of static keys, over the 1232-byte limit. A lookup table holding six long-lived Marginfi accounts brings it to **1177 bytes**. |
+| ALT setup | `beast flash-alt --real --confirm` created table `JAZCg2PnEKTkBDVuC25vtEA28zhAFHKm3cHrX3VdyfqU` on mainnet (slot 462194404, signature `gzhC2ZkMRXBsmKfQr9jd8nUbBhApCCG3vtGCV6SGDyV48Dfspwb8LRp6BYknwsjL1DeSJbGacDnR6vi9XjbCqMg`), rent 1,910,080 lamports paid and refundable via `beast flash-alt-close`. |
 
 The round-trip example is a **simulation**. No live flash transaction has been
 signed and submitted by this repository. The distinction matters: simulation
@@ -174,7 +183,13 @@ lamports before comparing them with transaction fees, rent and the Jito tip.
 ```toml
 [flash]
 enabled = true
-provider = "kamino"    # or "solend"
+provider = "kamino"    # or "solend", or "marginfi"
+# Address lookup table for providers whose static instruction set exceeds
+# Solana's 1232-byte transaction limit. Create it with `beast flash-alt`,
+# then paste the table address it prints here. Empty means "no lookups".
+# Marginfi + two CPMM swaps needs one: 1326 bytes of static keys without a
+# table (rejected), 1177 bytes with.
+lookup_table = ""
 # Empty means "load the deepest active reserve for every mint of this provider".
 # Set a mint (for example WSOL) to restrict discovery to one asset.
 mint = ""
@@ -189,9 +204,16 @@ mode = "radar"
 ```
 
 `flash_arb` cannot be armed while `[flash] enabled = false`; validation rejects
-that combination at startup. The provider id is also validated: only `kamino`
-and `solend` are accepted, so a typo cannot silently fall back to a different
-adapter.
+that combination at startup. The provider id is also validated: only `kamino`,
+`solend` and `marginfi` are accepted, so a typo cannot silently fall back to a
+different adapter.
+
+When a cycle's instruction set is too large for one transaction, the composed
+cycle is assembled as a **v0** transaction with the configured lookup table.
+The table is created once by `beast flash-alt` and is a plain cost: rent that
+the wallet pays and recovers. Deactivate and close it later with
+`beast flash-alt-close --table <address>` (first deactivates, then closes after
+the slot cool-down, returning the rent).
 
 At startup the engine either:
 
@@ -244,16 +266,22 @@ account cannot cover principal + fee, the whole transaction reverts.
 
 ## Tokens and venues
 
-Any mint with an active Kamino or Solend reserve can be borrowed. The route
-still has to be discoverable by Radar, which means at least one
+Any mint with an active Kamino, Solend or Marginfi reserve can be borrowed. The
+route still has to be discoverable by Radar, which means at least one
 configured/decoded pool and a closed path back to the same mint. The provider
 supplies only the loan; swaps come from Jupiter or the local CPMM builder.
+
+Marginfi needs one extra piece of plumbing that Kamino and Solend do not: a
+temporary account PDA is created, used for the borrow/repay and closed inside
+the same transaction. Its rent (12,395,200 lamports) floats out of the wallet
+and comes back when the account closes, so it is included in the balance check
+but not in the profit model. The account index is picked by probing PDAs until
+an unused one is found, so a leftover account at index 0 does not break a cycle.
 
 The following are **not** enabled and are not presented as working:
 
 | Provider | Status |
 |---|---|
-| Marginfi v2 | Flash loans are an account-level flag (`start_flashloan` / `end_flashloan`) over an existing marginfi account, not the same borrow-and-repay shape as Kamino/Solend. No adapter proven here. |
 | Drift | Has flash-loan-like mechanics, but no adapter has been proven here. Not enabled. |
 | Port / Larix | No verified flash adapter in this repository. Not enabled. |
 | Jupiter Lend (`@jup-ag/lend`) | Fee-less flash loans exist, but the SDK is JavaScript and no borrow → repay round trip has been proven from this repository. Not enabled. |

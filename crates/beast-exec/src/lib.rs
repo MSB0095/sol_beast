@@ -22,7 +22,7 @@ use beast_core::economics::{TipPolicy, MIN_JITO_TIP_LAMPORTS, SPL_TOKEN_ACCOUNT_
 use beast_core::types::{Mode, Opportunity};
 use beast_dex::jupiter::{JupiterClient, JupiterQuote, QuoteRequest, SwapRequest};
 use beast_dex::Address;
-use beast_flash::{FlashProvider, FlashReserve};
+use beast_flash::{FlashLifecycle, FlashProvider, FlashReserve};
 use beast_rpc::{JitoClient, RpcClient};
 use bincode::serialize;
 use serde::{Deserialize, Serialize};
@@ -117,6 +117,9 @@ pub struct ExecutionConfig {
     pub transaction_fee_lamports: u64,
     /// Worst-case token-account rent retained per intermediate mint.
     pub ata_rent_lamports: u64,
+    /// Optional address lookup table that carries the flash provider's stable
+    /// accounts. Empty means every account must fit in the static key list.
+    pub flash_lookup_table: String,
 }
 
 impl Default for ExecutionConfig {
@@ -132,6 +135,7 @@ impl Default for ExecutionConfig {
             guard_program: String::new(),
             transaction_fee_lamports: DEFAULT_TRANSACTION_FEE_LAMPORTS,
             ata_rent_lamports: SPL_TOKEN_ACCOUNT_RENT_LAMPORTS,
+            flash_lookup_table: String::new(),
         }
     }
 }
@@ -910,6 +914,17 @@ impl Executor {
         } else {
             0
         };
+        // Providers whose flash loan is not a bare borrow/repay pair need a
+        // temporary account address before any instruction can be built. The
+        // rent is a float: it returns to the wallet when the account closes in
+        // the same transaction, so it belongs in the balance check but not in
+        // the profit model.
+        let lifecycle = self.flash_lifecycle(provider, &reserve, wallet).await?;
+        let lifecycle_rent = if lifecycle.account.is_some() {
+            provider.temporary_rent_lamports()
+        } else {
+            0
+        };
 
         // Quote every leg from the previous leg's enforced minimum out.
         let mut quotes = Vec::with_capacity(legs.len());
@@ -1004,6 +1019,7 @@ impl Executor {
             .checked_add(fees_lamports)
             .and_then(|value| value.checked_add(tip_lamports))
             .and_then(|value| value.checked_add(temporary_rent))
+            .and_then(|value| value.checked_add(lifecycle_rent))
             .ok_or_else(|| ExecutionError::Config("flash balance requirement overflow".into()))?;
         if start_balance < required_balance {
             return Err(ExecutionError::InsufficientBalance(format!(
@@ -1025,13 +1041,29 @@ impl Executor {
                 ),
             );
         }
+        preamble.extend(provider.pre_borrow(&reserve, wallet, destination, amount, &lifecycle)?);
         let borrow_index = u8::try_from(preamble.len()).map_err(|_| {
             ExecutionError::Config("flash preamble exceeds 255 instructions".into())
         })?;
-        let borrow = provider.borrow(&reserve, wallet, destination, amount, borrow_index)?;
+        let borrow = provider.borrow_with_lifecycle(
+            &reserve,
+            wallet,
+            destination,
+            amount,
+            borrow_index,
+            &lifecycle,
+        )?;
         preamble.push(borrow.instruction);
-        let repay = provider.repay(&reserve, wallet, destination, amount, borrow.index)?;
+        let repay = provider.repay_with_lifecycle(
+            &reserve,
+            wallet,
+            destination,
+            amount,
+            borrow.index,
+            &lifecycle,
+        )?;
         let mut postamble = vec![repay.instruction];
+        postamble.extend(provider.post_repay(&reserve, wallet, destination, amount, &lifecycle)?);
         if is_wsol {
             // Closing sends the remaining wrapped SOL (profit + rent) to the
             // wallet as lamports, which is what makes the lamport guard usable.
@@ -1069,15 +1101,18 @@ impl Executor {
             });
         }
 
-        let composed = compose::compose_cycle_with(
+        let mut composed = compose::compose_cycle_with(
             &cycle_legs,
             compose::ComposeOptions {
                 include_final_cleanup: false,
                 include_compute_budget: false,
+                skip_size_estimate: !self.config.flash_lookup_table.is_empty(),
             },
             &preamble,
             &postamble,
         )?;
+        provider.finalize(&mut composed.instructions, &lifecycle)?;
+        self.attach_flash_lookup_table(&mut composed);
         self.finish_flash_plan(
             opportunity,
             provider,
@@ -1095,6 +1130,87 @@ impl Executor {
             composed,
         )
         .await
+    }
+
+    /// Attach the configured flash address lookup table to a composed cycle.
+    ///
+    /// The table is resolved and read on-chain by `finish_flash_plan`. Adding
+    /// it here, after composition, lets a provider's stable accounts live in
+    /// the table while the per-cycle accounts stay static.
+    fn attach_flash_lookup_table(&self, composed: &mut ComposedCycle) {
+        let table = self.config.flash_lookup_table.trim();
+        if table.is_empty() {
+            return;
+        }
+        if !composed
+            .lookup_tables
+            .iter()
+            .any(|existing| existing == table)
+        {
+            composed.lookup_tables.push(table.to_string());
+        }
+    }
+
+    /// Resolve the temporary account a provider needs for one cycle.
+    ///
+    /// Marginfi derives a fresh account PDA from the wallet and an account
+    /// index. A leftover account at index 0 would make `create_account` fail,
+    /// so indexes are probed in batches and the first unused one is selected.
+    /// Providers without a lifecycle account return the default immediately.
+    async fn flash_lifecycle(
+        &self,
+        provider: &dyn FlashProvider,
+        reserve: &FlashReserve,
+        wallet: Pubkey,
+    ) -> Result<FlashLifecycle> {
+        if provider.lifecycle_account(reserve, wallet, 0).is_none() {
+            return Ok(FlashLifecycle::default());
+        }
+        // 16 addresses per RPC call: rare collisions cost one call, and the
+        // upper bound stops a wallet with thousands of stale accounts from
+        // turning a cycle into an unbounded scan.
+        const BATCH: u16 = 16;
+        let mut index = 0u16;
+        loop {
+            let mut batch = Vec::with_capacity(BATCH as usize);
+            for offset in 0..BATCH {
+                let Some(candidate) = index.checked_add(offset) else {
+                    break;
+                };
+                let Some(address) = provider.lifecycle_account(reserve, wallet, candidate) else {
+                    break;
+                };
+                batch.push((candidate, address));
+            }
+            if batch.is_empty() {
+                break;
+            }
+            let keys: Vec<Address> = batch.iter().map(|(_, address)| *address).collect();
+            let accounts = self.rpc.get_multiple_accounts(&keys).await?;
+            for ((candidate, address), account) in batch.into_iter().zip(accounts) {
+                if account.is_none() {
+                    tracing::debug!(
+                        provider = provider.id(),
+                        index = candidate,
+                        account = %address,
+                        "selected flash lifecycle account"
+                    );
+                    return Ok(FlashLifecycle {
+                        account: Some(address),
+                        account_index: candidate,
+                        third_party_id: 0,
+                    });
+                }
+            }
+            let Some(next) = index.checked_add(BATCH) else {
+                break;
+            };
+            index = next;
+        }
+        Err(ExecutionError::Unsupported(format!(
+            "provider {} has no unused flash lifecycle account for this wallet",
+            provider.id()
+        )))
     }
 
     /// Build the shared tail of a flash plan: resolve lookup tables, sign the
@@ -1430,6 +1546,12 @@ impl Executor {
 
         let wsol_exists = account(&beast_flash::address(&wsol_ata)).is_some();
         let middle_exists = account(&beast_flash::address(&middle_ata)).is_some();
+        let lifecycle = self.flash_lifecycle(provider, reserve, wallet).await?;
+        let lifecycle_rent = if lifecycle.account.is_some() {
+            provider.temporary_rent_lamports()
+        } else {
+            0
+        };
 
         // Local CPMM cycles are exact-in: leg 1 must return exactly the quoted
         // amount, which leg 2 then swaps in full. A haircut here would either
@@ -1525,6 +1647,7 @@ impl Executor {
             .checked_add(fees_lamports)
             .and_then(|value| value.checked_add(tip_lamports))
             .and_then(|value| value.checked_add(temporary_rent))
+            .and_then(|value| value.checked_add(lifecycle_rent))
             .and_then(|value| value.checked_add(prefund_lamports))
             .ok_or_else(|| ExecutionError::Config("CPMM balance requirement overflow".into()))?;
         if start_balance < required_balance {
@@ -1571,13 +1694,29 @@ impl Executor {
                 )?,
             );
         }
+        preamble.extend(provider.pre_borrow(reserve, wallet, wsol_ata, amount, &lifecycle)?);
         let borrow_index = u8::try_from(preamble.len()).map_err(|_| {
             ExecutionError::Config("flash preamble exceeds 255 instructions".into())
         })?;
-        let borrow = provider.borrow(reserve, wallet, wsol_ata, amount, borrow_index)?;
+        let borrow = provider.borrow_with_lifecycle(
+            reserve,
+            wallet,
+            wsol_ata,
+            amount,
+            borrow_index,
+            &lifecycle,
+        )?;
         preamble.push(borrow.instruction);
-        let repay = provider.repay(reserve, wallet, wsol_ata, amount, borrow.index)?;
+        let repay = provider.repay_with_lifecycle(
+            reserve,
+            wallet,
+            wsol_ata,
+            amount,
+            borrow.index,
+            &lifecycle,
+        )?;
         let mut postamble = vec![repay.instruction];
+        postamble.extend(provider.post_repay(reserve, wallet, wsol_ata, amount, &lifecycle)?);
         postamble.push(
             spl_token::instruction::close_account(&token_program, &wsol_ata, &wallet, &wallet, &[])
                 .map_err(|error| {
@@ -1606,15 +1745,18 @@ impl Executor {
                 is_final: true,
             },
         ];
-        let composed = compose::compose_cycle_with(
+        let mut composed = compose::compose_cycle_with(
             &cycle_legs,
             compose::ComposeOptions {
                 include_final_cleanup: false,
                 include_compute_budget: false,
+                skip_size_estimate: !self.config.flash_lookup_table.is_empty(),
             },
             &preamble,
             &postamble,
         )?;
+        provider.finalize(&mut composed.instructions, &lifecycle)?;
+        self.attach_flash_lookup_table(&mut composed);
 
         tracing::info!(
             pool_in = %pool_a.address,
@@ -1852,6 +1994,25 @@ fn build_composed_transaction(
     }
     let mut transaction = compose::assemble_v0(composed, wallet, blockhash, tables)?;
     let message_bytes = transaction.message.serialize();
+    if let solana_sdk::message::VersionedMessage::V0(message) = &transaction.message {
+        tracing::debug!(
+            instructions = message.instructions.len(),
+            static_keys = message.account_keys.len(),
+            tables = message.address_table_lookups.len(),
+            account_refs = composed
+                .instructions
+                .iter()
+                .map(|instruction| instruction.accounts.len())
+                .sum::<usize>(),
+            data_bytes = composed
+                .instructions
+                .iter()
+                .map(|instruction| instruction.data.len())
+                .sum::<usize>(),
+            message_bytes = message_bytes.len(),
+            "assembled v0 cycle"
+        );
+    }
     if message_bytes.len() + 65 > compose::MAX_TRANSACTION_BYTES {
         return Err(ExecutionError::Unsupported(format!(
             "composed cycle message is {} bytes, above the {}-byte limit",

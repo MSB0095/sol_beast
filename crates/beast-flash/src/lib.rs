@@ -28,9 +28,14 @@ use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub mod jupiter;
 pub mod kamilend;
 pub mod marginfi;
 pub mod solend;
+pub use jupiter::{
+    JupiterFlashProvider, JUPITER_FLASHLOAN_ADMIN, JUPITER_FLASHLOAN_PROGRAM_ID, JUPITER_LIQUIDITY,
+    JUPITER_LIQUIDITY_PROGRAM_ID, JUPITER_WSOL_BORROW_POSITION, JUPITER_WSOL_RESERVE,
+};
 pub use kamilend::{derive_market_authority, KaminoFlashProvider, KAMINO_KLEND_PROGRAM_ID};
 pub use marginfi::{
     MarginfiFlashProvider, MARGINFI_MAIN_GROUP, MARGINFI_PROGRAM_ID, MARGINFI_WSOL_BANK,
@@ -75,7 +80,7 @@ pub type Result<T> = std::result::Result<T, FlashError>;
 
 /// How a protocol stores and rounds its flash fee.
 ///
-/// The two verified Solana lenders use different fixed-point scales, and
+/// The verified Solana lenders use four different fixed-point scales, and
 /// guessing one from the other silently misprices every borrow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +95,11 @@ pub enum FlashFeeModel {
     /// normal borrow interest does not accrue within one atomic transaction,
     /// and the bank's origination fee is rejected unless it is exactly zero.
     NoFee,
+    /// A u16 fraction of 10,000 basis points, rounded **up**. Jupiter Lend's
+    /// flashloan program computes `ceil(amount * fee_bps / 10_000)`. Feeless
+    /// today, so a zero fee must still be honest: a nonzero value means the
+    /// protocol was reconfigured and the fee is charged.
+    Bps16Ceiling,
 }
 
 /// A pool of borrowable liquidity, resolved on-chain.
@@ -176,6 +186,15 @@ impl FlashReserve {
                     / scale;
                 u64::try_from(rounded).map_err(|_| FlashError::Overflow)
             }
+            FlashFeeModel::Bps16Ceiling => {
+                // 10,000 basis points is the protocol's precision constant.
+                let scale = 10_000u128;
+                let product = (amount as u128)
+                    .checked_mul(self.flash_fee_bits as u128)
+                    .ok_or(FlashError::Overflow)?;
+                let fee = product.checked_add(scale - 1).ok_or(FlashError::Overflow)? / scale;
+                u64::try_from(fee).map_err(|_| FlashError::Overflow)
+            }
             FlashFeeModel::NoFee => Ok(0),
         }
     }
@@ -197,6 +216,7 @@ impl FlashReserve {
         let scale = match self.fee_model {
             FlashFeeModel::FixedPoint60Ceiling => (1u64 << 60) as f64,
             FlashFeeModel::Wad18Round => 1_000_000_000_000_000_000.0,
+            FlashFeeModel::Bps16Ceiling => 10_000.0,
             FlashFeeModel::NoFee => return Some(0.0),
         };
         Some(self.flash_fee_bits as f64 / scale * 1e6)
@@ -255,6 +275,24 @@ pub trait FlashProvider: Send + Sync {
     /// Decode a reserve account. The executor re-reads the reserve immediately
     /// before building a cycle, so availability and fees are never stale.
     fn decode_reserve(&self, address: &Address, data: &[u8]) -> Result<FlashReserve>;
+
+    /// Complete a pinned reserve that cannot be decoded from one account alone.
+    ///
+    /// Jupiter Lend's flashloan program reads a protocol-wide fee from a
+    /// separate admin PDA and a per-mint debt ceiling from a separate position
+    /// PDA, so it needs two more account reads to report an honest fee and a
+    /// correct borrowable amount. Providers whose reserve is self-contained
+    /// keep the default, which is exactly `decode_reserve`.
+    #[allow(clippy::type_complexity)]
+    fn resolve_pinned_reserve<'a>(
+        &'a self,
+        _rpc: &'a beast_rpc::RpcClient,
+        address: &'a Address,
+        data: &'a [u8],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<FlashReserve>> + Send + 'a>>
+    {
+        Box::pin(async move { self.decode_reserve(address, data) })
+    }
     /// Build the borrow instruction.
     fn borrow(
         &self,

@@ -32,6 +32,13 @@ implemented, and records why other Solana providers are not enabled yet.
 | Marginfi WSOL bank | `CCKtUs6Cgwo4aaQUmBPmyoApH2gUDErxNZCAntD6LYGh` (group `4qp6Fx6tnZkY5Wropq9wUYgtFxXKwE6viZxFHg3rdAG8`, vault `2eicbpitfJXDwqCuFAmPgDP7t2oUotnAzbGzRKLMgSLe`, authority `DD3AeAssFvjqTvRTrRAtpfjkBF8FpVKnFuwnMLN9haXD`, Pyth oracle `7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE`), about 6,243 SOL available at verification time. |
 | Marginfi round trip | `cargo run -p beast-flash --example marginfi_roundtrip` simulates init PDA → start flashloan → borrow → `repay_all` → end → close account → close ATA on mainnet with `err: none`. |
 | Marginfi engine integration | `beast flash-cycle --probe` with `provider = "marginfi"` simulated a full Marginfi borrow → two Raydium CPMM swaps → repay cycle with `ok: true`, using an address lookup table. |
+| Jupiter Lend program | `jupgfSgfuAXv4B6R2Uxu85Z1qdzgju79s6MfZekN6XS`, executable on mainnet and owner of the admin account. |
+| Jupiter Lend flash shape | A dedicated program, separate from the liquidity program: exactly two instructions, `flashloanBorrow` and `flashloanPayback`, and **no** borrow index — the protocol walks the `instruction_sysvar` to find its own borrow. |
+| Jupiter Lend fee | Protocol-wide `flashloan_fee` is **0 basis points right now**, so repayment is exactly the principal. Zero is a real value read from the live admin, not the "disabled" marker. |
+| Jupiter Lend full round trip | `cargo run -p beast-flash --example jupiter_roundtrip` simulates borrow → repay on mainnet with `err: none` and a net wallet cost of **6,400 lamports** (ATA rent only). |
+| Jupiter Lend engine integration | `beast flash-cycle --probe` with `provider = "jupiter"` simulated borrow → two Raydium CPMM swaps → repay with `ok: true`, `err: null`, fee 0, at 1050 bytes. |
+| Jupiter Lend liquidity | WSOL vault holds **~395,828 SOL**; `available` is bounded by `supply * max_utilization - borrow`, then by the borrow position's `max_debt_ceiling - amount`, then by the vault's real token balance. |
+| Jupiter ALT | `beast flash-alt --real --confirm` with `provider = "jupiter"` created table `33fhmzQ7H7ZDaKREnV1x79Xp43drPT8GiETKuAWzNFkr` on mainnet, rent 1,910,080 lamports, refundable with `beast flash-alt-close`. |
 | Marginfi transaction size | The full lifecycle plus two CPMM swaps is 1326 bytes of static keys, over the 1232-byte limit. A lookup table holding six long-lived Marginfi accounts brings it to **1177 bytes**. |
 | ALT setup | `beast flash-alt --real --confirm` created table `JAZCg2PnEKTkBDVuC25vtEA28zhAFHKm3cHrX3VdyfqU` on mainnet (slot 462194404, signature `gzhC2ZkMRXBsmKfQr9jd8nUbBhApCCG3vtGCV6SGDyV48Dfspwb8LRp6BYknwsjL1DeSJbGacDnR6vi9XjbCqMg`), rent 1,910,080 lamports paid and refundable via `beast flash-alt-close`. |
 
@@ -174,6 +181,21 @@ strictly below the principal.
 `repayment_amount` is principal + fee. The repay instruction itself still takes
 the principal; the source account must hold principal + fee.
 
+Jupiter Lend is the fourth model, and structurally the cheapest: the fee is
+**protocol-wide**, not per-reserve, so one admin account decides it for every
+mint:
+
+```text
+fee = ceil(amount * flashloan_fee_bps / 10_000)
+```
+
+The verified value on mainnet is `0`, so a Jupiter Lend cycle repays exactly the
+principal and the fee term in the profit model is zero. The adapter reads the
+live admin account before every cycle, so if the protocol is reconfigured to a
+nonzero fee the profit model follows automatically instead of quietly
+under-charging. A **paused** protocol is reported as paused, never as a free
+loan.
+
 Fees are charged in the borrowed token. For a non-WSOL cycle the fee is in that
 token's raw units, and the engine converts both the profit and the fee into
 lamports before comparing them with transaction fees, rent and the Jito tip.
@@ -183,12 +205,13 @@ lamports before comparing them with transaction fees, rent and the Jito tip.
 ```toml
 [flash]
 enabled = true
-provider = "kamino"    # or "solend", or "marginfi"
+provider = "kamino"    # or "solend", "marginfi" or "jupiter"
 # Address lookup table for providers whose static instruction set exceeds
 # Solana's 1232-byte transaction limit. Create it with `beast flash-alt`,
 # then paste the table address it prints here. Empty means "no lookups".
 # Marginfi + two CPMM swaps needs one: 1326 bytes of static keys without a
-# table (rejected), 1177 bytes with.
+# table (rejected), 1177 bytes with. Jupiter Lend + two CPMM swaps also needs
+# one: 1264 bytes without, 1050 with.
 lookup_table = ""
 # Empty means "load the deepest active reserve for every mint of this provider".
 # Set a mint (for example WSOL) to restrict discovery to one asset.
@@ -205,8 +228,8 @@ mode = "radar"
 
 `flash_arb` cannot be armed while `[flash] enabled = false`; validation rejects
 that combination at startup. The provider id is also validated: only `kamino`,
-`solend` and `marginfi` are accepted, so a typo cannot silently fall back to a
-different adapter.
+`solend`, `marginfi` and `jupiter` are accepted, so a typo cannot silently fall
+back to a different adapter.
 
 When a cycle's instruction set is too large for one transaction, the composed
 cycle is assembled as a **v0** transaction with the configured lookup table.
@@ -266,8 +289,8 @@ account cannot cover principal + fee, the whole transaction reverts.
 
 ## Tokens and venues
 
-Any mint with an active Kamino, Solend or Marginfi reserve can be borrowed. The
-route still has to be discoverable by Radar, which means at least one
+Any mint with an active Kamino, Solend, Marginfi or Jupiter Lend reserve can be
+borrowed. The route still has to be discoverable by Radar, which means at least one
 configured/decoded pool and a closed path back to the same mint. The provider
 supplies only the loan; swaps come from Jupiter or the local CPMM builder.
 

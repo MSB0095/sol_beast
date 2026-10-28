@@ -730,8 +730,8 @@ impl Default for RentConfig {
 pub struct FlashConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Provider id. `kamino`, `solend` and `marginfi` are verified; unknown
-    /// ids fail startup instead of silently falling back.
+    /// Provider id. `kamino`, `solend`, `marginfi` and `jupiter` are verified;
+    /// unknown ids fail startup instead of silently falling back.
     #[serde(default = "default_flash_provider")]
     pub provider: String,
     /// Borrowed mint. Any mint with an active reserve works; WSOL is the
@@ -1720,10 +1720,10 @@ impl BeastConfig {
         if self.flash.enabled {
             if !matches!(
                 self.flash.provider.as_str(),
-                "kamino" | "solend" | "marginfi"
+                "kamino" | "solend" | "marginfi" | "jupiter"
             ) {
                 return Err(BeastError::Config(format!(
-                    "flash.provider {:?} is not verified; supported providers are \"kamino\", \"solend\" and \"marginfi\"",
+                    "flash.provider {:?} is not verified; supported providers are \"kamino\", \"solend\", \"marginfi\" and \"jupiter\"",
                     self.flash.provider
                 )));
             }
@@ -2131,6 +2131,32 @@ role = "exec"
         let mut cfg = BeastConfig::default();
         cfg.flash.enabled = true;
         cfg.flash.provider = "marginfi".into();
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        cfg.validate_with_secrets(&secrets).unwrap();
+    }
+
+    #[test]
+    fn flash_accepts_the_verified_jupiter_provider() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = true;
+        cfg.flash.provider = "jupiter".into();
+        let secrets = Secrets {
+            api_bearer_token: Some("a".repeat(24)),
+            api_read_token: Some("b".repeat(24)),
+            ..Secrets::default()
+        };
+        cfg.validate_with_secrets(&secrets).unwrap();
+    }
+
+    #[test]
+    fn flash_accepts_a_lookup_table() {
+        let mut cfg = BeastConfig::default();
+        cfg.flash.enabled = true;
+        cfg.flash.lookup_table = "JAZCg2PnEKTkBDVuC25vtEA28zhAFHKm3cHrX3VdyfqU".into();
         let secrets = Secrets {
             api_bearer_token: Some("a".repeat(24)),
             api_read_token: Some("b".repeat(24)),

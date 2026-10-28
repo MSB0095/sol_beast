@@ -158,9 +158,10 @@ max_accounts = 48
 restrict_intermediate_tokens = true
 
 [flash]
-# `kamino`, `solend` and `marginfi` are verified by mainnet borrow → repay
-# simulations. Enabled here with an empty mint so the engine loads the deepest
-# active reserve per mint; set a mint to restrict discovery.
+# `kamino`, `solend`, `marginfi` and `jupiter` are verified by mainnet
+# borrow → repay simulations. Jupiter Lend charges no flash fee. Enabled here
+# with an empty mint so the engine loads the deepest active reserve per mint;
+# set a mint to restrict discovery.
 enabled = true
 provider = "kamino"
 mint = ""
@@ -172,7 +173,8 @@ slippage_bps = 20
 # Address lookup table for cycles that exceed the 1232-byte transaction limit.
 # Create it with `beast flash-alt`, then paste the address it prints. Its rent
 # is recovered with `beast flash-alt-close --table <address>`.
-# Marginfi + two CPMM swaps needs one (1177 bytes with, 1326 without).
+# Marginfi + two CPMM swaps needs one (1177 bytes with, 1326 without), and so
+# does Jupiter Lend (1050 with, 1264 without).
 # Kamino and Solend cycles fit without a table; leave this empty for them.
 lookup_table = ""
 

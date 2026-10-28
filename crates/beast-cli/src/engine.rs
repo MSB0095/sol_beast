@@ -20,8 +20,8 @@ use beast_exec::{
 };
 use beast_feed::{FeedConfig, PoolFeed, WatchedPool};
 use beast_flash::{
-    kamilend::KaminoFlashProvider, marginfi::MarginfiFlashProvider, solend::SolendFlashProvider,
-    FlashProvider, FlashReserve,
+    jupiter::JupiterFlashProvider as JupiterLendFlashProvider, kamilend::KaminoFlashProvider,
+    marginfi::MarginfiFlashProvider, solend::SolendFlashProvider, FlashProvider, FlashReserve,
 };
 use beast_rpc::{EndpointOptions, JitoClient, RpcClient};
 use beast_store::{AttemptRecord, AttemptUpdate, BundleRecord, Store};
@@ -530,8 +530,9 @@ pub(crate) async fn build_flash_runtime(
         "kamino" => Arc::new(KaminoFlashProvider::mainnet()),
         "solend" => Arc::new(SolendFlashProvider::mainnet()),
         "marginfi" => Arc::new(MarginfiFlashProvider::mainnet()),
+        "jupiter" => Arc::new(JupiterLendFlashProvider::mainnet()),
         other => bail!(
-            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\" and \"marginfi\""
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\", \"marginfi\" and \"jupiter\""
         ),
     };
     let configured_mint = if config.flash.mint.trim().is_empty() {
@@ -557,7 +558,8 @@ pub(crate) async fn build_flash_runtime(
             .await?
             .ok_or_else(|| anyhow::anyhow!("flash.reserve {key} not found on chain"))?;
         let reserve = provider
-            .decode_reserve(&key, &account.account.data)
+            .resolve_pinned_reserve(rpc, &key, &account.account.data)
+            .await
             .with_context(|| {
                 format!(
                     "flash.reserve {key} is not a valid {} reserve",
@@ -673,8 +675,15 @@ async fn discover_provider_reserves(
                 None => Ok(adapter.discover_reserves(rpc).await?),
             }
         }
+        "jupiter" => {
+            let adapter = JupiterLendFlashProvider::mainnet();
+            match mint {
+                Some(mint) => Ok(adapter.reserves_for_mint(rpc, &mint).await?),
+                None => Ok(adapter.discover_reserves(rpc).await?),
+            }
+        }
         other => bail!(
-            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\" and \"marginfi\""
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\", \"marginfi\" and \"jupiter\""
         ),
     }
 }

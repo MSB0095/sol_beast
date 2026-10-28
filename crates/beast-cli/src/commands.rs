@@ -40,7 +40,7 @@ fn load(path: Option<&Path>, real: bool) -> Result<LoadedConfig> {
     Ok(loaded)
 }
 
-fn rpc(config: &BeastConfig) -> Result<RpcClient> {
+pub(crate) fn rpc(config: &BeastConfig) -> Result<RpcClient> {
     rpc_with_timeout(config, config.rpc.timeout_ms)
 }
 
@@ -71,7 +71,7 @@ fn rpc_with_timeout(config: &BeastConfig, timeout_ms: u64) -> Result<RpcClient> 
     )?)
 }
 
-fn jupiter(config: &BeastConfig, secrets: &config::Secrets) -> Result<JupiterClient> {
+pub(crate) fn jupiter(config: &BeastConfig, secrets: &config::Secrets) -> Result<JupiterClient> {
     let base = if config.rpc.jupiter_quote_url.trim().is_empty() {
         "https://lite-api.jup.ag/swap/v1".to_string()
     } else {
@@ -1797,7 +1797,10 @@ pub fn init(force: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_wallet(config: &BeastConfig, secrets: &config::Secrets) -> Result<Option<Wallet>> {
+pub(crate) fn load_wallet(
+    config: &BeastConfig,
+    secrets: &config::Secrets,
+) -> Result<Option<Wallet>> {
     if let Some(path) = config
         .wallet
         .keypair_path

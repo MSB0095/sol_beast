@@ -1,5 +1,6 @@
 //! `beast` command line.
 
+mod arb;
 mod commands;
 mod engine;
 
@@ -123,6 +124,36 @@ enum Command {
         confirm: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Run the flash-loan arbitrage driver: scan, price and execute automatically.
+    ///
+    /// The driver holds a set of WSOL pairs, refreshes every pool on-chain,
+    /// prices both directions of each two-pool cycle with Raydium's exact fee
+    /// formula, and executes a cycle only when its on-chain minimums still
+    /// clear the principal, the flash fee, the transaction costs, the tip and
+    /// the configured minimum profit. A TUI is the default surface; --scan-only
+    /// prints a single text report instead.
+    Arb {
+        /// Print one text report per scan instead of the TUI.
+        #[arg(long)]
+        scan_only: bool,
+        /// Milliseconds between scans.
+        #[arg(long, default_value_t = 750)]
+        refresh_ms: u64,
+        /// Minimum profit in lamports a cycle must clear to be executed.
+        #[arg(long, default_value_t = 20_000)]
+        min_profit_lamports: u64,
+        /// Extra mints to pair against WSOL. Repeatable; the built-in set is
+        /// always included.
+        #[arg(long = "mint")]
+        mints: Vec<String>,
+        /// Replace the default borrow-size ladder with one amount in lamports.
+        #[arg(long = "amount")]
+        amounts: Vec<u64>,
+        /// Execute cleared cycles instead of only reporting them. Requires
+        /// runtime.real = true; without it the driver stays read-only.
+        #[arg(long)]
+        real: bool,
     },
     /// Quote a swap through Jupiter.
     Quote {
@@ -273,6 +304,40 @@ async fn main() -> Result<()> {
         } => {
             init_logging("info", cli.json_logs)?;
             commands::flash_alt_close(cli.config.as_deref(), &table, real, confirm, json).await
+        }
+        Command::Arb {
+            scan_only,
+            refresh_ms,
+            min_profit_lamports,
+            mints,
+            amounts,
+            real,
+        } => {
+            init_logging(if scan_only { "warn" } else { "error" }, cli.json_logs)?;
+            let mut options = crate::arb::ArbOptions {
+                refresh_ms,
+                min_profit_lamports,
+                mints: {
+                    let mut defaults: Vec<String> = crate::arb::DEFAULT_PAIR_MINTS
+                        .iter()
+                        .map(|mint| (*mint).to_string())
+                        .collect();
+                    for mint in mints {
+                        if !defaults.contains(&mint) {
+                            defaults.push(mint);
+                        }
+                    }
+                    defaults
+                },
+                amount_ladder: if amounts.is_empty() {
+                    crate::arb::ArbOptions::default().amount_ladder
+                } else {
+                    amounts
+                },
+                scan_only,
+            };
+            options.mints.retain(|mint| !mint.trim().is_empty());
+            crate::arb::arb(cli.config.as_deref(), real, options).await
         }
         Command::Quote {
             input_mint,

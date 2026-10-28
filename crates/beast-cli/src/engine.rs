@@ -514,6 +514,34 @@ pub async fn run(options: RunOptions) -> Result<()> {
     Ok(())
 }
 
+/// Build the Jito block-engine client from config, or None when disabled.
+pub(crate) fn build_jito(config: &BeastConfig) -> Result<Option<Arc<JitoClient>>> {
+    if config.jito.enabled {
+        Ok(Some(Arc::new(JitoClient::new(
+            config.jito.block_engine_urls.clone(),
+            None,
+        )?)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Build the configured flash provider.
+///
+/// `beast arb` needs only the adapter: it resolves reserves per mint against
+/// live state rather than holding a startup snapshot.
+pub(crate) fn flash_provider(config: &BeastConfig) -> Result<Arc<dyn FlashProvider>> {
+    match config.flash.provider.as_str() {
+        "kamino" => Ok(Arc::new(KaminoFlashProvider::mainnet())),
+        "solend" => Ok(Arc::new(SolendFlashProvider::mainnet())),
+        "marginfi" => Ok(Arc::new(MarginfiFlashProvider::mainnet())),
+        "jupiter" => Ok(Arc::new(JupiterLendFlashProvider::mainnet())),
+        other => bail!(
+            "flash.provider {other:?} is not verified; supported providers are \"kamino\", \"solend\", \"marginfi\" and \"jupiter\""
+        ),
+    }
+}
+
 /// Resolve the configured flash provider and reserve before the radar starts.
 ///
 /// A flash-enabled configuration that cannot resolve an active reserve fails
@@ -648,7 +676,7 @@ pub(crate) async fn build_flash_runtime(
 /// protocol, so discovery cannot live on the synchronous `FlashProvider`
 /// trait; keeping it here also makes an unknown id a startup error instead of
 /// a silent empty set.
-async fn discover_provider_reserves(
+pub(crate) async fn discover_provider_reserves(
     provider_id: &str,
     rpc: &Arc<RpcClient>,
     mint: Option<Address>,

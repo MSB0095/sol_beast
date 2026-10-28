@@ -11,6 +11,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
+mod sender;
+
+pub use sender::{HeliusSenderClient, SenderRouter};
+
 pub type Result<T> = std::result::Result<T, RpcError>;
 
 #[derive(Debug, Error, Clone)]

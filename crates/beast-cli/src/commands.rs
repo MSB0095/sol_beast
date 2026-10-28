@@ -9,7 +9,8 @@ use beast_core::config::{
 use beast_core::types::{LegPlan, Mode, Opportunity, OutcomeLabel, StrategyKind};
 use beast_dex::catalog::{self, VenueKind, VENUES};
 use beast_dex::decode::{pool_layout, PoolLayout};
-use beast_dex::jupiter::{JupiterClient, QuoteRequest};
+pub(crate) use beast_dex::jupiter::JupiterClient;
+use beast_dex::jupiter::QuoteRequest;
 use beast_dex::Address;
 use beast_exec::{cpmm, RentReclaimer, Wallet, WSOL_MINT};
 use beast_feed::{refresh_pool, WatchedPool};

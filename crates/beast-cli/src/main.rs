@@ -335,6 +335,7 @@ async fn main() -> Result<()> {
                     amounts
                 },
                 scan_only,
+                jupiter: None,
             };
             options.mints.retain(|mint| !mint.trim().is_empty());
             crate::arb::arb(cli.config.as_deref(), real, options).await

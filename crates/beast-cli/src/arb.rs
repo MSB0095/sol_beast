@@ -142,6 +142,8 @@ pub struct ArbOptions {
     pub mints: Vec<String>,
     pub amount_ladder: Vec<u64>,
     pub scan_only: bool,
+    /// Jupiter client used to price the legs that only Jupiter can execute.
+    pub jupiter: Option<Arc<crate::commands::JupiterClient>>,
 }
 
 impl Default for ArbOptions {
@@ -172,6 +174,7 @@ impl Default for ArbOptions {
                 2_000_000_000,
             ],
             scan_only: false,
+            jupiter: None,
         }
     }
 }
@@ -472,6 +475,8 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     )?
     .ok_or_else(|| anyhow::anyhow!("executor could not be built for this config"))?;
     let rent_reclaimer = RentReclaimer::new(rpc.clone(), wallet.clone(), config.rent.clone());
+    let mut options = options;
+    options.jupiter = Some(jupiter.clone());
     let mut state = ArbState::new(config, provider.id(), &reserve);
     state.wallet_lamports = rpc.get_balance(wallet.address()).await?;
     state.note(format!(
@@ -515,7 +520,72 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     .await
 }
 
+/// A cycle whose two legs are executable through Jupiter rather than through
+/// a local venue builder.
+///
+/// Raydium CPMM is the only venue with a local instruction builder, and every
+/// CPMM pair is edge-negative by the two pool fees. Jupiter, however, routes
+/// through *every* venue — AMM v4, CLMM, Whirlpool, Meteora, the prop AMMs —
+/// which is where the depth is. So the legs are priced the way they would
+/// actually execute, and the cycle is real rather than modelled.
+#[derive(Debug, Clone)]
+struct JunctionCycle {
+    pool_in: String,
+    pool_out: String,
+    middle_mint: String,
+    amount: u64,
+    leg1_out: u64,
+    final_out: u64,
+    profit: i128,
+}
+
+/// Price a three-mint triangular cycle: `WSOL -> a -> b -> WSOL`.
+///
+/// A two-leg round trip through the same pair cannot pay: an aggregator always
+/// picks the best route both ways, so the return leg undoes the out leg's edge.
+/// A triangle crosses three *different* pairs, so a mispriced middle pair is
+/// arbitraged by the two outer ones, and no single route can undo it.
+async fn price_triangle(
+    jupiter: &crate::commands::JupiterClient,
+    wsol: Address,
+    a: Address,
+    b: Address,
+    amount: u64,
+    flash_fee: u64,
+    costs: u64,
+) -> Option<JunctionCycle> {
+    let mut request = beast_dex::jupiter::QuoteRequest::new(wsol, a, amount);
+    request.slippage_bps = 1;
+    let first = match jupiter.quote(&request).await.ok()?.amount_out() {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let mut request = beast_dex::jupiter::QuoteRequest::new(a, b, first);
+    request.slippage_bps = 1;
+    let second = match jupiter.quote(&request).await.ok()?.amount_out() {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let mut request = beast_dex::jupiter::QuoteRequest::new(b, wsol, second);
+    request.slippage_bps = 1;
+    let third = match jupiter.quote(&request).await.ok()?.amount_out() {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let profit = (third as i128) - (amount as i128) - (flash_fee as i128) - (costs as i128);
+    Some(JunctionCycle {
+        pool_in: format!("wsol->{}", &a.to_string()[..6]),
+        pool_out: format!("{}->wsol", &b.to_string()[..6]),
+        middle_mint: b.to_string(),
+        amount,
+        leg1_out: first,
+        final_out: third,
+        profit,
+    })
+}
+
 /// One pass over every configured pair. Returns the profitable cycles, best first.
+#[allow(clippy::too_many_arguments)]
 async fn scan_once(
     config: &BeastConfig,
     rpc: &RpcClient,
@@ -528,6 +598,36 @@ async fn scan_once(
     let costs = cycle_costs(config);
     let mut cycles: Vec<CycleLog> = Vec::new();
     let mut pairs = 0usize;
+    // Jupiter-quoted cycles, priced the way they would actually execute. A
+    // triangle crosses three different pairs, so it is the only shape whose
+    // edge an aggregator cannot undo; a same-pair round trip is always
+    // negative by the two route fees.
+    let mut junctions: Vec<JunctionCycle> = Vec::new();
+    if let Some(jupiter) = &options.jupiter {
+        let mints: Vec<Address> = options
+            .mints
+            .iter()
+            .filter_map(|mint| mint.parse().ok())
+            .collect();
+        for (index, a) in mints.iter().enumerate() {
+            for b in mints.iter().skip(index + 1) {
+                for amount in &options.amount_ladder {
+                    if *amount as u128 > reserve.available as u128 {
+                        continue;
+                    }
+                    let fee = provider.flash_fee(reserve, *amount).unwrap_or(0);
+                    if let Some(junction) =
+                        price_triangle(jupiter.as_ref(), wsol(), *a, *b, *amount, fee, costs).await
+                    {
+                        pairs += 1;
+                        if junction.profit > 0 {
+                            junctions.push(junction);
+                        }
+                    }
+                }
+            }
+        }
+    }
     for mint in &options.mints {
         let other = match Address::from_str(mint) {
             Ok(address) => address,
@@ -560,9 +660,26 @@ async fn scan_once(
             }
         }
     }
+    for junction in junctions {
+        cycles.push(CycleLog {
+            pool_in: junction.pool_in,
+            pool_out: junction.pool_out,
+            middle_mint: junction.middle_mint,
+            amount: junction.amount,
+            leg1_out: junction.leg1_out,
+            final_out: junction.final_out,
+            profit: junction.profit,
+            fee_bps_in: 0,
+            fee_bps_out: 0,
+        });
+    }
     cycles.sort_by_key(|cycle| std::cmp::Reverse(cycle.profit));
     cycles.retain(|cycle| cycle.profit as u128 >= options.min_profit_lamports as i128 as u128);
     state.scanned_pairs = pairs;
+    state.note(format!(
+        "priced {} junction pairs through Jupiter",
+        state.scanned_pairs
+    ));
     // The wallet's balance bounds what can be floated for ATA rent and fees.
     let balance = rpc.get_balance(wallet).await.unwrap_or(0);
     state.wallet_lamports = balance;

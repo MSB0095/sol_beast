@@ -670,9 +670,11 @@ version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "beast-dex",
+ "bincode",
  "reqwest",
  "serde",
  "serde_json",
+ "solana-sdk",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",

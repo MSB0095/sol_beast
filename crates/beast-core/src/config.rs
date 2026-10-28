@@ -217,6 +217,17 @@ pub struct RpcConfig {
     pub jupiter_quote_url: String,
     #[serde(default = "default_jupiter_lite")]
     pub jupiter_swap_instructions_url: String,
+    /// Submit transactions through Helius Sender, which forwards them over
+    /// Helius's own validator connections instead of the public gossip
+    /// network. Jito remains the bundle path; Sender only replaces the
+    /// single-transaction send.
+    #[serde(default)]
+    pub helius_sender_enabled: bool,
+    /// One or more Sender endpoints. Empty falls back to the documented
+    /// default region. Repeated submissions of the same signed transaction are
+    /// safe, so every configured region is broadcast to at once.
+    #[serde(default)]
+    pub helius_sender_urls: Vec<String>,
 }
 
 fn default_circuit_seconds() -> u64 {
@@ -254,6 +265,9 @@ impl Default for RpcConfig {
             circuit_breaker_seconds: default_circuit_seconds(),
             jupiter_quote_url: default_jupiter_lite(),
             jupiter_swap_instructions_url: default_jupiter_lite(),
+            // Opt-in: the default gossip path is correct, Sender is faster.
+            helius_sender_enabled: false,
+            helius_sender_urls: Vec::new(),
         }
     }
 }

@@ -101,6 +101,11 @@ pub struct ArbState {
     pub last_scan_ms: u128,
     pub log: Vec<String>,
     pub best: Vec<CycleLog>,
+    /// The best cycle of the most recent pass whatever its sign, so a run that
+    /// finds nothing still reports how close it came.
+    pub best_seen: Option<CycleLog>,
+    /// The closest misses of the most recent pass, worst first.
+    pub closest: Vec<CycleLog>,
     pub running: bool,
     pub paused: bool,
 }
@@ -123,6 +128,8 @@ impl ArbState {
             last_scan_ms: 0,
             log: Vec::new(),
             best: Vec::new(),
+            best_seen: None,
+            closest: Vec::new(),
             running: true,
             paused: false,
         }
@@ -351,6 +358,12 @@ fn evaluate_cycle(
     let b_reserve_in = pool_out.effective(b_in)?;
     let b_reserve_out = pool_out.effective(b_out)?;
 
+    // A leg larger than the pool's own reserve is not a trade the program
+    // accepts, and pricing it produces a meaningless number that swamps the
+    // real results. It is rejected here rather than reported as a huge loss.
+    if (amount as u128) * 10 > (a_reserve_in as u128) * 9 {
+        return None;
+    }
     let leg1_out = quote_exact_in(amount, a_reserve_in, a_reserve_out, pool_in.fee_bps)?;
     if leg1_out == 0 {
         return None;
@@ -617,22 +630,12 @@ async fn scan_once(
                         continue;
                     }
                     let fee = provider.flash_fee(reserve, *amount).unwrap_or(0);
-                    match price_triangle(
-                        jupiter.as_ref(),
-                        wsol(),
-                        *a,
-                        *b,
-                        *amount,
-                        fee,
-                        costs,
-                    )
-                    .await
+                    match price_triangle(jupiter.as_ref(), wsol(), *a, *b, *amount, fee, costs)
+                        .await
                     {
                         Some(junction) => {
                             pairs += 1;
-                            if junction.profit > 0 {
-                                junctions.push(junction);
-                            }
+                            junctions.push(junction);
                         }
                         None => {
                             // An unpriceable triangle is invisible, so the reason
@@ -677,9 +680,10 @@ async fn scan_once(
                     let fee = provider.flash_fee(reserve, *amount).unwrap_or(0);
                     if let Some(cycle) = evaluate_cycle(pool_in, pool_out, *amount, fee, costs) {
                         state.cycles_seen += 1;
-                        if cycle.profit > 0 {
-                            cycles.push(cycle);
-                        }
+                        // Every evaluated cycle is kept: the closest miss is
+                        // only informative if it is reported, and a run that
+                        // filters to winners cannot show how far off it was.
+                        cycles.push(cycle);
                     }
                 }
             }
@@ -699,7 +703,14 @@ async fn scan_once(
         });
     }
     cycles.sort_by_key(|cycle| std::cmp::Reverse(cycle.profit));
-    cycles.retain(|cycle| cycle.profit as u128 >= options.min_profit_lamports as i128 as u128);
+    state.best_seen = cycles.first().cloned();
+    // Comparing an i128 loss cast to u128 passes every negative, which is how
+    // a losing cycle ends up counted as a winner.
+    let floor = options.min_profit_lamports as i128;
+    // Keep the closest results for the report: a run that filters to winners
+    // cannot say how far off it was.
+    state.closest = cycles.iter().rev().take(5).cloned().collect();
+    cycles.retain(|cycle| cycle.profit >= floor);
     state.scanned_pairs = pairs;
     if unpriced > 0 {
         state.note(format!(
@@ -773,6 +784,20 @@ async fn run_text(
                     state.wallet_lamports,
                     state.last_scan_ms
                 );
+                // The best cycle of the pass is printed whatever its sign: a
+                // negative that is nearly zero is a different situation from
+                // one that is deeply negative, and only the number says which.
+                if let Some(cycle) = &state.best_seen {
+                    println!(
+                        "    best: {} -> {} amount {} leg1 {} final {} profit {} lamports",
+                        cycle.pool_in,
+                        cycle.pool_out,
+                        cycle.amount,
+                        cycle.leg1_out,
+                        cycle.final_out,
+                        cycle.profit
+                    );
+                }
                 let cycles = found.as_slice();
                 if !cycles.is_empty() {
                     state.profitable += cycles.len();
@@ -783,10 +808,19 @@ async fn run_text(
                         cycles.len(),
                         cycles[0].profit
                     ));
-                    for cycle in cycles {
+                    // Report the closest results, which are the informative
+                    // ones: the run has already sorted them, so the bad cycles
+                    // are the tail rather than the whole list.
+                    let closest = state.closest.clone();
+                    for cycle in &closest {
                         let message = format!(
-                            "cycle {} -> {} amount {} gross profit {}",
-                            cycle.pool_in, cycle.pool_out, cycle.amount, cycle.profit
+                            "  best: {} -> {} amount {} leg1 {} final {} profit {}",
+                            cycle.pool_in,
+                            cycle.pool_out,
+                            cycle.amount,
+                            cycle.leg1_out,
+                            cycle.final_out,
+                            cycle.profit
                         );
                         state.note(message.clone());
                         println!("{message}");
@@ -1128,6 +1162,23 @@ fn draw(frame: &mut ratatui::Frame<'_>, state: &ArbState) {
         Line::from(format!(
             "attempts {} · rejected {} · last scan {} ms",
             state.attempts, state.rejected, state.last_scan_ms
+        )),
+        Line::from(match &state.best_seen {
+            Some(cycle) => format!(
+                "closest cycle {} -> {} at {} = {} lamports",
+                &cycle.pool_in[..8.min(cycle.pool_in.len())],
+                &cycle.pool_out[..8.min(cycle.pool_out.len())],
+                cycle.amount,
+                cycle.profit
+            ),
+            None => "closest cycle: none priced".to_string(),
+        })
+        .style(Style::default().fg(
+            if state.best_seen.as_ref().is_some_and(|c| c.profit > 0) {
+                Color::Green
+            } else {
+                Color::Gray
+            },
         )),
     ])
     .block(Block::default().borders(Borders::ALL).title("driver"));

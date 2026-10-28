@@ -475,6 +475,13 @@ impl RpcClient {
             "getProgramAccounts" | "getTokenLargestAccounts" => EndpointRole::Discovery,
             "getTokenAccountsByOwner" | "getTokenAccountsByDelegate" => EndpointRole::Rent,
             "getMinimumBalanceForRentExemption" => EndpointRole::Rent,
+            // Batch reads are grouped with execution, not with the feed: a
+            // cycle quotes several accounts at once, and routing them to a
+            // different endpoint than the single reads the same cycle makes
+            // splits the window and halves the effective rate limit. Leaving
+            // them unmapped drops them through to the "any endpoint" pass,
+            // which is the public gossip node, and that node's rate limit is
+            // what produced the sustained getMultipleAccounts failures.
             "sendTransaction"
             | "sendRawTransaction"
             | "simulateTransaction"
@@ -483,7 +490,13 @@ impl RpcClient {
             | "getSignatureStatuses"
             | "getTransaction"
             | "getBalance"
-            | "getAccountInfo" => EndpointRole::Exec,
+            | "getAccountInfo"
+            | "getMultipleAccounts"
+            | "getTokenAccountBalance"
+            | "getTokenSupply"
+            | "getSlot"
+            | "getBlockHeight"
+            | "getEpochInfo" => EndpointRole::Exec,
             _ => EndpointRole::Feed,
         }
     }
@@ -1323,6 +1336,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_read_method_hits_a_real_endpoint_role() {
+        // An unmapped method falls through to the "any endpoint" pass, which is
+        // the public gossip node and its low rate limit. That is not a
+        // legitimate place for a batched read to land.
+        let mapped = [
+            "getAccountInfo",
+            "getMultipleAccounts",
+            "getProgramAccounts",
+            "getTokenAccountBalance",
+            "getTokenSupply",
+            "getTokenAccountsByOwner",
+            "getMinimumBalanceForRentExemption",
+            "getBalance",
+            "getSlot",
+            "getBlockHeight",
+            "getEpochInfo",
+            "getLatestBlockhash",
+            "getSignatureStatuses",
+            "getTransaction",
+            "simulateTransaction",
+            "sendTransaction",
+        ];
+        for method in mapped {
+            let role = RpcClient::role_for_method(method);
+            assert_ne!(
+                role,
+                EndpointRole::Feed,
+                "{method} is unmapped and falls through to the public endpoint"
+            );
+        }
+    }
+
+    #[test]
     fn accepts_successful_jito_simulation() {
         let value = json!({
             "context": {"slot": 1},
@@ -1412,9 +1458,18 @@ mod tests {
             RpcClient::role_for_method("getAccountInfo"),
             EndpointRole::Exec
         );
+        // A batched read belongs with the single reads, not with the feed: an
+        // unmapped method drops through to the "any endpoint" pass, which is
+        // the public gossip node and the source of sustained rate-limit
+        // failures.
         assert_eq!(
             RpcClient::role_for_method("getMultipleAccounts"),
-            EndpointRole::Feed
+            EndpointRole::Exec
+        );
+        assert_eq!(RpcClient::role_for_method("getSlot"), EndpointRole::Exec);
+        assert_eq!(
+            RpcClient::role_for_method("getEpochInfo"),
+            EndpointRole::Exec
         );
     }
 

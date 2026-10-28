@@ -16,7 +16,6 @@
 //! single text report, for logs or a pipe.
 
 use anyhow::{bail, Result};
-use base64::Engine as _;
 use beast_core::config::{self, BeastConfig};
 use beast_core::economics::MIN_JITO_TIP_LAMPORTS;
 use beast_core::types::Mode;
@@ -157,6 +156,17 @@ pub struct ArbOptions {
     pub scan_only: bool,
     /// Jupiter client used to price the legs that only Jupiter can execute.
     pub jupiter: Option<Arc<crate::commands::JupiterClient>>,
+    /// The effective process mode. `Live` only when `--real` was passed, which
+    /// is what lets the executor submit; otherwise cycles are simulated.
+    pub mode: Mode,
+    /// Price three-mint triangles through Jupiter.
+    ///
+    /// Off by default. An aggregator picks the best route for every leg, so its
+    /// three quotes are mutually consistent and the triangle is guaranteed to
+    /// be negative by the route fees; it also costs ~2s per pair at the public
+    /// rate limit, which is the difference between a scan that keeps up and one
+    /// that does not. Local venue pricing is where an edge can exist.
+    pub jupiter_triangles: bool,
 }
 
 impl Default for ArbOptions {
@@ -188,6 +198,8 @@ impl Default for ArbOptions {
             ],
             scan_only: false,
             jupiter: None,
+            mode: Mode::Canary,
+            jupiter_triangles: false,
         }
     }
 }
@@ -545,6 +557,7 @@ fn opportunity_for(
     amount_fee: u64,
     wallet_lamports: u64,
     slot: u64,
+    mode: Mode,
 ) -> Opportunity {
     let middle = Address::from_str(&cycle.middle_mint).unwrap_or_else(|_| wsol());
     let mints = [wsol(), middle, wsol()];
@@ -573,7 +586,7 @@ fn opportunity_for(
     let mut opportunity = Opportunity {
         id: uuid::Uuid::new_v4(),
         strategy: StrategyKind::FlashArb,
-        mode: Mode::Canary,
+        mode,
         slot_detected: slot,
         detected_at_ms: chrono::Utc::now().timestamp_millis(),
         legs,
@@ -630,19 +643,25 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     // and the bundle land exactly as they would in a live run.
     let jupiter = Arc::new(crate::commands::jupiter(config, &loaded.secrets)?);
     let jito = crate::engine::build_jito(config)?;
+    // The executor only submits when it is built in Live mode, so the driver
+    // must not hardcode Canary: doing so silently made every real run
+    // simulation-only, which is exactly the kind of fake capability this
+    // project refuses to ship.
+    let effective = if real { Mode::Live } else { Mode::Canary };
     let executor = crate::engine::build_executor(
         config,
         &rpc,
         &jupiter,
         &jito,
         Some(wallet.clone()),
-        Mode::Canary,
+        effective,
         real,
     )?
     .ok_or_else(|| anyhow::anyhow!("executor could not be built for this config"))?;
     let rent_reclaimer = RentReclaimer::new(rpc.clone(), wallet.clone(), config.rent.clone());
     let mut options = options;
     options.jupiter = Some(jupiter.clone());
+    options.mode = effective;
     let mut state = ArbState::new(config, provider.id(), &reserve);
     state.wallet_lamports = rpc.get_balance(wallet.address()).await?;
     state.note(format!(
@@ -770,7 +789,7 @@ async fn scan_once(
     // negative by the two route fees.
     let mut junctions: Vec<JunctionCycle> = Vec::new();
     let mut unpriced = 0usize;
-    if let Some(jupiter) = &options.jupiter {
+    if let (true, Some(jupiter)) = (options.jupiter_triangles, &options.jupiter) {
         let mints: Vec<Address> = options
             .mints
             .iter()
@@ -817,10 +836,25 @@ async fn scan_once(
                 continue;
             }
         };
-        let Ok(pools) = fetch_pair_pools(rpc, wsol(), other).await else {
-            continue;
+        // A failed fetch used to `continue` silently, which made a rate-limited
+        // or timed-out pair look like a pair with no liquidity. The reason is
+        // recorded so the scan's coverage is auditable.
+        let pools = match fetch_pair_pools(rpc, wsol(), other).await {
+            Ok(pools) => pools,
+            Err(error) => {
+                state.note(format!(
+                    "pair {} fetch failed: {error}",
+                    &mint[..8.min(mint.len())]
+                ));
+                continue;
+            }
         };
         if pools.len() < 2 {
+            state.note(format!(
+                "pair {} has {} local pool(s); a cycle needs two",
+                &mint[..8.min(mint.len())],
+                pools.len()
+            ));
             continue;
         }
         pairs += 1;
@@ -915,6 +949,7 @@ async fn run_text(
             break;
         }
         let started = Instant::now();
+        let logged = state.log.len();
         let cycles = scan_once(
             config,
             rpc.as_ref(),
@@ -927,6 +962,12 @@ async fn run_text(
         .await;
         state.last_scan_ms = started.elapsed().as_millis();
         state.scans += 1;
+        // Coverage notes are part of the report: a pair that could not be
+        // fetched is not a pair without liquidity, and the difference matters.
+        let added = state.log.len().saturating_sub(logged);
+        for message in state.log.iter().take(added).rev() {
+            println!("    {message}");
+        }
         match &cycles {
             Ok(found) => {
                 // A scan-only run has no TUI, so every pass prints its own
@@ -983,6 +1024,7 @@ async fn run_text(
                         state.note(message.clone());
                         println!("{message}");
                     }
+                    let logged = state.log.len();
                     execute_best(
                         config,
                         rpc.as_ref(),
@@ -991,9 +1033,18 @@ async fn run_text(
                         executor.clone(),
                         &_store,
                         &cycles[0],
+                        options.mode,
                         &mut state,
                     )
                     .await;
+                    // Text mode has no status panel, so the attempt's notes are
+                    // printed as they are appended. Without this a failed
+                    // preparation is invisible in exactly the mode used for
+                    // unattended runs.
+                    let added = state.log.len().saturating_sub(logged);
+                    for message in state.log.iter().take(added).rev() {
+                        println!("    {message}");
+                    }
                 }
             }
             Err(error) => {
@@ -1007,7 +1058,15 @@ async fn run_text(
     Ok(())
 }
 
-/// Build, sign and send the winning cycle, and record what actually happened.
+/// Build, simulate, and — only when the executor is live — submit the winning
+/// cycle, then record what the chain actually did with it.
+///
+/// The order matters. Preparation proves the account list decodes and the plan
+/// fits a transaction; simulation proves the *programs* accept it against live
+/// state. Nothing is submitted that simulation rejected, because a rejected
+/// bundle has already paid its base fee for nothing. Submission is gated on the
+/// executor's own `real` flag rather than on a copy of the CLI flag, so a mode
+/// the executor does not believe in cannot spend money.
 #[allow(clippy::too_many_arguments)]
 async fn execute_best(
     config: &BeastConfig,
@@ -1017,17 +1076,26 @@ async fn execute_best(
     executor: Arc<Executor>,
     store: &Store,
     cycle: &CycleLog,
+    mode: Mode,
     state: &mut ArbState,
 ) {
     let attempt_id = format!("arb-{}", uuid::Uuid::new_v4());
     let slot = rpc.get_slot().await.unwrap_or(0);
+    // Read the balance immediately before building: the plan's rent and fee
+    // checks use it, and a stale number is how a marginal wallet gets an
+    // avoidable `InsufficientBalance`.
+    let start_balance = rpc
+        .get_balance(executor.wallet().address())
+        .await
+        .unwrap_or(state.wallet_lamports);
     let opportunity = opportunity_for(
         config,
         cycle,
         provider.id(),
         provider.flash_fee(reserve, cycle.amount).unwrap_or(0),
-        state.wallet_lamports,
+        start_balance,
         slot,
+        mode,
     );
     let _ = store.insert_opportunity(&opportunity);
     let _ = store.insert_attempt(&AttemptRecord {
@@ -1035,7 +1103,7 @@ async fn execute_best(
         opportunity_id: Some(opportunity.id.to_string()),
         ts_ms: chrono::Utc::now().timestamp_millis(),
         strategy: StrategyKind::FlashArb.as_str().to_string(),
-        mode: Mode::Canary.as_str().to_string(),
+        mode: mode.as_str().to_string(),
         status: "submitting".into(),
         bundle_id: None,
         simulated: false,
@@ -1048,49 +1116,215 @@ async fn execute_best(
         error: None,
     });
     state.attempts += 1;
-    match executor
-        .prepare_flash_cycle(&opportunity, provider, reserve)
-        .await
-    {
-        Ok(plan) => {
-            let signature = plan
-                .signatures
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown".into());
-            let _ = store.update_attempt(
-                &attempt_id,
-                &AttemptUpdate {
-                    status: Some("prepared".into()),
-                    signature: Some(signature.clone()),
-                    error: None,
-                    ..AttemptUpdate::default()
-                },
-            );
-            state.note(format!(
-                "{attempt_id} · {} transactions · {} bytes · tip {} lamports",
-                plan.encoded_transactions.len(),
-                plan.encoded_transactions
-                    .first()
-                    .map(|tx| base64::engine::general_purpose::STANDARD
-                        .decode(tx.as_bytes())
-                        .map(|v| v.len())
-                        .unwrap_or(0))
-                    .unwrap_or(0),
-                plan.tip_lamports
-            ));
+
+    // A pool can move between the state read that prices the cycle and the
+    // simulation that accepts it; on a thin pool that is the difference between
+    // a build that repays and one that reverts. Rebuilding is free, submitting
+    // a stale build is not, so the loop rebuilds from fresh state until one
+    // build simulates clean and then submits it immediately.
+    const BUILD_ATTEMPTS: usize = 8;
+    let mut built: Option<(beast_exec::BundlePlan, beast_rpc::SimulationResult)> = None;
+    let mut last_error = String::new();
+    let mut last_logs: Vec<String> = Vec::new();
+    for attempt in 1..=BUILD_ATTEMPTS {
+        let candidate = match executor
+            .prepare_flash_cycle(&opportunity, provider, reserve)
+            .await
+        {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                last_error = error.to_string();
+                // A balance shortfall or a disabled live path will not repair
+                // itself between attempts.
+                if !matches!(error, beast_exec::ExecutionError::Unprofitable(_)) {
+                    last_logs.clear();
+                    break;
+                }
+                if attempt < BUILD_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+                continue;
+            }
+        };
+        match executor.simulate_cycle(&candidate).await {
+            Ok(simulation) if simulation.err.is_none() => {
+                built = Some((candidate, simulation));
+                break;
+            }
+            Ok(simulation) => {
+                last_error = simulation
+                    .err
+                    .as_ref()
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "simulation rejected".into());
+                last_logs = simulation.logs.clone();
+                let _ = store.update_attempt(
+                    &attempt_id,
+                    &AttemptUpdate {
+                        status: Some("resimulating".into()),
+                        simulated: Some(true),
+                        ..AttemptUpdate::default()
+                    },
+                );
+                state.note(format!(
+                    "{attempt_id} attempt {attempt} did not simulate clean; rebuilding"
+                ));
+            }
+            Err(error) => {
+                last_error = error.to_string();
+                last_logs.clear();
+            }
         }
+        if attempt < BUILD_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+    let Some((plan, simulation)) = built else {
+        state.rejected += 1;
+        // The program's own log names the failing instruction and its error
+        // text; without it a custom code is unguessable.
+        for line in last_logs.iter().rev().take(4).rev() {
+            state.note(format!("    sim log: {line}"));
+        }
+        let _ = store.update_attempt(
+            &attempt_id,
+            &AttemptUpdate {
+                status: Some("simulation_rejected".into()),
+                error: Some(last_error.clone()),
+                simulated: Some(true),
+                ..AttemptUpdate::default()
+            },
+        );
+        state.note(format!(
+            "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
+        ));
+        return;
+    };
+    let signature = plan
+        .signatures
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unknown".into());
+    let _ = store.update_attempt(
+        &attempt_id,
+        &AttemptUpdate {
+            status: Some("simulated".into()),
+            signature: Some(signature.clone()),
+            tip_lamports: Some(plan.tip_lamports),
+            simulated: Some(true),
+            ..AttemptUpdate::default()
+        },
+    );
+    state.note(format!(
+        "{attempt_id} · {} transactions · tip {} lamports · borrow {} · simulated clean ({} compute units)",
+        plan.encoded_transactions.len(),
+        plan.tip_lamports,
+        cycle.amount,
+        simulation.units_consumed.unwrap_or(0)
+    ));
+
+    if !executor.config().real {
+        state.note(format!("{attempt_id} simulated only · live disabled"));
+        return;
+    }
+
+    let bundle_id = match executor.submit(&plan).await {
+        Ok(bundle_id) => bundle_id,
         Err(error) => {
             state.rejected += 1;
             let _ = store.update_attempt(
                 &attempt_id,
                 &AttemptUpdate {
-                    status: Some("prepare_failed".into()),
+                    status: Some("submit_failed".into()),
                     error: Some(error.to_string()),
+                    simulated: Some(true),
                     ..AttemptUpdate::default()
                 },
             );
-            state.note(format!("{attempt_id} not executable: {error}"));
+            state.note(format!("{attempt_id} submit failed: {error}"));
+            return;
+        }
+    };
+    let _ = store.update_attempt(
+        &attempt_id,
+        &AttemptUpdate {
+            status: Some("submitted".into()),
+            bundle_id: Some(bundle_id.clone()),
+            simulated: Some(true),
+            ..AttemptUpdate::default()
+        },
+    );
+    state.note(format!("{attempt_id} submitted as {bundle_id}"));
+
+    // Jito lands a bundle at the next leader slot, so a status that is still
+    // missing after a minute means it was dropped rather than delayed. The
+    // wallet delta is the only honest profit number: it already includes the
+    // tip, the base fees and any rent that came back.
+    let mut status = None;
+    for _ in 0..120 {
+        if let Ok(statuses) = rpc.get_signature_statuses(std::slice::from_ref(&signature)).await {
+            if let Some(Some(found)) = statuses.into_iter().next() {
+                status = Some(found);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let final_balance = rpc
+        .get_balance(executor.wallet().address())
+        .await
+        .unwrap_or(start_balance);
+    let realized = final_balance as i64 - start_balance as i64;
+    match status {
+        Some(status) if status.err.is_none() => {
+            state.wallet_lamports = final_balance;
+            let _ = store.update_attempt(
+                &attempt_id,
+                &AttemptUpdate {
+                    status: Some("landed".into()),
+                    bundle_id: Some(bundle_id),
+                    simulated: Some(true),
+                    landed: Some(true),
+                    reverted: Some(false),
+                    realized_net_lamports: Some(realized),
+                    ..AttemptUpdate::default()
+                },
+            );
+            state.note(format!(
+                "{attempt_id} landed at slot {} · net {realized:+} lamports",
+                status.slot
+            ));
+        }
+        Some(status) => {
+            state.wallet_lamports = final_balance;
+            let _ = store.update_attempt(
+                &attempt_id,
+                &AttemptUpdate {
+                    status: Some("reverted".into()),
+                    bundle_id: Some(bundle_id),
+                    simulated: Some(true),
+                    landed: Some(true),
+                    reverted: Some(true),
+                    realized_net_lamports: Some(realized),
+                    error: Some(format!("{:?}", status.err)),
+                    ..AttemptUpdate::default()
+                },
+            );
+            state.note(format!(
+                "{attempt_id} reverted on-chain · net {realized:+} lamports"
+            ));
+        }
+        None => {
+            let _ = store.update_attempt(
+                &attempt_id,
+                &AttemptUpdate {
+                    status: Some("unconfirmed".into()),
+                    bundle_id: Some(bundle_id),
+                    simulated: Some(true),
+                    ..AttemptUpdate::default()
+                },
+            );
+            state.note(format!("{attempt_id} submitted but not confirmed within 60s"));
         }
     }
 }
@@ -1198,6 +1432,7 @@ async fn run_tui(
                             executor.clone(),
                             store.as_ref(),
                             &found[0],
+                            options.mode,
                             &mut working,
                         )
                         .await;

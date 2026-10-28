@@ -85,7 +85,7 @@ impl VenuePool {
     pub fn effective_reserve(&self, side: usize, raw: u64) -> Option<u64> {
         match self {
             Self::Cpmm { pool, .. } => pool.effective_reserve(side, raw).ok(),
-            Self::AmmV4(_) => Some(raw),
+            Self::AmmV4(pool) => Some(pool.effective_reserve(side, raw)),
         }
     }
 

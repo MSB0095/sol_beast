@@ -173,6 +173,12 @@ enum Command {
         /// runtime.real = true; without it the driver stays read-only.
         #[arg(long)]
         real: bool,
+        /// Also price three-mint triangles through Jupiter. Off by default:
+        /// an aggregator's quotes are mutually consistent, so a triangle is
+        /// always negative by its fees, and the public rate limit makes the
+        /// whole scan far slower.
+        #[arg(long)]
+        jupiter_triangles: bool,
     },
     /// Quote a swap through Jupiter.
     Quote {
@@ -340,6 +346,7 @@ async fn main() -> Result<()> {
             mints,
             amounts,
             real,
+            jupiter_triangles,
         } => {
             init_logging(if scan_only { "warn" } else { "error" }, cli.json_logs)?;
             let mut options = crate::arb::ArbOptions {
@@ -364,6 +371,8 @@ async fn main() -> Result<()> {
                 },
                 scan_only,
                 jupiter: None,
+                mode: beast_core::types::Mode::Canary,
+                jupiter_triangles,
             };
             options.mints.retain(|mint| !mint.trim().is_empty());
             crate::arb::arb(cli.config.as_deref(), real, options).await

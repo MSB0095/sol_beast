@@ -2006,6 +2006,10 @@ pub async fn amm_v4_probe(
         }
         println!("minimum     {}", outcome.minimum_out);
         println!(
+            "pnl         coin={} pc={}",
+            outcome.need_take_pnl_coin, outcome.need_take_pnl_pc
+        );
+        println!(
             "result      {}",
             if outcome.ok() {
                 "ok".to_string()

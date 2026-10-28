@@ -1568,20 +1568,30 @@ impl Executor {
                 "leg 1 output is zero".into(),
             ));
         }
-        let leg1_out = quote_a;
+        // A leg whose minimum is the exact quote reverts on any adverse move,
+        // and a pool that turns over a fraction of its reserves per second
+        // moves more than a lamport between the state read and the simulation.
+        // Leg 1 therefore has to deliver at least `leg1_floor`, and leg 2
+        // spends exactly that floor. The surplus, if any, stays in the
+        // intermediate account, which the postamble closes back to the wallet,
+        // so the tolerance costs a few basis points rather than the whole
+        // transaction and never leaves value behind.
+        let leg1_floor = quote_a
+            .saturating_sub(quote_a.saturating_mul(u64::from(self.config.flash_slippage_bps)) / 10_000)
+            .max(1);
         if legs[0].min_out > 0 {
             let decay_floor = legs[0]
                 .min_out
                 .saturating_mul(u64::from(10_000 - self.config.flash_slippage_bps))
                 / 10_000;
-            if quote_a < decay_floor {
+            if leg1_floor < decay_floor {
                 return Err(ExecutionError::Unprofitable(format!(
                     "leg 1 quote {quote_a} is below the radar quote {} by more than {} bps",
                     legs[0].min_out, self.config.flash_slippage_bps
                 )));
             }
         }
-        let quote_b = pool_b.quote(leg1_out, reserve_b_in, reserve_b_out)?;
+        let quote_b = pool_b.quote(leg1_floor, reserve_b_in, reserve_b_out)?;
         if !probe && quote_b <= principal_plus_fee {
             return Err(ExecutionError::Unprofitable(format!(
                 "cycle returns {quote_b}, below principal+fee {principal_plus_fee}"
@@ -1737,12 +1747,13 @@ impl Executor {
             );
         }
 
-        let swap_a = pool_a.swap_instruction(wallet, start_key, middle_key, amount, leg1_out)?;
+        let swap_a =
+            pool_a.swap_instruction(wallet, start_key, middle_key, amount, leg1_floor)?;
         let swap_b = pool_b.swap_instruction(
             wallet,
             middle_key,
             start_key,
-            leg1_out,
+            leg1_floor,
             final_min_out,
         )?;
         let cycle_legs = vec![
@@ -1775,7 +1786,7 @@ impl Executor {
             pool_out = %pool_b.address(),
             amount,
             quote_a,
-            leg1_out,
+            leg1_floor,
             quote_b,
             final_min_out,
             prefund = prefund_lamports,

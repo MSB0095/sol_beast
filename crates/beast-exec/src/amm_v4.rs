@@ -65,6 +65,10 @@ pub const SWAP_FEE_NUMERATOR_OFFSET: usize = 176;
 pub const SWAP_FEE_DENOMINATOR_OFFSET: usize = 184;
 /// `pool_open_time` offset.
 pub const POOL_OPEN_TIME_OFFSET: usize = 224;
+/// Unclaimed protocol PnL on the base side, excluded from pricing.
+pub const NEED_TAKE_PNL_COIN_OFFSET: usize = 192;
+/// Unclaimed protocol PnL on the quote side, excluded from pricing.
+pub const NEED_TAKE_PNL_PC_OFFSET: usize = 200;
 /// `base_vault` offset.
 pub const BASE_VAULT_OFFSET: usize = 336;
 /// `quote_vault` offset.
@@ -110,6 +114,10 @@ pub struct AmmV4Pool {
     pub fee_numerator: u64,
     pub fee_denominator: u64,
     pub open_time: u64,
+    /// Protocol PnL that has been booked but not yet withdrawn. Raydium prices
+    /// against the vault balance minus these amounts.
+    pub need_take_pnl_coin: u64,
+    pub need_take_pnl_pc: u64,
 }
 
 impl AmmV4Pool {
@@ -136,12 +144,31 @@ impl AmmV4Pool {
             fee_numerator: read_u64(data, SWAP_FEE_NUMERATOR_OFFSET)?,
             fee_denominator: read_u64(data, SWAP_FEE_DENOMINATOR_OFFSET)?,
             open_time: read_u64(data, POOL_OPEN_TIME_OFFSET)?,
+            need_take_pnl_coin: read_u64(data, NEED_TAKE_PNL_COIN_OFFSET)?,
+            need_take_pnl_pc: read_u64(data, NEED_TAKE_PNL_PC_OFFSET)?,
         })
     }
 
     /// Index of `mint` in the pool's `[base, quote]` order.
     pub fn mint_index(&self, mint: &Pubkey) -> Option<usize> {
         self.mints.iter().position(|candidate| candidate == mint)
+    }
+
+    /// The reserve the program actually prices against.
+    ///
+    /// Raydium books its protocol share of every swap as `need_take_pnl_*` and
+    /// excludes it from the curve until the creator withdraws it. On a deep
+    /// pool that is a rounding error; on a thin one it dominates. This pool's
+    /// vault holds 12,720,754 lamports while the program prices against
+    /// 9,169,922 — pricing the raw balance overstates the output by 12% and
+    /// turns every detected profit into a reverted swap.
+    pub fn effective_reserve(&self, side: usize, raw: u64) -> u64 {
+        let booked = if side == 0 {
+            self.need_take_pnl_coin
+        } else {
+            self.need_take_pnl_pc
+        };
+        raw.saturating_sub(booked)
     }
 
     /// The vault authority, which owns both vaults.
@@ -380,6 +407,8 @@ pub struct SwapProbe {
     pub reserve_out: u64,
     pub quoted_out: u64,
     pub minimum_out: u64,
+    pub need_take_pnl_coin: u64,
+    pub need_take_pnl_pc: u64,
     /// What the output vault actually gained, read from the simulation's
     /// post-execution snapshot. `None` when the snapshot was unavailable.
     pub actual_out: Option<u64>,
@@ -448,7 +477,12 @@ pub async fn probe_swap(
         reserves[index] = amount;
     }
 
-    let quoted_out = quote_base_in(&pool, amount_in, reserves[0], reserves[1])
+    let quoted_out = quote_base_in(
+        &pool,
+        amount_in,
+        pool.effective_reserve(0, reserves[0]),
+        pool.effective_reserve(1, reserves[1]),
+    )
         .map_err(|error| crate::ExecutionError::Unsupported(error.to_string()))?;
     let minimum_out = quoted_out.saturating_mul(u64::from(10_000 - slippage_bps)) / 10_000;
 
@@ -530,6 +564,8 @@ pub async fn probe_swap(
         reserve_out: reserves[1],
         quoted_out,
         minimum_out,
+        need_take_pnl_coin: pool.need_take_pnl_coin,
+        need_take_pnl_pc: pool.need_take_pnl_pc,
         actual_out,
         quote_error,
         err: simulation.err,
@@ -561,6 +597,8 @@ mod tests {
             fee_numerator: 25,
             fee_denominator: 10_000,
             open_time: 0,
+            need_take_pnl_coin: 0,
+            need_take_pnl_pc: 0,
         }
     }
 
@@ -574,6 +612,38 @@ mod tests {
             pool().authority().unwrap(),
             Pubkey::from_str(SOL_USDC_AUTHORITY).unwrap()
         );
+    }
+
+    #[test]
+    fn effective_reserve_excludes_booked_pnl() {
+        // Mainnet EUvnsWhM...: the base vault holds 12,720,754 lamports, but
+        // the program prices against 9,169,922 because 3,550,832 lamports of
+        // protocol PnL are booked and unclaimed. Those exact numbers appear in
+        // the program's own `ray_log` during a simulated swap, which is how the
+        // omission was found.
+        let mut pool = pool();
+        pool.need_take_pnl_coin = 3_550_832;
+        pool.need_take_pnl_pc = 110_885;
+        assert_eq!(pool.effective_reserve(0, 12_720_754), 9_169_922);
+        assert_eq!(pool.effective_reserve(1, 1_049_744), 938_859);
+    }
+
+    #[test]
+    fn quote_matches_the_mainnet_dust_pool_once_pnl_is_excluded() {
+        // A simulated 5,000,000-lamport swap against EUvnsWhM... returned
+        // exactly 330,749 USDC units. Pricing the raw vault instead quotes
+        // 295,658 — 12% low, which is the error that reverted every cycle.
+        let mut pool = pool();
+        pool.need_take_pnl_coin = 3_550_832;
+        pool.need_take_pnl_pc = 110_885;
+        let out = quote_base_in(
+            &pool,
+            5_000_000,
+            pool.effective_reserve(0, 12_720_754),
+            pool.effective_reserve(1, 1_049_744),
+        )
+        .unwrap();
+        assert_eq!(out, 330_749);
     }
 
     #[test]

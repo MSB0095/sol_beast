@@ -40,6 +40,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
+pub mod amm_v4;
 pub mod compose;
 pub mod cpmm;
 pub mod rent;
@@ -73,6 +74,8 @@ pub enum ExecutionError {
     Jupiter(#[from] beast_dex::DexError),
     #[error("cpmm: {0}")]
     Cpmm(#[from] crate::cpmm::CpmmError),
+    #[error("amm v4: {0}")]
+    AmmV4(#[from] crate::amm_v4::AmmV4Error),
     #[error("transaction: {0}")]
     Transaction(String),
     #[error("live execution is disabled")]

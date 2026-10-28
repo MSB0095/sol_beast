@@ -97,6 +97,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Build and simulate one Raydium AMM v4 swap on mainnet.
+    ///
+    /// Simulation only: nothing is sent. The command wraps a small amount of
+    /// SOL into the wallet's WSOL account and swaps it in the given pool, which
+    /// proves the instruction id, the account list and the quoted minimum
+    /// against the live program.
+    AmmV4Probe {
+        /// AMM v4 pool address.
+        #[arg(long)]
+        pool: String,
+        /// Input amount in lamports (the pool's base mint is the input).
+        #[arg(long, default_value_t = 5_000_000)]
+        amount: u64,
+        /// Slippage tolerance applied to the quoted output, in basis points.
+        #[arg(long, default_value_t = 50)]
+        slippage_bps: u16,
+        #[arg(long)]
+        json: bool,
+    },
     /// Create an address lookup table carrying the flash provider's stable
     /// accounts. Some provider lifecycles (Marginfi + CPMM) exceed the
     /// 1232-byte transaction limit without one. Simulates by default; sends
@@ -287,6 +306,15 @@ async fn main() -> Result<()> {
                 probe,
             )
             .await
+        }
+        Command::AmmV4Probe {
+            pool,
+            amount,
+            slippage_bps,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::amm_v4_probe(cli.config.as_deref(), &pool, amount, slippage_bps, json).await
         }
         Command::FlashAlt {
             real,

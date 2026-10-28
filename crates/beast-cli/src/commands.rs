@@ -1954,3 +1954,75 @@ pub fn report(
     }
     Ok(())
 }
+
+/// Simulate one AMM v4 swap against mainnet and report the program's verdict.
+///
+/// This is the proof step for the AMM v4 builder: if the simulation succeeds,
+/// the instruction id, the account list and the quoted minimum are all valid
+/// against the live program. Nothing is signed into a block and nothing is
+/// spent, so it is safe to run with a tiny wallet.
+pub async fn amm_v4_probe(
+    path: Option<&Path>,
+    pool: &str,
+    amount: u64,
+    slippage_bps: u16,
+    json_output: bool,
+) -> Result<()> {
+    let loaded = load(path, false)?;
+    let config = &loaded.config;
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required for the AMM v4 probe"))?;
+    let rpc = rpc(config)?;
+    let pool_address = Address::from_str(pool).context("pool address")?;
+    let balance = rpc.get_balance(wallet.address()).await?;
+    if balance < amount.saturating_add(3_000_000) {
+        bail!(
+            "wallet holds {balance} lamports; the probe needs the swap amount plus ATA rent and fees"
+        );
+    }
+
+    let outcome =
+        beast_exec::amm_v4::probe_swap(&rpc, &wallet, pool_address, amount, slippage_bps).await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!("pool        {}", outcome.pool);
+        println!(
+            "direction   {} -> {}",
+            outcome.input_mint, outcome.output_mint
+        );
+        println!("amount      {}", outcome.amount_in);
+        println!(
+            "reserves    in={} out={}",
+            outcome.reserve_in, outcome.reserve_out
+        );
+        println!("quoted      {}", outcome.quoted_out);
+        if let Some(actual) = outcome.actual_out {
+            println!("actual      {actual}");
+        }
+        if let Some(error) = outcome.quote_error {
+            println!("quote error {error}");
+        }
+        println!("minimum     {}", outcome.minimum_out);
+        println!(
+            "result      {}",
+            if outcome.ok() {
+                "ok".to_string()
+            } else {
+                format!("{:?}", outcome.err)
+            }
+        );
+        if let Some(units) = outcome.units_consumed {
+            println!("compute     {units}");
+        }
+        for line in &outcome.logs {
+            println!("  log {line}");
+        }
+    }
+
+    if !outcome.ok() {
+        bail!("AMM v4 simulation failed");
+    }
+    Ok(())
+}

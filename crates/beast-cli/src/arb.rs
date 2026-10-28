@@ -18,11 +18,12 @@
 use anyhow::{bail, Result};
 use base64::Engine as _;
 use beast_core::config::{self, BeastConfig};
-use beast_core::economics::{MIN_JITO_TIP_LAMPORTS, SPL_TOKEN_ACCOUNT_RENT_LAMPORTS};
+use beast_core::economics::MIN_JITO_TIP_LAMPORTS;
 use beast_core::types::Mode;
 use beast_core::types::{CostBreakdown, LegPlan, Opportunity, OutcomeLabel, StrategyKind};
 use beast_dex::Address;
-use beast_exec::{cpmm, Executor, RentReclaimer, WSOL_MINT};
+use beast_exec::venue::VenuePool;
+use beast_exec::{amm_v4, cpmm, Executor, RentReclaimer, WSOL_MINT};
 
 /// Base fee charged once per transaction in a composed cycle plus guard.
 const DEFAULT_CYCLE_BASE_FEE: u64 = 5_000;
@@ -81,6 +82,11 @@ pub struct CycleLog {
     pub profit: i128,
     pub fee_bps_in: u16,
     pub fee_bps_out: u16,
+    /// The venue that builds each leg, as a `LegPlan::venue` label. A cycle may
+    /// mix venues; carrying both labels is what lets the executor rebuild
+    /// exactly the pools the scan priced.
+    pub venue_in: String,
+    pub venue_out: String,
 }
 
 /// Everything the TUI and the text report render.
@@ -104,7 +110,7 @@ pub struct ArbState {
     /// The best cycle of the most recent pass whatever its sign, so a run that
     /// finds nothing still reports how close it came.
     pub best_seen: Option<CycleLog>,
-    /// The closest misses of the most recent pass, worst first.
+    /// The closest misses of the most recent pass, best first.
     pub closest: Vec<CycleLog>,
     pub running: bool,
     pub paused: bool,
@@ -195,67 +201,81 @@ fn address(key: &Pubkey) -> Address {
     Address::from_slice(key.as_ref()).expect("32-byte pubkey")
 }
 
-/// Raydium CPMM exact-in with the pool's trade fee, floored the way the program
-/// floors it. The fee is taken from the input before it enters the curve, which
-/// is the order the on-chain program uses.
-fn quote_exact_in(amount_in: u64, reserve_in: u64, reserve_out: u64, fee_bps: u16) -> Option<u64> {
-    if amount_in == 0 || reserve_in == 0 || reserve_out == 0 || fee_bps >= 10_000 {
-        return None;
-    }
-    let in_u128 = amount_in as u128;
-    let rin = reserve_in as u128;
-    let rout = reserve_out as u128;
-    let net_in = in_u128 * (10_000 - fee_bps as u128) / 10_000;
-    if net_in == 0 {
-        return None;
-    }
-    let numerator = net_in.checked_mul(rout)?;
-    let out = numerator / (rin + net_in);
-    u64::try_from(out).ok()
-}
-
-/// Fetch every executable CPMM pool for one mint pair, with its live vault
-/// balances and trade fee from its own config account.
+/// Fetch every executable pool for one mint pair across every venue that has a
+/// local builder, with its live vault balances and its own fee.
 ///
 /// Raydium does not order a pool's two mints, so the pair can be stored either
-/// way round. Both orders are queried and merged, because a pair held only one
-/// way would silently hide half the liquidity.
+/// way round. Both orders are queried for both venues: a pair held only one way
+/// would silently hide half the liquidity, and a search that cannot see a venue
+/// cannot arbitrage it.
 async fn fetch_pair_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
+    let mut views = Vec::new();
+    views.extend(fetch_cpmm_pools(rpc, wsol, other).await?);
+    views.extend(fetch_amm_v4_pools(rpc, wsol, other).await?);
+    Ok(views)
+}
+
+/// Both mint orders for one program, decoded with the given constructor.
+async fn program_accounts_for_pair(
+    rpc: &RpcClient,
+    program: Address,
+    data_size: usize,
+    mint_offsets: (usize, usize),
+    wsol: Address,
+    other: Address,
+) -> Result<Vec<(Address, Vec<u8>)>> {
+    let mut accounts = Vec::new();
+    for (first, second) in [(wsol, other), (other, wsol)] {
+        let entries = rpc
+            .get_program_accounts(
+                program,
+                vec![
+                    serde_json::json!({ "dataSize": data_size }),
+                    serde_json::json!({ "memcmp": { "offset": mint_offsets.0, "bytes": first.to_string() } }),
+                    serde_json::json!({ "memcmp": { "offset": mint_offsets.1, "bytes": second.to_string() } }),
+                ],
+                None,
+            )
+            .await?;
+        accounts.extend(entries.into_iter().map(|(key, account)| (key, account.data)));
+    }
+    let mut seen = std::collections::HashSet::new();
+    accounts.retain(|(key, _)| seen.insert(*key));
+    Ok(accounts)
+}
+
+/// Read token-account amounts for a list of vault keys, in the same order.
+async fn vault_balances(rpc: &RpcClient, keys: &[Address]) -> Vec<u64> {
+    let accounts = rpc.get_multiple_accounts(keys).await.unwrap_or_default();
+    accounts
+        .iter()
+        .map(|entry| {
+            entry
+                .as_ref()
+                .and_then(|account| account.data.get(64..72))
+                .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// Every swappable Raydium CPMM pool for the pair.
+async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
     let program = Address::from_str(cpmm::CPMM_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("cpmm program: {error}"))?;
-    // The pool state stores its two mints at offsets 168 and 200.
-    let mut accounts = rpc
-        .get_program_accounts(
-            program,
-            vec![
-                serde_json::json!({ "dataSize": cpmm::CPMM_POOL_LEN }),
-                serde_json::json!({ "memcmp": { "offset": 168, "bytes": wsol.to_string() } }),
-                serde_json::json!({ "memcmp": { "offset": 200, "bytes": other.to_string() } }),
-            ],
-            None,
-        )
-        .await?;
-    accounts.extend(
-        rpc.get_program_accounts(
-            program,
-            vec![
-                serde_json::json!({ "dataSize": cpmm::CPMM_POOL_LEN }),
-                serde_json::json!({ "memcmp": { "offset": 168, "bytes": other.to_string() } }),
-                serde_json::json!({ "memcmp": { "offset": 200, "bytes": wsol.to_string() } }),
-            ],
-            None,
-        )
-        .await?,
-    );
+    let accounts = program_accounts_for_pair(
+        rpc,
+        program,
+        cpmm::CPMM_POOL_LEN,
+        (168, 200),
+        wsol,
+        other,
+    )
+    .await?;
 
-    // Decode first, so unreachable pools cost one account read rather than two.
     let mut decoded = Vec::with_capacity(accounts.len());
-    let mut seen = std::collections::HashSet::new();
-    for (key, account) in accounts {
-        if !seen.insert(key) {
-            continue;
-        }
-        let Ok(pool) = cpmm::CpmmPool::decode(beast_flash::pubkey(&key), &account.data) else {
+    for (key, data) in accounts {
+        let Ok(pool) = cpmm::CpmmPool::decode(beast_flash::pubkey(&key), &data) else {
             continue;
         };
         if pool.ensure_swappable().is_err() || pool.authority().is_err() {
@@ -275,70 +295,135 @@ async fn fetch_pair_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
         .get_multiple_accounts(&configs)
         .await
         .unwrap_or_default();
-    let fee_bps = |pool: &cpmm::CpmmPool| -> Option<u16> {
-        let index = configs
-            .iter()
-            .position(|candidate| *candidate == address(&pool.amm_config))?;
-        let account = config_data.get(index)?.as_ref()?;
-        // hundredths of a basis point (1e-6) -> basis points
-        Some(
-            u16::try_from(cpmm::decode_trade_fee_rate(&account.data).ok()? / 100)
-                .unwrap_or(u16::MAX),
-        )
-    };
 
     let mut vault_keys: Vec<Address> = Vec::with_capacity(decoded.len() * 2);
     for pool in &decoded {
         vault_keys.push(address(&pool.vaults[0]));
         vault_keys.push(address(&pool.vaults[1]));
     }
-    let vault_data = rpc
-        .get_multiple_accounts(&vault_keys)
-        .await
-        .unwrap_or_default();
-    // SPL token account: mint(32) owner(32) amount(u64 at 64).
-    let balance = |index: usize| -> u64 {
-        vault_data
-            .get(index)
-            .and_then(Option::as_ref)
-            .and_then(|account| account.data.get(64..72))
-            .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
-            .unwrap_or(0)
-    };
+    let balances = vault_balances(rpc, &vault_keys).await;
 
     let mut views = Vec::with_capacity(decoded.len());
     for (index, pool) in decoded.into_iter().enumerate() {
-        let Some(fee_bps) = fee_bps(&pool) else {
+        let Some(config_index) = configs
+            .iter()
+            .position(|candidate| *candidate == address(&pool.amm_config))
+        else {
+            continue;
+        };
+        let Some(account) = config_data.get(config_index).and_then(Option::as_ref) else {
+            continue;
+        };
+        // The program's own 1e-6-unit trade fee, kept exact. Rounding it to
+        // basis points is what made the local quote a few lamports optimistic.
+        let Ok(trade_fee_rate) = cpmm::decode_trade_fee_rate(&account.data) else {
             continue;
         };
         views.push(PoolView {
-            balances: [balance(index * 2), balance(index * 2 + 1)],
-            pool,
-            fee_bps,
+            venue: VenuePool::Cpmm {
+                pool,
+                trade_fee_rate,
+            },
+            balances: [
+                balances.get(index * 2).copied().unwrap_or(0),
+                balances.get(index * 2 + 1).copied().unwrap_or(0),
+            ],
         });
     }
     Ok(views)
 }
 
+/// Every Raydium AMM v4 pool for the pair.
+///
+/// AMM v4 stores its base mint at 400 and its quote mint at 432. The fee comes
+/// out of the pool account itself, so a pool with a non-default fee is priced
+/// with its own number rather than the program's default.
+async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
+    let program = Address::from_str(amm_v4::AMM_V4_PROGRAM_ID)
+        .map_err(|error| anyhow::anyhow!("amm v4 program: {error}"))?;
+    let accounts = program_accounts_for_pair(
+        rpc,
+        program,
+        amm_v4::AMM_V4_POOL_LEN,
+        (
+            amm_v4::BASE_MINT_OFFSET,
+            amm_v4::QUOTE_MINT_OFFSET,
+        ),
+        wsol,
+        other,
+    )
+    .await?;
+
+    let mut decoded = Vec::with_capacity(accounts.len());
+    for (key, data) in accounts {
+        let Ok(pool) = amm_v4::AmmV4Pool::decode(beast_flash::pubkey(&key), &data) else {
+            continue;
+        };
+        if pool.authority().is_err() || pool.fee_denominator == 0 {
+            continue;
+        }
+        decoded.push(pool);
+    }
+
+    let mut vault_keys: Vec<Address> = Vec::with_capacity(decoded.len() * 2);
+    for pool in &decoded {
+        vault_keys.push(address(&pool.vaults[0]));
+        vault_keys.push(address(&pool.vaults[1]));
+    }
+    let balances = vault_balances(rpc, &vault_keys).await;
+
+    Ok(decoded
+        .into_iter()
+        .enumerate()
+        .map(|(index, pool)| PoolView {
+            venue: VenuePool::AmmV4(pool),
+            balances: [
+                balances.get(index * 2).copied().unwrap_or(0),
+                balances.get(index * 2 + 1).copied().unwrap_or(0),
+            ],
+        })
+        .collect())
+}
+
 /// A decoded pool plus everything needed to price a swap against it.
 #[derive(Debug, Clone)]
 struct PoolView {
-    pool: cpmm::CpmmPool,
-    fee_bps: u16,
+    venue: VenuePool,
     balances: [u64; 2],
 }
 
 impl PoolView {
-    /// Effective reserve for a side: vault balance minus booked-but-uncollected
-    /// fees, which is what the swap curve actually uses.
+    /// Effective reserve for a side: what the venue's program actually prices
+    /// against.
     fn effective(&self, side: usize) -> Option<u64> {
         let raw = *self.balances.get(side)?;
-        self.pool.effective_reserve(side, raw).ok()
+        let reserve = self.venue.effective_reserve(side, raw)?;
+        (reserve > 0).then_some(reserve)
+    }
+
+    /// The pool's fee in basis points, for reporting only.
+    fn fee_bps(&self) -> u16 {
+        match &self.venue {
+            VenuePool::Cpmm { trade_fee_rate, .. } => {
+                u16::try_from(trade_fee_rate / 100).unwrap_or(u16::MAX)
+            }
+            VenuePool::AmmV4(pool) => {
+                if pool.fee_denominator == 0 {
+                    return u16::MAX;
+                }
+                u16::try_from(pool.fee_numerator.saturating_mul(10_000) / pool.fee_denominator)
+                    .unwrap_or(u16::MAX)
+            }
+        }
     }
 }
 
 /// Evaluate one ordered two-pool cycle: `pool_in` does WSOL -> X and
 /// `pool_out` does X -> WSOL.
+///
+/// Both legs use their own venue's exact formula, so a CPMM/AMM v4 pair is
+/// priced the way each program will price it rather than through a shared
+/// approximation.
 fn evaluate_cycle(
     pool_in: &PoolView,
     pool_out: &PoolView,
@@ -347,10 +432,10 @@ fn evaluate_cycle(
     costs: u64,
 ) -> Option<CycleLog> {
     let wsol = beast_flash::pubkey(&wsol());
-    let a_in = pool_in.pool.mint_index(&wsol)?;
+    let a_in = pool_in.venue.mint_index(&wsol)?;
     let a_out = 1 - a_in;
     // Leg 2 runs backwards from X to WSOL.
-    let b_out = pool_out.pool.mint_index(&wsol)?;
+    let b_out = pool_out.venue.mint_index(&wsol)?;
     let b_in = 1 - b_out;
 
     let a_reserve_in = pool_in.effective(a_in)?;
@@ -364,7 +449,10 @@ fn evaluate_cycle(
     if (amount as u128) * 10 > (a_reserve_in as u128) * 9 {
         return None;
     }
-    let leg1_out = quote_exact_in(amount, a_reserve_in, a_reserve_out, pool_in.fee_bps)?;
+    let leg1_out = pool_in
+        .venue
+        .quote(amount, a_reserve_in, a_reserve_out)
+        .ok()?;
     if leg1_out == 0 {
         return None;
     }
@@ -372,20 +460,81 @@ fn evaluate_cycle(
     if leg1_out as u128 >= b_reserve_in as u128 {
         return None;
     }
-    let final_out = quote_exact_in(leg1_out, b_reserve_in, b_reserve_out, pool_out.fee_bps)?;
+    let final_out = pool_out
+        .venue
+        .quote(leg1_out, b_reserve_in, b_reserve_out)
+        .ok()?;
     let principal_plus_fee = (amount as i128) + (flash_fee as i128);
     let profit = (final_out as i128) - principal_plus_fee - (costs as i128);
     Some(CycleLog {
-        pool_in: pool_in.pool.address.to_string(),
-        pool_out: pool_out.pool.address.to_string(),
-        middle_mint: pool_in.pool.mints[a_out].to_string(),
+        pool_in: pool_in.venue.address().to_string(),
+        pool_out: pool_out.venue.address().to_string(),
+        middle_mint: pool_in.venue.mints()[a_out].to_string(),
         amount,
         leg1_out,
         final_out,
         profit,
-        fee_bps_in: pool_in.fee_bps,
-        fee_bps_out: pool_out.fee_bps,
+        fee_bps_in: pool_in.fee_bps(),
+        fee_bps_out: pool_out.fee_bps(),
+        venue_in: pool_in.venue.leg_label().to_string(),
+        venue_out: pool_out.venue.leg_label().to_string(),
     })
+}
+
+/// Find the borrow size that maximises this ordered pair's profit.
+///
+/// The ladder this replaces was a compromise: sizes far from the peak either
+/// leave profit on the table or push the second leg so far into its curve that
+/// the cycle reverts. The profit curve is concave, so the peak is findable, and
+/// searching it with the *exact* quote function means the amount chosen is the
+/// one the programs will actually price.
+///
+/// `upper` bounds the search at the flash reserve's available liquidity and at
+/// the first leg's usable depth, because a size the pool cannot absorb has no
+/// profit to measure.
+fn optimize_cycle(
+    pool_in: &PoolView,
+    pool_out: &PoolView,
+    upper: u64,
+    fee_for: impl Fn(u64) -> u64,
+    costs: u64,
+) -> Option<CycleLog> {
+    let upper = usable_upper(pool_in, upper)?;
+    let best = beast_exec::sizing::maximize_profit(upper, |amount| {
+        match evaluate_cycle(pool_in, pool_out, amount, fee_for(amount), costs) {
+            Some(cycle) => cycle.profit,
+            // Not a size the pools can serve. It must not win the search, and
+            // it must also not poison the arithmetic with an overflow.
+            None => i128::MIN / 4,
+        }
+    })?;
+    evaluate_cycle(
+        pool_in,
+        pool_out,
+        best.amount,
+        fee_for(best.amount),
+        costs,
+    )
+}
+
+/// The largest input the first leg can take: the reserve's liquidity, further
+/// capped by the pool's usable depth.
+///
+/// `evaluate_cycle` rejects inputs above 90% of the input reserve, so searching
+/// beyond that spends samples on sizes that can never be returned.
+fn usable_upper(pool_in: &PoolView, liquidity: u64) -> Option<u64> {
+    let wsol = beast_flash::pubkey(&wsol());
+    let side = pool_in.venue.mint_index(&wsol)?;
+    let reserve = pool_in.effective(side)?;
+    // 90% of the input reserve, matching the guard in `evaluate_cycle`.
+    let depth = reserve.saturating_mul(9) / 10;
+    let upper = liquidity.min(depth);
+    (upper > 0).then_some(upper)
+}
+
+/// First few characters of an address, for dense one-line reports.
+fn short(value: &str) -> &str {
+    &value[..8.min(value.len())]
 }
 
 /// Build the cycle the executor will actually run, from a winning pair.
@@ -403,7 +552,11 @@ fn opportunity_for(
         .iter()
         .enumerate()
         .map(|(index, pool)| LegPlan {
-            venue: "raydium_cpmm".into(),
+            venue: if index == 0 {
+                cycle.venue_in.clone()
+            } else {
+                cycle.venue_out.clone()
+            },
             pool: (*pool).clone(),
             mint_in: mints[index].to_string(),
             mint_out: mints[index + 1].to_string(),
@@ -673,18 +826,18 @@ async fn scan_once(
         pairs += 1;
         for (index, pool_in) in pools.iter().enumerate() {
             for pool_out in pools.iter().skip(index + 1).chain(pools.iter().take(index)) {
-                for amount in &options.amount_ladder {
-                    if *amount as u128 > reserve.available as u128 {
-                        continue;
-                    }
-                    let fee = provider.flash_fee(reserve, *amount).unwrap_or(0);
-                    if let Some(cycle) = evaluate_cycle(pool_in, pool_out, *amount, fee, costs) {
-                        state.cycles_seen += 1;
-                        // Every evaluated cycle is kept: the closest miss is
-                        // only informative if it is reported, and a run that
-                        // filters to winners cannot show how far off it was.
-                        cycles.push(cycle);
-                    }
+                // One optimal size per ordered pair, not a fixed ladder. The
+                // fee is amount-dependent on every provider, so it is resolved
+                // inside the search rather than assumed constant.
+                let fee_for = |amount: u64| provider.flash_fee(reserve, amount).unwrap_or(0);
+                if let Some(cycle) =
+                    optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
+                {
+                    state.cycles_seen += 1;
+                    // Every evaluated cycle is kept: the closest miss is only
+                    // informative if it is reported, and a run that filters to
+                    // winners cannot show how far off it was.
+                    cycles.push(cycle);
                 }
             }
         }
@@ -700,6 +853,8 @@ async fn scan_once(
             profit: junction.profit,
             fee_bps_in: 0,
             fee_bps_out: 0,
+            venue_in: "jupiter".into(),
+            venue_out: "jupiter".into(),
         });
     }
     cycles.sort_by_key(|cycle| std::cmp::Reverse(cycle.profit));
@@ -709,7 +864,9 @@ async fn scan_once(
     let floor = options.min_profit_lamports as i128;
     // Keep the closest results for the report: a run that filters to winners
     // cannot say how far off it was.
-    state.closest = cycles.iter().rev().take(5).cloned().collect();
+    // `cycles` is sorted best-first, so the head is the closest miss; the
+    // tail is the worst cycle and says nothing about how near the run was.
+    state.closest = cycles.iter().take(5).cloned().collect();
     cycles.retain(|cycle| cycle.profit >= floor);
     state.scanned_pairs = pairs;
     if unpriced > 0 {
@@ -724,19 +881,18 @@ async fn scan_once(
     Ok(cycles)
 }
 
-/// The lamport costs a cycle must cover: the configured minimum profit, plus a
-/// float for the token accounts it creates and closes again and the tip.
-fn cycle_costs(config: &BeastConfig) -> u64 {
-    let minimum = config
-        .strategy_or_default(StrategyKind::FlashArb.as_str())
-        .min_net_lamports;
-    // The cycle plus the guard are separate transactions, each paying a base
-    // fee; the ATA rent float comes back when the cycle closes its own
-    // accounts, and the tip is paid on top.
-    minimum
-        .saturating_add(2 * DEFAULT_CYCLE_BASE_FEE)
-        .saturating_add(SPL_TOKEN_ACCOUNT_RENT_LAMPORTS)
-        .saturating_add(MIN_JITO_TIP_LAMPORTS)
+/// The lamports a cycle actually spends, excluding anything it gets back.
+///
+/// Only base fees and the Jito tip leave the wallet for good. Token-account
+/// rent is created and closed inside the cycle, so it is capital that comes
+/// straight back: charging it here made the scan reject cycles by ~0.002 SOL,
+/// which is most of a small cycle's profit. The configured minimum profit is
+/// also excluded, because it is applied once as the accept threshold rather
+/// than counted as a cost as well.
+fn cycle_costs(_config: &BeastConfig) -> u64 {
+    // The cycle and the guard are separate transactions, each paying a base
+    // fee, plus the smallest tip a bundle can carry.
+    2 * DEFAULT_CYCLE_BASE_FEE + MIN_JITO_TIP_LAMPORTS
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -784,17 +940,19 @@ async fn run_text(
                     state.wallet_lamports,
                     state.last_scan_ms
                 );
-                // The best cycle of the pass is printed whatever its sign: a
+                // The closest cycles are printed whatever their sign: a
                 // negative that is nearly zero is a different situation from
                 // one that is deeply negative, and only the number says which.
-                if let Some(cycle) = &state.best_seen {
+                // The venue pair is included because a cross-venue cycle and a
+                // Jupiter triangle are different claims about the same number.
+                for (rank, cycle) in state.closest.iter().enumerate() {
                     println!(
-                        "    best: {} -> {} amount {} leg1 {} final {} profit {} lamports",
-                        cycle.pool_in,
-                        cycle.pool_out,
+                        "    #{rank} {} {} -> {} {} amount {} profit {} lamports",
+                        cycle.venue_in,
+                        short(&cycle.pool_in),
+                        cycle.venue_out,
+                        short(&cycle.pool_out),
                         cycle.amount,
-                        cycle.leg1_out,
-                        cycle.final_out,
                         cycle.profit
                     );
                 }

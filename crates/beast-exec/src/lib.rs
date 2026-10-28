@@ -31,6 +31,7 @@ use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signature};
 use solana_sdk::signer::Signer;
+use crate::venue::VenuePool;
 #[allow(deprecated)]
 use solana_sdk::system_instruction;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
@@ -44,6 +45,8 @@ pub mod amm_v4;
 pub mod compose;
 pub mod cpmm;
 pub mod rent;
+pub mod sizing;
+pub mod venue;
 pub use compose::{ComposedCycle, CycleLeg};
 pub use rent::{RentReclaimReport, RentReclaimer, RentScan};
 
@@ -857,34 +860,35 @@ impl Executor {
         let principal_plus_fee = provider.repayment_amount(&reserve, amount)?;
         let is_wsol = start.to_string() == WSOL_MINT;
 
-        // Two-leg WSOL cycles that use Raydium CPMM on both sides are built
-        // locally. Jupiter cannot be constrained to the detected pools and its
-        // public endpoint is rate-limited; a local builder trades exactly the
-        // pools the radar proved. Other cycle shapes keep using Jupiter.
-        if is_wsol && legs.len() == 2 && legs.iter().all(|leg| leg.venue == "raydium_cpmm") {
+        // Two-leg WSOL cycles that both have a local builder are built
+        // locally, and the two legs may be on different venues. Jupiter cannot
+        // be constrained to the detected pools and its public endpoint is
+        // rate-limited; a local builder trades exactly the pools the scan
+        // priced. Other cycle shapes keep using Jupiter.
+        let locally_built = |venue: &str| venue == "raydium_cpmm" || venue == "raydium_amm_v4";
+        if is_wsol && legs.len() == 2 && legs.iter().all(|leg| locally_built(&leg.venue)) {
             let first_pool = parse_mint(&legs[0].pool, "leg 0 pool")?;
             let second_pool = parse_mint(&legs[1].pool, "leg 1 pool")?;
             if first_pool == second_pool {
                 return Err(ExecutionError::Unsupported(
-                    "local CPMM flash cycles require two distinct pools".into(),
+                    "local flash cycles require two distinct pools".into(),
                 ));
             }
             return self
-                .prepare_local_cpmm_flash_cycle(
+                .prepare_local_flash_cycle(
                     opportunity,
                     provider,
                     &reserve,
                     amount,
                     fee,
                     principal_plus_fee,
-                    mints,
                     probe,
                 )
                 .await;
         }
         if probe {
             return Err(ExecutionError::Unsupported(
-                "the mechanics probe supports two-leg WSOL Raydium CPMM cycles only".into(),
+                "the mechanics probe supports two-leg WSOL cycles with local builders only".into(),
             ));
         }
 
@@ -1350,7 +1354,7 @@ impl Executor {
     /// break-even-plus-min-profit amount, so the guard and the on-chain swap
     /// agree on the same threshold.
     #[allow(clippy::too_many_arguments)]
-    async fn prepare_local_cpmm_flash_cycle(
+    async fn prepare_local_flash_cycle(
         &self,
         opportunity: &Opportunity,
         provider: &dyn FlashProvider,
@@ -1358,19 +1362,18 @@ impl Executor {
         amount: u64,
         fee: u64,
         principal_plus_fee: u64,
-        mints: Vec<Address>,
         probe: bool,
     ) -> Result<BundlePlan> {
         let legs = &opportunity.legs;
         if legs.len() != 2 {
             return Err(ExecutionError::Unsupported(
-                "local CPMM execution currently supports exactly two legs".into(),
+                "local execution currently supports exactly two legs".into(),
             ));
         }
         let start = parse_mint(&legs[0].mint_in, "start mint")?;
         if start.to_string() != WSOL_MINT {
             return Err(ExecutionError::Unsupported(
-                "local CPMM execution starts at WSOL only".into(),
+                "local execution starts at WSOL only".into(),
             ));
         }
         let middle = parse_mint(&legs[0].mint_out, "intermediate mint")?;
@@ -1378,90 +1381,69 @@ impl Executor {
             || parse_mint(&legs[1].mint_out, "leg 1 output")? != start
         {
             return Err(ExecutionError::Unsupported(
-                "local CPMM cycle must be WSOL -> intermediate -> WSOL".into(),
+                "local cycle must be WSOL -> intermediate -> WSOL".into(),
             ));
         }
         let start_key = beast_flash::pubkey(&start);
         let middle_key = beast_flash::pubkey(&middle);
 
+        // The venue of each leg is decided by the pool account's owner, not by
+        // a label in the plan: an owner is a fact about the chain, while a
+        // label is a claim that can drift.
         let pool_a = self
-            .local_cpmm_pool(parse_mint(&legs[0].pool, "leg 0 pool")?)
+            .local_pool(parse_mint(&legs[0].pool, "leg 0 pool")?)
             .await?;
         let pool_b = self
-            .local_cpmm_pool(parse_mint(&legs[1].pool, "leg 1 pool")?)
+            .local_pool(parse_mint(&legs[1].pool, "leg 1 pool")?)
             .await?;
-        if pool_a.address == pool_b.address {
+        if pool_a.address() == pool_b.address() {
             return Err(ExecutionError::Unsupported(
-                "local CPMM cycle needs two distinct pools".into(),
+                "local cycle needs two distinct pools".into(),
             ));
         }
 
         let a_in = pool_a.mint_index(&start_key).ok_or_else(|| {
-            ExecutionError::Unsupported(format!("pool {} does not contain {start}", pool_a.address))
+            ExecutionError::Unsupported(format!(
+                "pool {} does not contain {start}",
+                pool_a.address()
+            ))
         })?;
         let a_out = 1 - a_in;
         let b_in = pool_b.mint_index(&middle_key).ok_or_else(|| {
             ExecutionError::Unsupported(format!(
                 "pool {} does not contain {middle}",
-                pool_b.address
+                pool_b.address()
             ))
         })?;
         let b_out = 1 - b_in;
-        if pool_a.mints[a_out] != middle_key || pool_b.mints[b_out] != start_key {
+        if pool_a.mints()[a_out] != middle_key || pool_b.mints()[b_out] != start_key {
             return Err(ExecutionError::Unsupported(
-                "local CPMM pools do not form the requested cycle".into(),
+                "local pools do not form the requested cycle".into(),
             ));
         }
 
-        pool_a.ensure_swappable()?;
-        pool_b.ensure_swappable()?;
-        let now = chrono::Utc::now().timestamp();
         for pool in [&pool_a, &pool_b] {
-            let open = i64::try_from(pool.open_time).map_err(|_| {
-                ExecutionError::Unsupported(format!(
-                    "pool {} has an invalid open time",
-                    pool.address
-                ))
-            })?;
-            if open > now {
+            if !pool.is_classic_spl() {
                 return Err(ExecutionError::Unsupported(format!(
-                    "pool {} does not open until unix {open}",
-                    pool.address
+                    "pool {} uses a non-classic token program; local execution is not verified for it",
+                    pool.address()
                 )));
             }
-            pool.authority()?;
         }
-
-        // Classic SPL Token only. Token-2022 transfer fees would change the
-        // amount that actually reaches the vault, and close_account semantics
-        // differ, so those pools are rejected rather than quoted incorrectly.
         let token_program = spl_token::id();
-        if pool_a.token_programs[a_in] != token_program
-            || pool_b.token_programs[b_out] != token_program
-        {
-            return Err(ExecutionError::Unsupported(
-                "local CPMM execution requires classic SPL Token for WSOL".into(),
-            ));
-        }
-        let middle_program = pool_a.token_programs[a_out];
-        if middle_program != token_program || pool_b.token_programs[b_in] != middle_program {
-            return Err(ExecutionError::Unsupported(
-                "local CPMM execution currently requires classic SPL Token on both legs".into(),
-            ));
-        }
+        let middle_program = token_program;
 
         let wallet = self.wallet.pubkey();
         let wsol_ata = cpmm::associated_token_account(&wallet, &start_key, &token_program);
         let middle_ata = cpmm::associated_token_account(&wallet, &middle_key, &middle_program);
 
+        // One batched read for every vault and both user accounts.
         let mut keys: Vec<Address> = Vec::new();
         for key in [
-            beast_flash::address(&pool_a.amm_config),
-            beast_flash::address(&pool_b.amm_config),
-            beast_flash::address(&pool_a.vaults[a_in]),
-            beast_flash::address(&pool_a.vaults[a_out]),
-            beast_flash::address(&pool_b.vaults[b_in]),
-            beast_flash::address(&pool_b.vaults[b_out]),
+            beast_flash::address(&pool_a.vaults()[a_in]),
+            beast_flash::address(&pool_a.vaults()[a_out]),
+            beast_flash::address(&pool_b.vaults()[b_in]),
+            beast_flash::address(&pool_b.vaults()[b_out]),
             beast_flash::address(&wsol_ata),
             beast_flash::address(&middle_ata),
         ] {
@@ -1476,76 +1458,96 @@ impl Executor {
                 .and_then(|index| accounts.get(index))
                 .and_then(|account| account.as_ref())
         };
-        let config_a = account(&beast_flash::address(&pool_a.amm_config)).ok_or_else(|| {
-            ExecutionError::Unsupported(format!("CPMM config {} not found", pool_a.amm_config))
-        })?;
-        let config_b = account(&beast_flash::address(&pool_b.amm_config)).ok_or_else(|| {
-            ExecutionError::Unsupported(format!("CPMM config {} not found", pool_b.amm_config))
-        })?;
-        let fee_a = cpmm::decode_trade_fee_rate(&config_a.data)?;
-        let fee_b = cpmm::decode_trade_fee_rate(&config_b.data)?;
 
-        let vault_amount = |pool: &cpmm::CpmmPool,
+        let vault_amount = |pool: &VenuePool,
                             index: usize,
                             expected: &Pubkey,
                             program: &Pubkey|
          -> Result<u64> {
-            let address = beast_flash::address(&pool.vaults[index]);
+            let address = beast_flash::address(&pool.vaults()[index]);
             let account = account(&address).ok_or_else(|| {
-                ExecutionError::Unsupported(format!("CPMM vault {address} not found"))
+                ExecutionError::Unsupported(format!("vault {address} not found"))
             })?;
             if account.owner != beast_flash::address(program) {
                 return Err(ExecutionError::Unsupported(format!(
-                    "CPMM vault {address} is not owned by {program}"
+                    "vault {address} is not owned by {program}"
                 )));
             }
             let (mint, amount) = cpmm::token_account_mint_and_amount(&account.data)?;
             if mint != *expected {
                 return Err(ExecutionError::Unsupported(format!(
-                    "CPMM vault {address} holds {mint}, expected {expected}"
+                    "vault {address} holds {mint}, expected {expected}"
                 )));
             }
             Ok(amount)
         };
-        // The program quotes against vault balances minus already-booked
-        // protocol/fund/creator fees. Gross vault balances overstate the output
-        // and made the second leg revert with ExceededSlippage.
-        let reserve_a_in = pool_a.effective_reserve(
-            a_in,
-            vault_amount(
-                &pool_a,
+        // The program quotes against vault balances minus anything the venue
+        // has already booked but not yet collected. Gross balances overstate
+        // the output and made the second leg revert with ExceededSlippage.
+        let reserve_a_in = pool_a
+            .effective_reserve(
                 a_in,
-                &pool_a.mints[a_in],
-                &pool_a.token_programs[a_in],
-            )?,
-        )?;
-        let reserve_a_out = pool_a.effective_reserve(
-            a_out,
-            vault_amount(
-                &pool_a,
+                vault_amount(
+                    &pool_a,
+                    a_in,
+                    &pool_a.mints()[a_in],
+                    &pool_a.token_program(a_in),
+                )?,
+            )
+            .ok_or_else(|| {
+                ExecutionError::Unsupported(format!(
+                    "pool {} has no effective reserve on side {a_in}",
+                    pool_a.address()
+                ))
+            })?;
+        let reserve_a_out = pool_a
+            .effective_reserve(
                 a_out,
-                &pool_a.mints[a_out],
-                &pool_a.token_programs[a_out],
-            )?,
-        )?;
-        let reserve_b_in = pool_b.effective_reserve(
-            b_in,
-            vault_amount(
-                &pool_b,
+                vault_amount(
+                    &pool_a,
+                    a_out,
+                    &pool_a.mints()[a_out],
+                    &pool_a.token_program(a_out),
+                )?,
+            )
+            .ok_or_else(|| {
+                ExecutionError::Unsupported(format!(
+                    "pool {} has no effective reserve on side {a_out}",
+                    pool_a.address()
+                ))
+            })?;
+        let reserve_b_in = pool_b
+            .effective_reserve(
                 b_in,
-                &pool_b.mints[b_in],
-                &pool_b.token_programs[b_in],
-            )?,
-        )?;
-        let reserve_b_out = pool_b.effective_reserve(
-            b_out,
-            vault_amount(
-                &pool_b,
+                vault_amount(
+                    &pool_b,
+                    b_in,
+                    &pool_b.mints()[b_in],
+                    &pool_b.token_program(b_in),
+                )?,
+            )
+            .ok_or_else(|| {
+                ExecutionError::Unsupported(format!(
+                    "pool {} has no effective reserve on side {b_in}",
+                    pool_b.address()
+                ))
+            })?;
+        let reserve_b_out = pool_b
+            .effective_reserve(
                 b_out,
-                &pool_b.mints[b_out],
-                &pool_b.token_programs[b_out],
-            )?,
-        )?;
+                vault_amount(
+                    &pool_b,
+                    b_out,
+                    &pool_b.mints()[b_out],
+                    &pool_b.token_program(b_out),
+                )?,
+            )
+            .ok_or_else(|| {
+                ExecutionError::Unsupported(format!(
+                    "pool {} has no effective reserve on side {b_out}",
+                    pool_b.address()
+                ))
+            })?;
 
         let wsol_exists = account(&beast_flash::address(&wsol_ata)).is_some();
         let middle_exists = account(&beast_flash::address(&middle_ata)).is_some();
@@ -1556,22 +1558,17 @@ impl Executor {
             0
         };
 
-        // Local CPMM cycles are exact-in: leg 1 must return exactly the quoted
+        // Local cycles are exact-in: leg 1 must return exactly the quoted
         // amount, which leg 2 then swaps in full. A haircut here would either
-        // strand the difference in the intermediate ATA (if leg 2 swaps only
-        // the haircut) or revert on any adverse move (if leg 2 swaps the full
-        // quote). Green-or-revert is the honest behaviour: a moved pool makes
-        // leg 1 revert and the atomic bundle never lands.
-        let quote_a = cpmm::quote_base_input(amount, reserve_a_in, reserve_a_out, fee_a)?;
+        // strand the difference in the intermediate ATA or revert on any
+        // adverse move. Green-or-revert is the honest behaviour.
+        let quote_a = pool_a.quote(amount, reserve_a_in, reserve_a_out)?;
         if quote_a == 0 {
             return Err(ExecutionError::Unprofitable(
-                "CPMM leg 1 output is zero".into(),
+                "leg 1 output is zero".into(),
             ));
         }
         let leg1_out = quote_a;
-        // Reject a cycle whose fresh quote has decayed materially since the
-        // radar saw it. The executor must not chase a stale edge; the swap
-        // itself stays exact-in.
         if legs[0].min_out > 0 {
             let decay_floor = legs[0]
                 .min_out
@@ -1579,15 +1576,15 @@ impl Executor {
                 / 10_000;
             if quote_a < decay_floor {
                 return Err(ExecutionError::Unprofitable(format!(
-                    "CPMM leg 1 quote {quote_a} is below the radar quote {} by more than {} bps",
+                    "leg 1 quote {quote_a} is below the radar quote {} by more than {} bps",
                     legs[0].min_out, self.config.flash_slippage_bps
                 )));
             }
         }
-        let quote_b = cpmm::quote_base_input(leg1_out, reserve_b_in, reserve_b_out, fee_b)?;
+        let quote_b = pool_b.quote(leg1_out, reserve_b_in, reserve_b_out)?;
         if !probe && quote_b <= principal_plus_fee {
             return Err(ExecutionError::Unprofitable(format!(
-                "CPMM cycle returns {quote_b}, below principal+fee {principal_plus_fee}"
+                "cycle returns {quote_b}, below principal+fee {principal_plus_fee}"
             )));
         }
 
@@ -1603,22 +1600,21 @@ impl Executor {
         } else {
             self.config.ata_rent_lamports
         };
+        // Only the base fees are spent. The intermediate ATA's rent is created
+        // and closed inside the same transaction, so it is a float requirement
+        // rather than a cost — charging it as a cost hides real cycles by about
+        // 0.002 SOL, which is most of a small cycle's profit.
         let fees_lamports = self
             .config
             .transaction_fee_lamports
-            .saturating_mul(transaction_count)
-            .checked_add(committed_rent)
-            .ok_or_else(|| ExecutionError::Config("CPMM cost overflow".into()))?;
-        // In probe mode the final minimum is relaxed by 1% and the wallet
-        // prefunds the shortfall, so the on-chain instructions execute even
-        // though the cycle loses money by construction.
+            .saturating_mul(transaction_count);
         let (final_min_out, prefund_lamports, tip_lamports) = if probe {
             let final_min_out = quote_b.saturating_sub(quote_b / 100).max(1);
             let shortfall = principal_plus_fee.saturating_sub(final_min_out);
             let buffer = amount / 100 + 50_000;
             let prefund = shortfall
                 .checked_add(buffer)
-                .ok_or_else(|| ExecutionError::Config("CPMM probe prefund overflow".into()))?;
+                .ok_or_else(|| ExecutionError::Config("local probe prefund overflow".into()))?;
             (
                 final_min_out,
                 prefund,
@@ -1631,10 +1627,10 @@ impl Executor {
                 .checked_add(self.config.min_profit_lamports)
                 .and_then(|value| value.checked_add(fees_lamports))
                 .and_then(|value| value.checked_add(tip_lamports))
-                .ok_or_else(|| ExecutionError::Config("CPMM required out overflow".into()))?;
+                .ok_or_else(|| ExecutionError::Config("local required out overflow".into()))?;
             if quote_b < required_out {
                 return Err(ExecutionError::Unprofitable(format!(
-                    "CPMM cycle returns {quote_b}, below required {required_out} \
+                    "cycle returns {quote_b}, below required {required_out} \
                      (principal+fee {principal_plus_fee}, costs {fees_lamports}, \
                      tip {tip_lamports}, min profit {})",
                     self.config.min_profit_lamports
@@ -1650,12 +1646,13 @@ impl Executor {
             .checked_add(fees_lamports)
             .and_then(|value| value.checked_add(tip_lamports))
             .and_then(|value| value.checked_add(temporary_rent))
+            .and_then(|value| value.checked_add(committed_rent))
             .and_then(|value| value.checked_add(lifecycle_rent))
             .and_then(|value| value.checked_add(prefund_lamports))
-            .ok_or_else(|| ExecutionError::Config("CPMM balance requirement overflow".into()))?;
+            .ok_or_else(|| ExecutionError::Config("local balance requirement overflow".into()))?;
         if start_balance < required_balance {
             return Err(ExecutionError::InsufficientBalance(format!(
-                "CPMM flash cycle needs {required_balance} lamports for fees/tip/rent/prefund/floor; \
+                "flash cycle needs {required_balance} lamports for fees/tip/rent/prefund/floor; \
                  wallet has {start_balance}"
             )));
         }
@@ -1681,9 +1678,6 @@ impl Executor {
             ),
         );
         if prefund_lamports > 0 {
-            // Probe-only: fund the expected shortfall so repayment succeeds.
-            // The transfer lands in the WSOL ATA; sync_native turns it into
-            // wrapped SOL that the same transaction can repay from.
             preamble.push(system_instruction::transfer(
                 &wallet,
                 &wsol_ata,
@@ -1697,9 +1691,9 @@ impl Executor {
                 )?,
             );
         }
-        preamble.extend(provider.pre_borrow(reserve, wallet, wsol_ata, amount, &lifecycle)?);
+
         let borrow_index = u8::try_from(preamble.len()).map_err(|_| {
-            ExecutionError::Config("flash preamble exceeds 255 instructions".into())
+            ExecutionError::Config("preamble is too long to encode as a borrow index".into())
         })?;
         let borrow = provider.borrow_with_lifecycle(
             reserve,
@@ -1726,12 +1720,25 @@ impl Executor {
                     ExecutionError::Transaction(format!("close WSOL account: {error}"))
                 })?,
         );
+        // The intermediate account is empty once leg 2 has spent it back into
+        // WSOL, so closing it returns its rent instead of stranding it.
+        if !middle_exists {
+            postamble.push(
+                spl_token::instruction::close_account(
+                    &token_program,
+                    &middle_ata,
+                    &wallet,
+                    &wallet,
+                    &[],
+                )
+                .map_err(|error| {
+                    ExecutionError::Transaction(format!("close intermediate account: {error}"))
+                })?,
+            );
+        }
 
-        let swap_a = cpmm::swap_base_input_instruction(
-            &pool_a, wallet, start_key, middle_key, amount, leg1_out,
-        )?;
-        let swap_b = cpmm::swap_base_input_instruction(
-            &pool_b,
+        let swap_a = pool_a.swap_instruction(wallet, start_key, middle_key, amount, leg1_out)?;
+        let swap_b = pool_b.swap_instruction(
             wallet,
             middle_key,
             start_key,
@@ -1740,11 +1747,11 @@ impl Executor {
         )?;
         let cycle_legs = vec![
             compose::CycleLeg {
-                instructions: cpmm::as_swap_instructions(swap_a)?,
+                instructions: pool_a.as_swap_instructions(swap_a)?,
                 is_final: false,
             },
             compose::CycleLeg {
-                instructions: cpmm::as_swap_instructions(swap_b)?,
+                instructions: pool_b.as_swap_instructions(swap_b)?,
                 is_final: true,
             },
         ];
@@ -1762,8 +1769,10 @@ impl Executor {
         self.attach_flash_lookup_table(&mut composed);
 
         tracing::info!(
-            pool_in = %pool_a.address,
-            pool_out = %pool_b.address,
+            venue_in = pool_a.label(),
+            venue_out = pool_b.label(),
+            pool_in = %pool_a.address(),
+            pool_out = %pool_b.address(),
             amount,
             quote_a,
             leg1_out,
@@ -1771,14 +1780,14 @@ impl Executor {
             final_min_out,
             prefund = prefund_lamports,
             probe,
-            "prepared local CPMM flash cycle"
+            "prepared local flash cycle"
         );
 
         self.finish_flash_plan(
             opportunity,
             provider,
             reserve,
-            mints,
+            mints_from_legs(&opportunity.legs)?,
             amount,
             fee,
             principal_plus_fee,
@@ -1793,15 +1802,63 @@ impl Executor {
         .await
     }
 
-    async fn local_cpmm_pool(&self, address: Address) -> Result<cpmm::CpmmPool> {
+    /// Fetch and decode one local pool, choosing the venue from its owner.
+    async fn local_pool(&self, address: Address) -> Result<VenuePool> {
         let account = self.rpc.get_account_info(address).await?.ok_or_else(|| {
-            ExecutionError::Unsupported(format!("CPMM pool {address} not found on-chain"))
+            ExecutionError::Unsupported(format!("pool {address} not found on-chain"))
         })?;
-        Ok(cpmm::CpmmPool::decode(
-            beast_flash::pubkey(&address),
-            &account.account.data,
-        )?)
+        let owner = account.account.owner;
+        let cpmm_program = beast_flash::address(
+            &Pubkey::from_str(cpmm::CPMM_PROGRAM_ID)
+                .map_err(|error| ExecutionError::Config(error.to_string()))?,
+        );
+        let amm_program = beast_flash::address(
+            &Pubkey::from_str(crate::amm_v4::AMM_V4_PROGRAM_ID)
+                .map_err(|error| ExecutionError::Config(error.to_string()))?,
+        );
+        if owner == cpmm_program {
+            let pool = cpmm::CpmmPool::decode(beast_flash::pubkey(&address), &account.account.data)?;
+            pool.ensure_swappable()?;
+            pool.authority()?;
+            let config = self
+                .rpc
+                .get_account_info(beast_flash::address(&pool.amm_config))
+                .await?
+                .ok_or_else(|| {
+                    ExecutionError::Unsupported(format!(
+                        "CPMM config {} not found",
+                        pool.amm_config
+                    ))
+                })?;
+            let trade_fee_rate = cpmm::decode_trade_fee_rate(&config.account.data)?;
+            return Ok(VenuePool::Cpmm {
+                pool,
+                trade_fee_rate,
+            });
+        }
+        if owner == amm_program {
+            let pool =
+                crate::amm_v4::AmmV4Pool::decode(beast_flash::pubkey(&address), &account.account.data)?;
+            pool.authority()?;
+            if pool.fee_denominator == 0 {
+                return Err(ExecutionError::Unsupported(format!(
+                    "AMM v4 pool {address} has a zero fee denominator"
+                )));
+            }
+            let now = chrono::Utc::now().timestamp();
+            if i64::try_from(pool.open_time).map(|open| open > now).unwrap_or(false) {
+                return Err(ExecutionError::Unsupported(format!(
+                    "AMM v4 pool {address} does not open until unix {}",
+                    pool.open_time
+                )));
+            }
+            return Ok(VenuePool::AmmV4(pool));
+        }
+        Err(ExecutionError::Unsupported(format!(
+            "pool {address} is owned by {owner}, which has no local builder"
+        )))
     }
+
 
     /// Re-quote one leg with the tightest slippage that still enforces
     /// `required_min_out`, retrying because Jupiter's rounding is not
@@ -2106,6 +2163,20 @@ async fn resolve_lookup_tables(
 fn parse_hash(value: &str) -> Result<Hash> {
     Hash::from_str(value)
         .map_err(|error| ExecutionError::Transaction(format!("blockhash: {error}")))
+}
+
+/// The mint path of a closed cycle, checked for continuity.
+fn mints_from_legs(legs: &[beast_core::types::LegPlan]) -> Result<Vec<Address>> {
+    let mut mints = Vec::with_capacity(legs.len() + 1);
+    for (index, leg) in legs.iter().enumerate() {
+        let mint_in = parse_mint(&leg.mint_in, "leg input")?;
+        let mint_out = parse_mint(&leg.mint_out, "leg output")?;
+        mints.push(mint_in);
+        if index + 1 == legs.len() {
+            mints.push(mint_out);
+        }
+    }
+    Ok(mints)
 }
 
 fn parse_mint(value: &str, label: &str) -> Result<Address> {

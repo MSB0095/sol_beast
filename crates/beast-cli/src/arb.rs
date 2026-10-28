@@ -603,6 +603,7 @@ async fn scan_once(
     // edge an aggregator cannot undo; a same-pair round trip is always
     // negative by the two route fees.
     let mut junctions: Vec<JunctionCycle> = Vec::new();
+    let mut unpriced = 0usize;
     if let Some(jupiter) = &options.jupiter {
         let mints: Vec<Address> = options
             .mints
@@ -616,12 +617,36 @@ async fn scan_once(
                         continue;
                     }
                     let fee = provider.flash_fee(reserve, *amount).unwrap_or(0);
-                    if let Some(junction) =
-                        price_triangle(jupiter.as_ref(), wsol(), *a, *b, *amount, fee, costs).await
+                    match price_triangle(
+                        jupiter.as_ref(),
+                        wsol(),
+                        *a,
+                        *b,
+                        *amount,
+                        fee,
+                        costs,
+                    )
+                    .await
                     {
-                        pairs += 1;
-                        if junction.profit > 0 {
-                            junctions.push(junction);
+                        Some(junction) => {
+                            pairs += 1;
+                            if junction.profit > 0 {
+                                junctions.push(junction);
+                            }
+                        }
+                        None => {
+                            // An unpriceable triangle is invisible, so the reason
+                            // is recorded: a rate-limited endpoint and an
+                            // unroutable mint need different responses.
+                            unpriced += 1;
+                            if unpriced <= 3 {
+                                state.note(format!(
+                                    "triangle {}/{} at {} unpriceable",
+                                    &a.to_string()[..6],
+                                    &b.to_string()[..6],
+                                    amount
+                                ));
+                            }
                         }
                     }
                 }
@@ -676,10 +701,11 @@ async fn scan_once(
     cycles.sort_by_key(|cycle| std::cmp::Reverse(cycle.profit));
     cycles.retain(|cycle| cycle.profit as u128 >= options.min_profit_lamports as i128 as u128);
     state.scanned_pairs = pairs;
-    state.note(format!(
-        "priced {} junction pairs through Jupiter",
-        state.scanned_pairs
-    ));
+    if unpriced > 0 {
+        state.note(format!(
+            "{unpriced} triangles could not be priced; a Jupiter API key removes the 0.5 req/s ceiling"
+        ));
+    }
     // The wallet's balance bounds what can be floated for ATA rent and fees.
     let balance = rpc.get_balance(wallet).await.unwrap_or(0);
     state.wallet_lamports = balance;

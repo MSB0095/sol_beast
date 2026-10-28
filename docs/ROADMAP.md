@@ -116,6 +116,29 @@ profitable trade.
 4. **Rent hygiene.** The reclaimer is wired into `beast arb`; confirm empty
    token accounts do not accumulate across many passes.
 
+
+## What actually blocks profit right now (measured, not assumed)
+
+I ran the driver against mainnet continuously. These are the numbers, and the
+one input that changes them.
+
+| Search shape | Quotes priced | Profitable | Why |
+|---|---|---|---|
+| Two-pool CPMM cycles, SOL/USDC + SOL/USDT + SOL/JUP, sizes 0.1–14 SOL | 40,000+ | 0 | A two-pool cycle pays two pool fees and needs a gap between them larger than that; both pools are same-curve and same-bot-watched. |
+| Same-pair Jupiter round trips | ~2,000 | 0 | Structurally zero: an aggregator picks the best route each way, so the return leg undoes the out leg's edge. |
+| Triangular `WSOL -> a -> b -> WSOL` through Jupiter | 4–5 of 15 pairs per pass | 0 | The right shape — it crosses three different pairs so no single route can undo it — but only 4–5 pairs price per 45-second pass. |
+
+The blocker on the triangles is **Jupiter's keyless endpoint, which allows 0.5
+requests per second**. Each triangle needs three quotes, so a pass costs ~100
+seconds of quoting and a sixth of the search space never gets priced at all.
+An unpriceable triangle is now counted and logged per pass rather than
+silently skipped, so a rate-limit ceiling is visible instead of looking like a
+clean negative.
+
+**A Jupiter API key raises that from 0.5 to roughly 30 requests per second —
+a 60× increase in search rate.** That is the single highest-leverage input, and
+nothing else about the scan is rate-limited.
+
 ## What I will not do
 
 Ship a builder whose account list I have not verified. Every one of the venue

@@ -170,6 +170,9 @@ pub struct ArbOptions {
     /// One scan, then build and simulate the best cycle and print the result.
     /// Never submits; `arb::arb` also forces a non-live executor in this mode.
     pub explain: bool,
+    /// How long a discovered pool set stays valid. Balances and tick arrays are
+    /// always read fresh; only the (nearly static) list of pools is reused.
+    pub discovery_ttl: std::time::Duration,
 }
 
 impl Default for ArbOptions {
@@ -204,6 +207,7 @@ impl Default for ArbOptions {
             mode: Mode::Canary,
             jupiter_triangles: false,
             explain: false,
+            discovery_ttl: std::time::Duration::from_secs(300),
         }
     }
 }
@@ -224,12 +228,168 @@ fn address(key: &Pubkey) -> Address {
 /// way round. Both orders are queried for both venues: a pair held only one way
 /// would silently hide half the liquidity, and a search that cannot see a venue
 /// cannot arbitrage it.
-async fn fetch_pair_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
-    let mut views = Vec::new();
-    views.extend(fetch_cpmm_pools(rpc, wsol, other).await?);
-    views.extend(fetch_amm_v4_pools(rpc, wsol, other).await?);
-    views.extend(fetch_whirlpool_pools(rpc, wsol, other).await?);
-    Ok(views)
+/// Every pool for the pair, across every venue this engine prices itself.
+///
+/// Discovery is separate from pricing because the two have completely
+/// different lifetimes: the set of pools for a mint pair changes over minutes,
+/// while the balances and tick arrays inside those pools change every block.
+/// Splitting them is what lets a scan reuse the expensive part.
+async fn discover_pair_pools(
+    rpc: &RpcClient,
+    wsol: Address,
+    other: Address,
+) -> Result<Vec<PoolShape>> {
+    // The three venues are independent, so their round trips overlap. Running
+    // them in sequence made each pair wait for the slowest one three times
+    // over, which is most of a scan's wall time on a free-tier endpoint.
+    let (cpmm, amm_v4, whirlpool) = tokio::join!(
+        fetch_cpmm_pools(rpc, wsol, other),
+        fetch_amm_v4_pools(rpc, wsol, other),
+        fetch_whirlpool_pools(rpc, wsol, other),
+    );
+    let mut shapes = Vec::new();
+    // One venue failing is a coverage gap, not a reason to drop the pair: the
+    // other venues' pools are still real and still quotable.
+    let mut errors = Vec::new();
+    for result in [cpmm, amm_v4, whirlpool] {
+        match result {
+            Ok(pools) => shapes.extend(pools),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if shapes.is_empty() {
+        if let Some(error) = errors.into_iter().next() {
+            return Err(anyhow::anyhow!("{error}"));
+        }
+    }
+    Ok(shapes)
+}
+
+/// A discovered pool, with only the parts that do not move every block.
+///
+/// Balances and Whirlpool tick arrays are deliberately absent: a cached copy of
+/// either would be a stale price, and a stale price is indistinguishable from
+/// an edge right up until the transaction reverts.
+#[derive(Debug, Clone)]
+enum PoolShape {
+    Cpmm {
+        pool: cpmm::CpmmPool,
+        trade_fee_rate: u64,
+    },
+    AmmV4(amm_v4::AmmV4Pool),
+    Whirlpool(beast_exec::whirlpool::WhirlpoolPool),
+}
+
+impl PoolShape {
+    fn vaults(&self) -> [Address; 2] {
+        let vaults = match self {
+            Self::Cpmm { pool, .. } => pool.vaults,
+            Self::AmmV4(pool) => pool.vaults,
+            Self::Whirlpool(pool) => pool.vaults,
+        };
+        [address(&vaults[0]), address(&vaults[1])]
+    }
+
+    /// Pair the shape with freshly read state. A Whirlpool whose tick arrays
+    /// cannot be read in both directions cannot be quoted and is dropped.
+    fn into_venue(self, arrays: Option<[Vec<beast_exec::whirlpool::TickArray>; 2]>) -> Option<VenuePool> {
+        match self {
+            Self::Cpmm { pool, trade_fee_rate } => {
+                Some(VenuePool::Cpmm { pool, trade_fee_rate })
+            }
+            Self::AmmV4(pool) => Some(VenuePool::AmmV4(pool)),
+            Self::Whirlpool(pool) => {
+                let arrays = arrays?;
+                Some(VenuePool::Whirlpool { pool, arrays })
+            }
+        }
+    }
+}
+
+/// Read the state that moves: vault balances for every pool, and tick arrays
+/// for every Whirlpool. One batched read each, whatever the pool count.
+async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolView> {
+    let whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            PoolShape::Whirlpool(pool) => Some(pool.clone()),
+            _ => None,
+        })
+        .collect();
+    let vault_keys: Vec<Address> = shapes.iter().flat_map(|shape| shape.vaults()).collect();
+
+    let (balances, arrays) = tokio::join!(
+        vault_balances(rpc, &vault_keys),
+        beast_exec::whirlpool::load_tick_arrays_batch(rpc, &whirlpools),
+    );
+    let arrays = arrays.unwrap_or_else(|_| vec![None; whirlpools.len()]);
+
+    let mut whirlpool_index = 0;
+    let mut views = Vec::with_capacity(shapes.len());
+    for (index, shape) in shapes.into_iter().enumerate() {
+        let arrays = if matches!(shape, PoolShape::Whirlpool(_)) {
+            let entry = arrays.get(whirlpool_index).cloned().flatten();
+            whirlpool_index += 1;
+            entry
+        } else {
+            None
+        };
+        let Some(venue) = shape.into_venue(arrays) else {
+            continue;
+        };
+        views.push(PoolView {
+            venue,
+            balances: [
+                balances.get(index * 2).copied().unwrap_or(0),
+                balances.get(index * 2 + 1).copied().unwrap_or(0),
+            ],
+        });
+    }
+    views
+}
+
+/// Per-mint discovery cache.
+///
+/// A scan that re-discovers every pool takes tens of seconds on a free-tier
+/// endpoint, because `getProgramAccounts` is the method they throttle hardest.
+/// The pool set itself is nearly static, so it is cached and only the balances
+/// and tick arrays are re-read each pass.
+#[derive(Debug, Default)]
+struct PoolCache {
+    entries: std::collections::HashMap<String, CachedPools>,
+}
+
+#[derive(Debug)]
+struct CachedPools {
+    shapes: Vec<PoolShape>,
+    fetched: Instant,
+}
+
+impl PoolCache {
+    fn get(&self, mint: &str, ttl: std::time::Duration) -> Option<&Vec<PoolShape>> {
+        self.entries
+            .get(mint)
+            .filter(|entry| entry.fetched.elapsed() < ttl)
+            .map(|entry| &entry.shapes)
+    }
+
+    fn insert(&mut self, mint: String, shapes: Vec<PoolShape>) {
+        self.entries.insert(
+            mint,
+            CachedPools {
+                shapes,
+                fetched: Instant::now(),
+            },
+        );
+    }
+
+    fn age(&self) -> std::time::Duration {
+        self.entries
+            .values()
+            .map(|entry| entry.fetched.elapsed())
+            .max()
+            .unwrap_or_default()
+    }
 }
 
 /// Both mint orders for one program, decoded with the given constructor.
@@ -263,22 +423,30 @@ async fn program_accounts_for_pair(
 }
 
 /// Read token-account amounts for a list of vault keys, in the same order.
+///
+/// `getMultipleAccounts` accepts at most 100 keys, so the list is chunked. The
+/// result is positional: a caller indexes it by vault position, and a missing
+/// or malformed account becomes 0 rather than shifting every later balance.
 async fn vault_balances(rpc: &RpcClient, keys: &[Address]) -> Vec<u64> {
-    let accounts = rpc.get_multiple_accounts(keys).await.unwrap_or_default();
-    accounts
-        .iter()
-        .map(|entry| {
-            entry
-                .as_ref()
-                .and_then(|account| account.data.get(64..72))
-                .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
-                .unwrap_or(0)
-        })
-        .collect()
+    let mut balances = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(100) {
+        let accounts = rpc.get_multiple_accounts(chunk).await.unwrap_or_default();
+        for index in 0..chunk.len() {
+            balances.push(
+                accounts
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .and_then(|account| account.data.get(64..72))
+                    .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8 bytes")))
+                    .unwrap_or(0),
+            );
+        }
+    }
+    balances
 }
 
 /// Every swappable Raydium CPMM pool for the pair.
-async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
+async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolShape>> {
     let program = Address::from_str(cpmm::CPMM_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("cpmm program: {error}"))?;
     let accounts = program_accounts_for_pair(
@@ -302,9 +470,9 @@ async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
         decoded.push(pool);
     }
 
-    // One batched read for every AmmConfig, then one for every vault. Both are
-    // stable accounts, so batching is the difference between a scan that keeps
-    // up with the chain and one that does not.
+    // One batched read for every AmmConfig. The config is as stable as the
+    // pool set itself, but it is read alongside discovery because the trade fee
+    // is part of what makes a pool quotable at all.
     let configs: Vec<Address> = decoded
         .iter()
         .map(|pool| address(&pool.amm_config))
@@ -314,14 +482,7 @@ async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
         .await
         .unwrap_or_default();
 
-    let mut vault_keys: Vec<Address> = Vec::with_capacity(decoded.len() * 2);
-    for pool in &decoded {
-        vault_keys.push(address(&pool.vaults[0]));
-        vault_keys.push(address(&pool.vaults[1]));
-    }
-    let balances = vault_balances(rpc, &vault_keys).await;
-
-    let mut views = Vec::with_capacity(decoded.len());
+    let mut shapes = Vec::with_capacity(decoded.len());
     for (index, pool) in decoded.into_iter().enumerate() {
         let Some(config_index) = configs
             .iter()
@@ -337,18 +498,13 @@ async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
         let Ok(trade_fee_rate) = cpmm::decode_trade_fee_rate(&account.data) else {
             continue;
         };
-        views.push(PoolView {
-            venue: VenuePool::Cpmm {
-                pool,
-                trade_fee_rate,
-            },
-            balances: [
-                balances.get(index * 2).copied().unwrap_or(0),
-                balances.get(index * 2 + 1).copied().unwrap_or(0),
-            ],
+        let _ = index;
+        shapes.push(PoolShape::Cpmm {
+            pool,
+            trade_fee_rate,
         });
     }
-    Ok(views)
+    Ok(shapes)
 }
 
 /// Every Raydium AMM v4 pool for the pair.
@@ -356,7 +512,7 @@ async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
 /// AMM v4 stores its base mint at 400 and its quote mint at 432. The fee comes
 /// out of the pool account itself, so a pool with a non-default fee is priced
 /// with its own number rather than the program's default.
-async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
+async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolShape>> {
     let program = Address::from_str(amm_v4::AMM_V4_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("amm v4 program: {error}"))?;
     let accounts = program_accounts_for_pair(
@@ -383,24 +539,7 @@ async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> R
         decoded.push(pool);
     }
 
-    let mut vault_keys: Vec<Address> = Vec::with_capacity(decoded.len() * 2);
-    for pool in &decoded {
-        vault_keys.push(address(&pool.vaults[0]));
-        vault_keys.push(address(&pool.vaults[1]));
-    }
-    let balances = vault_balances(rpc, &vault_keys).await;
-
-    Ok(decoded
-        .into_iter()
-        .enumerate()
-        .map(|(index, pool)| PoolView {
-            venue: VenuePool::AmmV4(pool),
-            balances: [
-                balances.get(index * 2).copied().unwrap_or(0),
-                balances.get(index * 2 + 1).copied().unwrap_or(0),
-            ],
-        })
-        .collect())
+    Ok(decoded.into_iter().map(PoolShape::AmmV4).collect())
 }
 
 /// Every Orca Whirlpool for the pair.
@@ -410,7 +549,11 @@ async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> R
 /// size. Adaptive-fee pools are dropped: their price depends on oracle state
 /// this pricer does not model, and guessing it would produce a quote that is
 /// not exact.
-async fn fetch_whirlpool_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
+async fn fetch_whirlpool_pools(
+    rpc: &RpcClient,
+    wsol: Address,
+    other: Address,
+) -> Result<Vec<PoolShape>> {
     let program = Address::from_str(beast_exec::whirlpool::WHIRLPOOL_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("whirlpool program: {error}"))?;
     // Two account lengths are valid: the base 653-byte pool and the 872-byte
@@ -446,7 +589,7 @@ async fn fetch_whirlpool_pools(rpc: &RpcClient, wsol: Address, other: Address) -
     let mut seen = std::collections::HashSet::new();
     accounts.retain(|(key, _)| seen.insert(*key));
 
-    let mut decoded = Vec::with_capacity(accounts.len());
+    let mut shapes = Vec::with_capacity(accounts.len());
     for (key, data) in accounts {
         let Ok(pool) = beast_exec::whirlpool::WhirlpoolPool::decode(
             beast_flash::pubkey(&key),
@@ -457,44 +600,9 @@ async fn fetch_whirlpool_pools(rpc: &RpcClient, wsol: Address, other: Address) -
         if pool.ensure_swappable().is_err() {
             continue;
         }
-        decoded.push(pool);
+        shapes.push(PoolShape::Whirlpool(pool));
     }
-    if decoded.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // One batched read for every vault.
-    let mut vault_keys: Vec<Address> = Vec::with_capacity(decoded.len() * 2);
-    for pool in &decoded {
-        vault_keys.push(address(&pool.vaults[0]));
-        vault_keys.push(address(&pool.vaults[1]));
-    }
-    let balances = vault_balances(rpc, &vault_keys).await;
-
-    let mut views = Vec::with_capacity(decoded.len());
-    for (index, pool) in decoded.into_iter().enumerate() {
-        // Two directions, two different tick-array sets. A pool whose tick
-        // array slot is occupied by another program's account cannot be
-        // swapped by the program either, so it is skipped rather than failing
-        // the whole pair.
-        let (Ok(b_to_a), Ok(a_to_b)) = (
-            beast_exec::whirlpool::load_tick_arrays(rpc, &pool, false).await,
-            beast_exec::whirlpool::load_tick_arrays(rpc, &pool, true).await,
-        ) else {
-            continue;
-        };
-        views.push(PoolView {
-            venue: VenuePool::Whirlpool {
-                pool,
-                arrays: [b_to_a, a_to_b],
-            },
-            balances: [
-                balances.get(index * 2).copied().unwrap_or(0),
-                balances.get(index * 2 + 1).copied().unwrap_or(0),
-            ],
-        });
-    }
-    Ok(views)
+    Ok(shapes)
 }
 
 /// A decoded pool plus everything needed to price a swap against it.
@@ -894,6 +1002,7 @@ async fn scan_once(
     provider: &dyn FlashProvider,
     reserve: &FlashReserve,
     options: &ArbOptions,
+    cache: &mut PoolCache,
     state: &mut ArbState,
     wallet: Address,
 ) -> Result<Vec<CycleLog>> {
@@ -945,54 +1054,156 @@ async fn scan_once(
             }
         }
     }
+    // Discovery is the expensive half of a scan: `getProgramAccounts` is the
+    // method free tiers throttle hardest, and a pair needs eight of them. The
+    // pool set is nearly static, so it is cached and only the state that moves
+    // — balances and tick arrays — is re-read on every pass.
+    let fetch_started = Instant::now();
+    let calls_before = rpc.total_calls();
+    let limited_before: u64 = rpc
+        .health()
+        .iter()
+        .map(|endpoint| endpoint.rate_limited)
+        .sum();
+    let mut wanted: Vec<(String, Address)> = Vec::with_capacity(options.mints.len());
     for mint in &options.mints {
-        let other = match Address::from_str(mint) {
-            Ok(address) => address,
-            Err(error) => {
-                state.note(format!("skipping mint {mint}: {error}"));
-                continue;
+        match Address::from_str(mint) {
+            Ok(address) => {
+                // The default list and a `--mint` can name the same pool pair.
+                if !wanted.iter().any(|(_, existing)| *existing == address) {
+                    wanted.push((mint.clone(), address));
+                }
             }
-        };
-        // A failed fetch used to `continue` silently, which made a rate-limited
-        // or timed-out pair look like a pair with no liquidity. The reason is
-        // recorded so the scan's coverage is auditable.
-        let pools = match fetch_pair_pools(rpc, wsol(), other).await {
-            Ok(pools) => pools,
-            Err(error) => {
-                state.note(format!(
-                    "pair {} fetch failed: {error}",
-                    &mint[..8.min(mint.len())]
-                ));
-                continue;
+            Err(error) => state.note(format!("skipping mint {mint}: {error}")),
+        }
+    }
+
+    // Only pairs that are not cached still need a discovery call. The ones that
+    // are cached are already in hand, so the fan-out covers the misses alone.
+    let mut shapes: Vec<Option<Vec<PoolShape>>> = Vec::with_capacity(wanted.len());
+    let mut missing: Vec<(usize, String, Address)> = Vec::new();
+    for (index, (mint, other)) in wanted.iter().enumerate() {
+        match cache.get(mint, options.discovery_ttl) {
+            Some(cached) => shapes.push(Some(cached.clone())),
+            None => {
+                shapes.push(None);
+                missing.push((index, mint.clone(), *other));
             }
+        }
+    }
+    if !missing.is_empty() {
+        use futures_util::StreamExt as _;
+        let mut stream = futures_util::stream::iter(missing)
+            .map(|(index, mint, other)| async move {
+                (index, discover_pair_pools(rpc, wsol(), other).await, mint)
+            })
+            // A free-tier endpoint rate-limits bursts, and a 429 pair is a
+            // coverage hole rather than a market fact, so the fan-out is
+            // bounded instead of maximal.
+            .buffer_unordered(4);
+        while let Some((index, result, mint)) = stream.next().await {
+            match result {
+                Ok(pools) => {
+                    cache.insert(mint, pools.clone());
+                    shapes[index] = Some(pools);
+                }
+                Err(error) => {
+                    state.note(format!(
+                        "pair {} fetch failed: {error}",
+                        &mint[..8.min(mint.len())]
+                    ));
+                }
+            }
+        }
+    }
+
+    // Read every pool's live state in one pass, then split it back per mint.
+    let flat: Vec<PoolShape> = shapes
+        .iter()
+        .flatten()
+        .flatten()
+        .cloned()
+        .collect();
+    let views = materialize_pools(rpc, flat).await;
+    let mut by_pair: Vec<Option<Vec<Arc<PoolView>>>> = (0..wanted.len()).map(|_| None).collect();
+    for view in views {
+        // Attribute the pool to the wanted pair it actually belongs to, by
+        // mint rather than by position, so a dropped discovery cannot shift
+        // pools onto the wrong pair.
+        let wsol_key = beast_flash::pubkey(&wsol());
+        let mints = view.venue.mints();
+        let Some(other) = mints.iter().find(|mint| **mint != wsol_key) else {
+            continue;
         };
+        let Some(index) = wanted
+            .iter()
+            .position(|(_, address)| *address.as_bytes() == other.to_bytes())
+        else {
+            continue;
+        };
+        by_pair[index]
+            .get_or_insert_with(Vec::new)
+            .push(Arc::new(view));
+    }
+    let fetched = by_pair;
+
+    // Every ordered pair of pools within a mint, priced in parallel. Pricing is
+    // pure arithmetic over state already in hand: an exact quote can walk
+    // dozens of concentrated-liquidity ticks, so a few thousand of them is the
+    // bulk of a scan's CPU.
+    let mut jobs: Vec<(Arc<PoolView>, Arc<PoolView>)> = Vec::new();
+    for (index, slot) in fetched.iter().enumerate() {
+        let Some(pools) = slot else { continue };
         if pools.len() < 2 {
             state.note(format!(
                 "pair {} has {} local pool(s); a cycle needs two",
-                &mint[..8.min(mint.len())],
+                &wanted[index].0[..8.min(wanted[index].0.len())],
                 pools.len()
             ));
             continue;
         }
         pairs += 1;
-        for (index, pool_in) in pools.iter().enumerate() {
-            for pool_out in pools.iter().skip(index + 1).chain(pools.iter().take(index)) {
+        for (left, pool_in) in pools.iter().enumerate() {
+            for pool_out in pools.iter().skip(left + 1).chain(pools.iter().take(left)) {
+                jobs.push((pool_in.clone(), pool_out.clone()));
+            }
+        }
+    }
+
+    let fetch_ms = fetch_started.elapsed().as_millis();
+    let price_started = Instant::now();
+    let priced: Vec<CycleLog> = {
+        use rayon::prelude::*;
+        jobs.par_iter()
+            .filter_map(|(pool_in, pool_out)| {
                 // One optimal size per ordered pair, not a fixed ladder. The
                 // fee is amount-dependent on every provider, so it is resolved
                 // inside the search rather than assumed constant.
                 let fee_for = |amount: u64| provider.flash_fee(reserve, amount).unwrap_or(0);
-                if let Some(cycle) =
-                    optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
-                {
-                    state.cycles_seen += 1;
-                    // Every evaluated cycle is kept: the closest miss is only
-                    // informative if it is reported, and a run that filters to
-                    // winners cannot show how far off it was.
-                    cycles.push(cycle);
-                }
-            }
-        }
+                optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
+            })
+            .collect()
+    };
+    let price_ms = price_started.elapsed().as_millis();
+    let priced_count = priced.len();
+    state.cycles_seen += priced_count;
+    cycles.extend(priced);
+    // Fetch and pricing fail for different reasons and have different fixes: a
+    // slow fetch is an RPC problem, a slow price is a quote-complexity problem.
+    if price_ms.max(fetch_ms) > 1_000 {
+        let calls = rpc.total_calls().saturating_sub(calls_before);
+        let limited: u64 = rpc
+            .health()
+            .iter()
+            .map(|endpoint| endpoint.rate_limited)
+            .sum::<u64>()
+            .saturating_sub(limited_before);
+        state.note(format!(
+            "scan cost · fetch {fetch_ms} ms · price {price_ms} ms · {priced_count} cycles · {calls} rpc calls · {limited} rate-limited · pool set {}s old",
+            cache.age().as_secs()
+        ));
     }
+
     for junction in junctions {
         cycles.push(CycleLog {
             pool_in: junction.pool_in,
@@ -1061,6 +1272,7 @@ async fn run_text(
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     let wallet_address = wallet.address();
+    let mut cache = PoolCache::default();
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -1073,6 +1285,7 @@ async fn run_text(
             provider.as_ref(),
             &reserve,
             &options,
+            &mut cache,
             &mut state,
             wallet_address,
         )
@@ -1493,6 +1706,7 @@ async fn run_tui(
         let state_slot = state_slot.clone();
         let stop = stop_for_worker.clone();
         tokio::spawn(async move {
+            let mut cache = PoolCache::default();
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -1522,6 +1736,7 @@ async fn run_tui(
                     provider.as_ref(),
                     &reserve,
                     &options,
+                    &mut cache,
                     &mut working,
                     wallet.address(),
                 )

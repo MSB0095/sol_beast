@@ -200,6 +200,11 @@ enum Command {
         /// reported cycle is real without risking a transaction.
         #[arg(long)]
         explain: bool,
+        /// How long a discovered pool set stays valid, in milliseconds.
+        /// Balances and tick arrays are always re-read; only the list of pools
+        /// is cached, because `getProgramAccounts` is what free tiers throttle.
+        #[arg(long, default_value_t = 300_000)]
+        pool_ttl_ms: u64,
     },
     /// Quote a swap through Jupiter.
     Quote {
@@ -378,6 +383,7 @@ async fn main() -> Result<()> {
             real,
             jupiter_triangles,
             explain,
+            pool_ttl_ms,
         } => {
             init_logging(if scan_only && !explain { "warn" } else { "error" }, cli.json_logs)?;
             let mut options = crate::arb::ArbOptions {
@@ -405,6 +411,7 @@ async fn main() -> Result<()> {
                 mode: beast_core::types::Mode::Canary,
                 jupiter_triangles,
                 explain,
+                discovery_ttl: std::time::Duration::from_millis(pool_ttl_ms),
             };
             options.mints.retain(|mint| !mint.trim().is_empty());
             crate::arb::arb(cli.config.as_deref(), real, options).await

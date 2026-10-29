@@ -32,9 +32,11 @@
 use crate::u256::{mul_u256, U256};
 use beast_dex::jupiter::{RawAccountMeta, RawInstruction, SwapInstructions};
 use beast_dex::Address;
+use beast_rpc::Account;
 use serde_json::Value;
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -573,15 +575,97 @@ pub async fn load_tick_arrays(
         })
         .collect();
     let accounts = rpc.get_multiple_accounts(&addresses).await?;
+    let lookup: HashMap<Address, &Account> = addresses
+        .iter()
+        .zip(accounts.iter())
+        .filter_map(|(key, account)| account.as_ref().map(|account| (*key, account)))
+        .collect();
+    decode_tick_array_sequence(pool, a_to_b, &lookup)
+}
+
+/// Load the tick arrays every pool in `pools` needs for **both** directions,
+/// with one batched read instead of one call per pool per direction.
+///
+/// A pair can hold a dozen Whirlpools, so the per-pool path costs up to 24
+/// round trips while this costs a handful. The result is indexed like `pools`;
+/// a `None` entry means that pool cannot be quoted in at least one direction
+/// (a foreign-owned tick-array slot or no usable array at all), which is the
+/// same condition the single-pool loader reports as an error.
+pub async fn load_tick_arrays_batch(
+    rpc: &beast_rpc::RpcClient,
+    pools: &[WhirlpoolPool],
+) -> crate::Result<Vec<Option<[Vec<TickArray>; 2]>>> {
+    let mut addresses: Vec<Address> = Vec::new();
+    let mut seen: HashSet<Address> = HashSet::new();
+    for pool in pools {
+        for a_to_b in [false, true] {
+            for start in pool.start_tick_indexes(a_to_b) {
+                let address = beast_flash::address(&tick_array_address(&pool.address, start));
+                if seen.insert(address) {
+                    addresses.push(address);
+                }
+            }
+        }
+    }
+
+    // `getMultipleAccounts` caps at 100 keys, and each pool contributes up to
+    // six, so a large pair can exceed one call.
+    let mut lookup: HashMap<Address, Account> = HashMap::with_capacity(addresses.len());
+    for chunk in addresses.chunks(100) {
+        let accounts = rpc.get_multiple_accounts(chunk).await?;
+        for (key, account) in chunk.iter().zip(accounts) {
+            if let Some(account) = account {
+                lookup.insert(*key, account);
+            }
+        }
+    }
+
+    let mut result = Vec::with_capacity(pools.len());
+    for pool in pools {
+        let mut directions: Vec<Vec<TickArray>> = Vec::with_capacity(2);
+        for a_to_b in [false, true] {
+            match decode_tick_array_sequence(pool, a_to_b, &lookup) {
+                Ok(arrays) => directions.push(arrays),
+                Err(_) => break,
+            }
+        }
+        if directions.len() == 2 {
+            let a_to_b = directions.pop().expect("two entries");
+            let b_to_a = directions.pop().expect("two entries");
+            result.push(Some([b_to_a, a_to_b]));
+        } else {
+            result.push(None);
+        }
+    }
+    Ok(result)
+}
+
+/// Decode the ordered arrays for one pool and direction from accounts already
+/// read.
+///
+/// A tick array that has never been initialized is submitted to the program as
+/// a system-owned empty PDA and treated as all-zero, so a missing account is
+/// kept as an empty array rather than dropped: the program needs the address in
+/// its account list either way.
+fn decode_tick_array_sequence<T>(
+    pool: &WhirlpoolPool,
+    a_to_b: bool,
+    accounts: &HashMap<Address, T>,
+) -> crate::Result<Vec<TickArray>>
+where
+    T: std::borrow::Borrow<Account>,
+{
+    let starts = pool.start_tick_indexes(a_to_b);
     let program = beast_flash::address(
         &Pubkey::from_str(WHIRLPOOL_PROGRAM_ID).expect("valid program id"),
     );
     let system = beast_flash::address(&solana_sdk::system_program::id());
+
     let mut arrays = Vec::with_capacity(starts.len());
-    for (index, start) in starts.iter().enumerate() {
-        let address = beast_flash::pubkey(&addresses[index]);
+    for start in &starts {
+        let address = beast_flash::address(&tick_array_address(&pool.address, *start));
         let empty = || TickArray {
-            address,
+            address: beast_flash::pubkey(&address),
             start_tick_index: *start,
             ticks: vec![
                 Tick {
@@ -593,10 +677,10 @@ pub async fn load_tick_arrays(
             ],
             whirlpool: pool.address,
         };
-        match accounts.get(index).and_then(Option::as_ref) {
+        match accounts.get(&address).map(std::borrow::Borrow::borrow) {
             Some(account) => {
                 if account.owner == program && account.data.len() >= TICK_ARRAY_LEN {
-                    let array = TickArray::decode(address, &account.data)?;
+                    let array = TickArray::decode(beast_flash::pubkey(&address), &account.data)?;
                     if array.whirlpool != pool.address {
                         return Err(crate::ExecutionError::Unsupported(format!(
                             "tick array {address} belongs to {}, not {}",

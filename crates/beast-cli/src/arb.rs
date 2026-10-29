@@ -167,6 +167,9 @@ pub struct ArbOptions {
     /// rate limit, which is the difference between a scan that keeps up and one
     /// that does not. Local venue pricing is where an edge can exist.
     pub jupiter_triangles: bool,
+    /// One scan, then build and simulate the best cycle and print the result.
+    /// Never submits; `arb::arb` also forces a non-live executor in this mode.
+    pub explain: bool,
 }
 
 impl Default for ArbOptions {
@@ -200,6 +203,7 @@ impl Default for ArbOptions {
             jupiter: None,
             mode: Mode::Canary,
             jupiter_triangles: false,
+            explain: false,
         }
     }
 }
@@ -224,6 +228,7 @@ async fn fetch_pair_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
     let mut views = Vec::new();
     views.extend(fetch_cpmm_pools(rpc, wsol, other).await?);
     views.extend(fetch_amm_v4_pools(rpc, wsol, other).await?);
+    views.extend(fetch_whirlpool_pools(rpc, wsol, other).await?);
     Ok(views)
 }
 
@@ -231,23 +236,24 @@ async fn fetch_pair_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
 async fn program_accounts_for_pair(
     rpc: &RpcClient,
     program: Address,
-    data_size: usize,
+    data_size: Option<usize>,
     mint_offsets: (usize, usize),
     wsol: Address,
     other: Address,
 ) -> Result<Vec<(Address, Vec<u8>)>> {
     let mut accounts = Vec::new();
     for (first, second) in [(wsol, other), (other, wsol)] {
+        // A size filter is cheap and rejects unrelated accounts, but some
+        // programs (Whirlpool) have more than one valid account length, so the
+        // filter is optional.
+        let mut filters = Vec::new();
+        if let Some(data_size) = data_size {
+            filters.push(serde_json::json!({ "dataSize": data_size }));
+        }
+        filters.push(serde_json::json!({ "memcmp": { "offset": mint_offsets.0, "bytes": first.to_string() } }));
+        filters.push(serde_json::json!({ "memcmp": { "offset": mint_offsets.1, "bytes": second.to_string() } }));
         let entries = rpc
-            .get_program_accounts(
-                program,
-                vec![
-                    serde_json::json!({ "dataSize": data_size }),
-                    serde_json::json!({ "memcmp": { "offset": mint_offsets.0, "bytes": first.to_string() } }),
-                    serde_json::json!({ "memcmp": { "offset": mint_offsets.1, "bytes": second.to_string() } }),
-                ],
-                None,
-            )
+            .get_program_accounts(program, filters, None)
             .await?;
         accounts.extend(entries.into_iter().map(|(key, account)| (key, account.data)));
     }
@@ -278,7 +284,7 @@ async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
     let accounts = program_accounts_for_pair(
         rpc,
         program,
-        cpmm::CPMM_POOL_LEN,
+        Some(cpmm::CPMM_POOL_LEN),
         (168, 200),
         wsol,
         other,
@@ -356,7 +362,7 @@ async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> R
     let accounts = program_accounts_for_pair(
         rpc,
         program,
-        amm_v4::AMM_V4_POOL_LEN,
+        Some(amm_v4::AMM_V4_POOL_LEN),
         (
             amm_v4::BASE_MINT_OFFSET,
             amm_v4::QUOTE_MINT_OFFSET,
@@ -397,6 +403,100 @@ async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> R
         .collect())
 }
 
+/// Every Orca Whirlpool for the pair.
+///
+/// Whirlpool accounts have two valid lengths (with and without the extension
+/// trailer), so the query filters on the mint offsets alone rather than on a
+/// size. Adaptive-fee pools are dropped: their price depends on oracle state
+/// this pricer does not model, and guessing it would produce a quote that is
+/// not exact.
+async fn fetch_whirlpool_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolView>> {
+    let program = Address::from_str(beast_exec::whirlpool::WHIRLPOOL_PROGRAM_ID)
+        .map_err(|error| anyhow::anyhow!("whirlpool program: {error}"))?;
+    // Two account lengths are valid: the base 653-byte pool and the 872-byte
+    // extended pool. A size filter is not just an optimisation here — Helius
+    // refuses an unfiltered mint scan of the whole Whirlpool program with
+    // "account index service overloaded" — so each length is queried
+    // separately and the results merged.
+    let mut accounts = Vec::new();
+    let mut last_error = None;
+    for size in [beast_exec::whirlpool::WHIRLPOOL_LEN, 872] {
+        match program_accounts_for_pair(
+            rpc,
+            program,
+            Some(size),
+            (
+                beast_exec::whirlpool::MINT_A_OFFSET,
+                beast_exec::whirlpool::MINT_B_OFFSET,
+            ),
+            wsol,
+            other,
+        )
+        .await
+        {
+            Ok(batch) => accounts.extend(batch),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if accounts.is_empty() {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    accounts.retain(|(key, _)| seen.insert(*key));
+
+    let mut decoded = Vec::with_capacity(accounts.len());
+    for (key, data) in accounts {
+        let Ok(pool) = beast_exec::whirlpool::WhirlpoolPool::decode(
+            beast_flash::pubkey(&key),
+            &data,
+        ) else {
+            continue;
+        };
+        if pool.ensure_swappable().is_err() {
+            continue;
+        }
+        decoded.push(pool);
+    }
+    if decoded.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One batched read for every vault.
+    let mut vault_keys: Vec<Address> = Vec::with_capacity(decoded.len() * 2);
+    for pool in &decoded {
+        vault_keys.push(address(&pool.vaults[0]));
+        vault_keys.push(address(&pool.vaults[1]));
+    }
+    let balances = vault_balances(rpc, &vault_keys).await;
+
+    let mut views = Vec::with_capacity(decoded.len());
+    for (index, pool) in decoded.into_iter().enumerate() {
+        // Two directions, two different tick-array sets. A pool whose tick
+        // array slot is occupied by another program's account cannot be
+        // swapped by the program either, so it is skipped rather than failing
+        // the whole pair.
+        let (Ok(b_to_a), Ok(a_to_b)) = (
+            beast_exec::whirlpool::load_tick_arrays(rpc, &pool, false).await,
+            beast_exec::whirlpool::load_tick_arrays(rpc, &pool, true).await,
+        ) else {
+            continue;
+        };
+        views.push(PoolView {
+            venue: VenuePool::Whirlpool {
+                pool,
+                arrays: [b_to_a, a_to_b],
+            },
+            balances: [
+                balances.get(index * 2).copied().unwrap_or(0),
+                balances.get(index * 2 + 1).copied().unwrap_or(0),
+            ],
+        });
+    }
+    Ok(views)
+}
+
 /// A decoded pool plus everything needed to price a swap against it.
 #[derive(Debug, Clone)]
 struct PoolView {
@@ -425,6 +525,10 @@ impl PoolView {
                 }
                 u16::try_from(pool.fee_numerator.saturating_mul(10_000) / pool.fee_denominator)
                     .unwrap_or(u16::MAX)
+            }
+            VenuePool::Whirlpool { pool, .. } => {
+                // `fee_rate` is hundredths of a basis point.
+                u16::try_from(pool.fee_rate / 100).unwrap_or(u16::MAX)
             }
         }
     }
@@ -463,7 +567,7 @@ fn evaluate_cycle(
     }
     let leg1_out = pool_in
         .venue
-        .quote(amount, a_reserve_in, a_reserve_out)
+        .quote(a_in, amount, a_reserve_in, a_reserve_out)
         .ok()?;
     if leg1_out == 0 {
         return None;
@@ -474,8 +578,20 @@ fn evaluate_cycle(
     }
     let final_out = pool_out
         .venue
-        .quote(leg1_out, b_reserve_in, b_reserve_out)
+        .quote(b_in, leg1_out, b_reserve_in, b_reserve_out)
         .ok()?;
+    // A concentrated-liquidity quote is bounded by the liquidity in its ticks,
+    // not by the tokens actually sitting in the vault. The program pays out of
+    // the vault, so a quote larger than the vault balance is a swap that reverts
+    // with insufficient funds. Checking it here is the difference between a
+    // cycle that prices well and one that can be executed, and a drained vault
+    // sitting at a stale price otherwise looks like a permanent edge.
+    if leg1_out as u128 >= a_reserve_out as u128 {
+        return None;
+    }
+    if final_out as u128 >= b_reserve_out as u128 {
+        return None;
+    }
     let principal_plus_fee = (amount as i128) + (flash_fee as i128);
     let profit = (final_out as i128) - principal_plus_fee - (costs as i128);
     Some(CycleLog {
@@ -542,11 +658,6 @@ fn usable_upper(pool_in: &PoolView, liquidity: u64) -> Option<u64> {
     let depth = reserve.saturating_mul(9) / 10;
     let upper = liquidity.min(depth);
     (upper > 0).then_some(upper)
-}
-
-/// First few characters of an address, for dense one-line reports.
-fn short(value: &str) -> &str {
-    &value[..8.min(value.len())]
 }
 
 /// Build the cycle the executor will actually run, from a winning pair.
@@ -647,7 +758,13 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     // must not hardcode Canary: doing so silently made every real run
     // simulation-only, which is exactly the kind of fake capability this
     // project refuses to ship.
-    let effective = if real { Mode::Live } else { Mode::Canary };
+    // `--explain` is a diagnostic: it must never submit, whatever the config
+    // or `--real` says.
+    let effective = if real && !options.explain {
+        Mode::Live
+    } else {
+        Mode::Canary
+    };
     let executor = crate::engine::build_executor(
         config,
         &rpc,
@@ -673,7 +790,7 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     ));
 
     let stop = Arc::new(AtomicBool::new(false));
-    if options.scan_only {
+    if options.scan_only || options.explain {
         return run_text(
             config,
             rpc,
@@ -936,7 +1053,7 @@ async fn run_text(
     wallet: Arc<beast_exec::Wallet>,
     provider: Arc<dyn FlashProvider>,
     reserve: FlashReserve,
-    _store: Arc<Store>,
+    store: Arc<Store>,
     executor: Arc<Executor>,
     _rent_reclaimer: RentReclaimer,
     options: ArbOptions,
@@ -990,9 +1107,9 @@ async fn run_text(
                     println!(
                         "    #{rank} {} {} -> {} {} amount {} profit {} lamports",
                         cycle.venue_in,
-                        short(&cycle.pool_in),
+                        cycle.pool_in,
                         cycle.venue_out,
-                        short(&cycle.pool_out),
+                        cycle.pool_out,
                         cycle.amount,
                         cycle.profit
                     );
@@ -1031,7 +1148,7 @@ async fn run_text(
                         provider.as_ref(),
                         &reserve,
                         executor.clone(),
-                        &_store,
+                        &store,
                         &cycles[0],
                         options.mode,
                         &mut state,
@@ -1052,6 +1169,12 @@ async fn run_text(
                 state.note(message.clone());
                 eprintln!("{message}");
             }
+        }
+        // `--explain` is one pass: scan, report, and simulate the winner. The
+        // result is the answer to "is this cycle real", so looping would only
+        // repeat the question against a newer block.
+        if options.explain {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(options.refresh_ms)).await;
     }

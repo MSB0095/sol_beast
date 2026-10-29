@@ -137,6 +137,11 @@ pub struct ComposeOptions {
     /// key at 32 bytes, while the exact assembled size is still enforced by
     /// `build_composed_transaction` before signing.
     pub skip_size_estimate: bool,
+    /// The transaction's fee payer, which is also the only key the engine can
+    /// sign with. A venue instruction that marks this account as a signer is
+    /// satisfiable — some programs require their authority to be a signer —
+    /// while any *other* signer cannot be produced and must be rejected.
+    pub payer: Option<solana_sdk::pubkey::Pubkey>,
 }
 
 impl Default for ComposeOptions {
@@ -145,6 +150,7 @@ impl Default for ComposeOptions {
             include_final_cleanup: true,
             include_compute_budget: true,
             skip_size_estimate: false,
+            payer: None,
         }
     }
 }
@@ -223,7 +229,17 @@ pub fn compose_cycle_with(
         }
 
         let swap = to_instruction(&leg.instructions.swap_instruction, index)?;
-        if swap.accounts.iter().any(|account| account.is_signer) {
+        if swap
+            .accounts
+            .iter()
+            .any(|account| {
+                account.is_signer
+                    && options
+                        .payer
+                        .map(|payer| payer.to_bytes() != account.pubkey.to_bytes())
+                        .unwrap_or(true)
+            })
+        {
             // The wallet signs the transaction itself; no extra signers are
             // supported because the engine holds exactly one keypair.
             return Err(ComposeError::UnsupportedSigner { index });
@@ -705,6 +721,7 @@ mod tests {
                 include_final_cleanup: false,
                 include_compute_budget: false,
                 skip_size_estimate: false,
+                payer: None,
             },
             std::slice::from_ref(&borrow),
             std::slice::from_ref(&repay),
@@ -722,6 +739,7 @@ mod tests {
                 include_final_cleanup: false,
                 include_compute_budget: false,
                 skip_size_estimate: false,
+                payer: None,
             },
             &[],
             &[],

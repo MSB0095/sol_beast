@@ -46,7 +46,9 @@ pub mod compose;
 pub mod cpmm;
 pub mod rent;
 pub mod sizing;
+pub mod u256;
 pub mod venue;
+pub mod whirlpool;
 pub use compose::{ComposedCycle, CycleLeg};
 pub use rent::{RentReclaimReport, RentReclaimer, RentScan};
 
@@ -79,6 +81,8 @@ pub enum ExecutionError {
     Cpmm(#[from] crate::cpmm::CpmmError),
     #[error("amm v4: {0}")]
     AmmV4(#[from] crate::amm_v4::AmmV4Error),
+    #[error("whirlpool: {0}")]
+    Whirlpool(#[from] crate::whirlpool::WhirlpoolError),
     #[error("transaction: {0}")]
     Transaction(String),
     #[error("live execution is disabled")]
@@ -865,7 +869,12 @@ impl Executor {
         // be constrained to the detected pools and its public endpoint is
         // rate-limited; a local builder trades exactly the pools the scan
         // priced. Other cycle shapes keep using Jupiter.
-        let locally_built = |venue: &str| venue == "raydium_cpmm" || venue == "raydium_amm_v4";
+        let locally_built = |venue: &str| {
+            matches!(
+                venue,
+                "raydium_cpmm" | "raydium_amm_v4" | "orca_whirlpool"
+            )
+        };
         if is_wsol && legs.len() == 2 && legs.iter().all(|leg| locally_built(&leg.venue)) {
             let first_pool = parse_mint(&legs[0].pool, "leg 0 pool")?;
             let second_pool = parse_mint(&legs[1].pool, "leg 1 pool")?;
@@ -1114,6 +1123,7 @@ impl Executor {
                 include_final_cleanup: false,
                 include_compute_budget: false,
                 skip_size_estimate: !self.config.flash_lookup_table.is_empty(),
+                payer: Some(self.wallet.pubkey()),
             },
             &preamble,
             &postamble,
@@ -1562,7 +1572,7 @@ impl Executor {
         // amount, which leg 2 then swaps in full. A haircut here would either
         // strand the difference in the intermediate ATA or revert on any
         // adverse move. Green-or-revert is the honest behaviour.
-        let quote_a = pool_a.quote(amount, reserve_a_in, reserve_a_out)?;
+        let quote_a = pool_a.quote(a_in, amount, reserve_a_in, reserve_a_out)?;
         if quote_a == 0 {
             return Err(ExecutionError::Unprofitable(
                 "leg 1 output is zero".into(),
@@ -1591,7 +1601,7 @@ impl Executor {
                 )));
             }
         }
-        let quote_b = pool_b.quote(leg1_floor, reserve_b_in, reserve_b_out)?;
+        let quote_b = pool_b.quote(b_in, leg1_floor, reserve_b_in, reserve_b_out)?;
         if !probe && quote_b <= principal_plus_fee {
             return Err(ExecutionError::Unprofitable(format!(
                 "cycle returns {quote_b}, below principal+fee {principal_plus_fee}"
@@ -1772,6 +1782,7 @@ impl Executor {
                 include_final_cleanup: false,
                 include_compute_budget: false,
                 skip_size_estimate: !self.config.flash_lookup_table.is_empty(),
+                payer: Some(self.wallet.pubkey()),
             },
             &preamble,
             &postamble,
@@ -1827,6 +1838,10 @@ impl Executor {
             &Pubkey::from_str(crate::amm_v4::AMM_V4_PROGRAM_ID)
                 .map_err(|error| ExecutionError::Config(error.to_string()))?,
         );
+        let whirlpool_program = beast_flash::address(
+            &Pubkey::from_str(crate::whirlpool::WHIRLPOOL_PROGRAM_ID)
+                .map_err(|error| ExecutionError::Config(error.to_string()))?,
+        );
         if owner == cpmm_program {
             let pool = cpmm::CpmmPool::decode(beast_flash::pubkey(&address), &account.account.data)?;
             pool.ensure_swappable()?;
@@ -1864,6 +1879,22 @@ impl Executor {
                 )));
             }
             return Ok(VenuePool::AmmV4(pool));
+        }
+        if owner == whirlpool_program {
+            let pool = crate::whirlpool::WhirlpoolPool::decode(
+                beast_flash::pubkey(&address),
+                &account.account.data,
+            )?;
+            pool.ensure_swappable()?;
+            // The tick arrays are read at build time, so a price that has moved
+            // into another array since the scan is built against the current
+            // arrays rather than the stale ones.
+            let b_to_a = crate::whirlpool::load_tick_arrays(&self.rpc, &pool, false).await?;
+            let a_to_b = crate::whirlpool::load_tick_arrays(&self.rpc, &pool, true).await?;
+            return Ok(VenuePool::Whirlpool {
+                pool,
+                arrays: [b_to_a, a_to_b],
+            });
         }
         Err(ExecutionError::Unsupported(format!(
             "pool {address} is owned by {owner}, which has no local builder"

@@ -16,6 +16,7 @@
 
 use crate::amm_v4::{self, AmmV4Pool};
 use crate::cpmm::{self, CpmmPool};
+use crate::whirlpool::{self, TickArray, WhirlpoolPool};
 use crate::{ExecutionError, Result};
 use beast_dex::Address;
 use solana_sdk::instruction::Instruction;
@@ -31,6 +32,16 @@ pub enum VenuePool {
     },
     /// Raydium AMM v4.
     AmmV4(AmmV4Pool),
+    /// Orca Whirlpool, with the tick arrays needed to quote each direction.
+    ///
+    /// `arrays[0]` is the b-to-a set and `arrays[1]` the a-to-b set, because
+    /// the two directions walk different tick arrays. The arrays are read from
+    /// chain; their addresses are what the swap instruction passes, and their
+    /// contents are what the local pricer walks.
+    Whirlpool {
+        pool: WhirlpoolPool,
+        arrays: [Vec<TickArray>; 2],
+    },
 }
 
 impl VenuePool {
@@ -39,6 +50,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { .. } => "raydium-cpmm",
             Self::AmmV4(_) => "raydium-amm-v4",
+            Self::Whirlpool { .. } => "orca-whirlpool",
         }
     }
 
@@ -47,6 +59,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { .. } => "raydium_cpmm",
             Self::AmmV4(_) => "raydium_amm_v4",
+            Self::Whirlpool { .. } => "orca_whirlpool",
         }
     }
 
@@ -54,6 +67,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.address,
             Self::AmmV4(pool) => pool.address,
+            Self::Whirlpool { pool, .. } => pool.address,
         }
     }
 
@@ -62,6 +76,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.mints,
             Self::AmmV4(pool) => pool.mints,
+            Self::Whirlpool { pool, .. } => pool.mints,
         }
     }
 
@@ -73,6 +88,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.vaults,
             Self::AmmV4(pool) => pool.vaults,
+            Self::Whirlpool { pool, .. } => pool.vaults,
         }
     }
 
@@ -86,12 +102,17 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.effective_reserve(side, raw).ok(),
             Self::AmmV4(pool) => Some(pool.effective_reserve(side, raw)),
+            // Whirlpool prices from concentrated liquidity, not from vault
+            // balances. The raw balance is still the right bound for "how big
+            // can this leg be", which is all this method is used for here.
+            Self::Whirlpool { .. } => Some(raw),
         }
     }
 
     /// Exact-in output for one direction, using the venue's own formula.
     pub fn quote(
         &self,
+        input_side: usize,
         amount_in: u64,
         reserve_in: u64,
         reserve_out: u64,
@@ -116,6 +137,12 @@ impl VenuePool {
                 // `quote_base_in` takes the pool for its fee, which is read
                 // from the pool account rather than assumed.
                 amm_v4::quote_base_in(pool, amount_in, reserve_in, reserve_out)
+                    .map_err(|error| ExecutionError::Unsupported(error.to_string()))
+            }
+            Self::Whirlpool { pool, arrays } => {
+                let a_to_b = input_side == 0;
+                let arrays = if a_to_b { &arrays[1] } else { &arrays[0] };
+                pool.quote_exact_in(arrays, amount_in, a_to_b)
                     .map_err(|error| ExecutionError::Unsupported(error.to_string()))
             }
         }
@@ -147,6 +174,29 @@ impl VenuePool {
                 amount_in,
                 minimum_amount_out,
             )?),
+            Self::Whirlpool { pool, arrays } => {
+                let input_side = pool.mint_index(&input_mint).ok_or_else(|| {
+                    ExecutionError::Unsupported(format!(
+                        "whirlpool {} does not hold {input_mint}",
+                        pool.address
+                    ))
+                })?;
+                let a_to_b = input_side == 0;
+                let set = if a_to_b { &arrays[1] } else { &arrays[0] };
+                let mut keys: Vec<Pubkey> = set.iter().map(|array| array.address).collect();
+                while keys.len() < 3 {
+                    keys.push(*keys.last().unwrap_or(&pool.address));
+                }
+                Ok(whirlpool::swap_instruction(
+                    pool,
+                    &[keys[0], keys[1], keys[2]],
+                    payer,
+                    input_mint,
+                    output_mint,
+                    amount_in,
+                    minimum_amount_out,
+                )?)
+            }
         }
     }
 
@@ -158,6 +208,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { .. } => Ok(cpmm::as_swap_instructions(instruction)?),
             Self::AmmV4(_) => Ok(amm_v4::as_swap_instructions(instruction)?),
+            Self::Whirlpool { .. } => Ok(whirlpool::as_swap_instructions(instruction)?),
         }
     }
 
@@ -169,6 +220,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.token_programs[side],
             Self::AmmV4(_) => spl_token::id(),
+            Self::Whirlpool { .. } => spl_token::id(),
         }
     }
 

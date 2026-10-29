@@ -116,6 +116,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Quote and simulate one WSOL -> token swap on an Orca Whirlpool against
+    /// mainnet. Reports the local quote and the output vault's actual gain; a
+    /// non-zero quote error means the local pricer is not exact.
+    WhirlpoolProbe {
+        /// Whirlpool pool address.
+        #[arg(long)]
+        pool: String,
+        /// Input amount in lamports.
+        #[arg(long, default_value_t = 5_000_000)]
+        amount: u64,
+        /// Slippage tolerance applied to the quoted output, in basis points.
+        #[arg(long, default_value_t = 50)]
+        slippage_bps: u16,
+        #[arg(long)]
+        json: bool,
+    },
     /// Create an address lookup table carrying the flash provider's stable
     /// accounts. Some provider lifecycles (Marginfi + CPMM) exceed the
     /// 1232-byte transaction limit without one. Simulates by default; sends
@@ -179,6 +195,11 @@ enum Command {
         /// whole scan far slower.
         #[arg(long)]
         jupiter_triangles: bool,
+        /// Scan once, then build and simulate the best cycle, printing what the
+        /// chain said. Never submits. This is the way to check whether a
+        /// reported cycle is real without risking a transaction.
+        #[arg(long)]
+        explain: bool,
     },
     /// Quote a swap through Jupiter.
     Quote {
@@ -322,6 +343,15 @@ async fn main() -> Result<()> {
             init_logging("info", cli.json_logs)?;
             commands::amm_v4_probe(cli.config.as_deref(), &pool, amount, slippage_bps, json).await
         }
+        Command::WhirlpoolProbe {
+            pool,
+            amount,
+            slippage_bps,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::whirlpool_probe(cli.config.as_deref(), &pool, amount, slippage_bps, json).await
+        }
         Command::FlashAlt {
             real,
             confirm,
@@ -347,8 +377,9 @@ async fn main() -> Result<()> {
             amounts,
             real,
             jupiter_triangles,
+            explain,
         } => {
-            init_logging(if scan_only { "warn" } else { "error" }, cli.json_logs)?;
+            init_logging(if scan_only && !explain { "warn" } else { "error" }, cli.json_logs)?;
             let mut options = crate::arb::ArbOptions {
                 refresh_ms,
                 min_profit_lamports,
@@ -373,6 +404,7 @@ async fn main() -> Result<()> {
                 jupiter: None,
                 mode: beast_core::types::Mode::Canary,
                 jupiter_triangles,
+                explain,
             };
             options.mints.retain(|mint| !mint.trim().is_empty());
             crate::arb::arb(cli.config.as_deref(), real, options).await

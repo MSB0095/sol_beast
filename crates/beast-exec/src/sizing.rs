@@ -55,7 +55,15 @@ pub fn maximize_profit(
     // Stage 1: geometric sweep. Log spacing is right because the useful range
     // spans orders of magnitude: a profitable size can be 1e6 or 1e12 lamports
     // and a linear grid would spend every sample in one end.
-    const SWEEP: u32 = 192;
+    //
+    // The sweep is only a basin finder. Profit is concave in size (the marginal
+    // price of both legs rises with size, so the marginal profit falls), which
+    // means the peak is unique; the sweep exists to bracket it cheaply, not to
+    // locate it. 48 samples bracket a 1e12 range to within a factor of ~3,
+    // which the ternary stage then closes to a single lamport. Fewer samples
+    // mean fewer exact quotes, and an exact quote can cross dozens of
+    // concentrated-liquidity ticks.
+    const SWEEP: u32 = 48;
     let mut samples: Vec<(u64, i128)> = Vec::with_capacity(SWEEP as usize + 1);
     for index in 0..=SWEEP {
         let fraction = f64::from(index) / f64::from(SWEEP);
@@ -98,13 +106,29 @@ pub fn maximize_profit(
     //
     // The window is proportional because a fixed one is meaningless across ten
     // orders of magnitude, and it is capped because an uncapped one costs
-    // O(amount) quotes — a billion of them for a 1e12-lamport cycle. The
-    // ternary stage has already narrowed to a one-lamport bracket; this scan is
-    // only protection against a rounded step that broke unimodality.
-    let window = (best_amount / 2_000).clamp(8, 4_096);
+    // O(amount) quotes — a billion of them for a 1e12-lamport cycle. A coarse
+    // pass steps across the window, then a fine pass steps by one lamport
+    // across the best coarse step. That covers a wide neighbourhood at constant
+    // cost instead of trading coverage for accuracy.
+    let window = (best_amount / 2_000).clamp(16, 65_536);
     let scan_lo = best_amount.saturating_sub(window).max(1);
     let scan_hi = best_amount.saturating_add(window).min(upper);
-    for amount in scan_lo..=scan_hi {
+    let step = (window / 128).max(1);
+
+    let mut coarse_best = best_amount;
+    let mut amount = scan_lo;
+    while amount <= scan_hi {
+        let value = profit(amount);
+        if value > best_profit {
+            coarse_best = amount;
+            best_profit = value;
+        }
+        amount = amount.saturating_add(step);
+    }
+
+    let fine_lo = coarse_best.saturating_sub(step).max(scan_lo);
+    let fine_hi = coarse_best.saturating_add(step).min(scan_hi);
+    for amount in fine_lo..=fine_hi {
         let value = profit(amount);
         if value > best_profit {
             best_amount = amount;

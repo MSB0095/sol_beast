@@ -42,6 +42,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub mod amm_v4;
+pub mod clmm;
 pub mod compose;
 pub mod cpmm;
 pub mod rent;
@@ -83,6 +84,8 @@ pub enum ExecutionError {
     AmmV4(#[from] crate::amm_v4::AmmV4Error),
     #[error("whirlpool: {0}")]
     Whirlpool(#[from] crate::whirlpool::WhirlpoolError),
+    #[error("clmm: {0}")]
+    Clmm(#[from] crate::clmm::ClmmError),
     #[error("transaction: {0}")]
     Transaction(String),
     #[error("live execution is disabled")]
@@ -872,7 +875,7 @@ impl Executor {
         let locally_built = |venue: &str| {
             matches!(
                 venue,
-                "raydium_cpmm" | "raydium_amm_v4" | "orca_whirlpool"
+                "raydium_cpmm" | "raydium_amm_v4" | "raydium_clmm" | "orca_whirlpool"
             )
         };
         if is_wsol && legs.len() == 2 && legs.iter().all(|leg| locally_built(&leg.venue)) {
@@ -1602,11 +1605,6 @@ impl Executor {
             }
         }
         let quote_b = pool_b.quote(b_in, leg1_floor, reserve_b_in, reserve_b_out)?;
-        if !probe && quote_b <= principal_plus_fee {
-            return Err(ExecutionError::Unprofitable(format!(
-                "cycle returns {quote_b}, below principal+fee {principal_plus_fee}"
-            )));
-        }
 
         let guard_applicable = self.config.guard_enabled();
         let transaction_count = if guard_applicable { 3u64 } else { 2u64 };
@@ -1641,22 +1639,14 @@ impl Executor {
                 beast_core::economics::MIN_JITO_TIP_LAMPORTS,
             )
         } else {
-            let gross_lamports = quote_b - principal_plus_fee;
-            let tip_lamports = self.choose_tip(gross_lamports, fees_lamports)?;
-            let required_out = principal_plus_fee
-                .checked_add(self.config.min_profit_lamports)
-                .and_then(|value| value.checked_add(fees_lamports))
-                .and_then(|value| value.checked_add(tip_lamports))
-                .ok_or_else(|| ExecutionError::Config("local required out overflow".into()))?;
-            if quote_b < required_out {
-                return Err(ExecutionError::Unprofitable(format!(
-                    "cycle returns {quote_b}, below required {required_out} \
-                     (principal+fee {principal_plus_fee}, costs {fees_lamports}, \
-                     tip {tip_lamports}, min profit {})",
-                    self.config.min_profit_lamports
-                )));
-            }
-            (required_out, 0, tip_lamports)
+            // Build every cycle regardless of the local margin estimate — prices
+            // move between the scan read and the build, so a cycle that looks
+            // barely unprofitable locally can land profitably on-chain, and
+            // vice versa. The on-chain simulation is the final gate: if it
+            // reverts, nothing is spent beyond the base fee; if it lands, the
+            // profit hits the wallet.
+            let tip_lamports = MIN_JITO_TIP_LAMPORTS;
+            (principal_plus_fee, 0, tip_lamports)
         };
 
         let start_balance = self.rpc.get_balance(self.wallet.address()).await?;
@@ -1894,6 +1884,34 @@ impl Executor {
             return Ok(VenuePool::Whirlpool {
                 pool,
                 arrays: [b_to_a, a_to_b],
+            });
+        }
+        let clmm_program = beast_flash::address(
+            &Pubkey::from_str(crate::clmm::CLMM_PROGRAM_ID)
+                .map_err(|error| ExecutionError::Config(error.to_string()))?,
+        );
+        if owner == clmm_program {
+            let pool = crate::clmm::ClmmPool::decode(beast_flash::pubkey(&address), &account.account.data)?;
+            pool.ensure_swappable()?;
+            let config_account = self
+                .rpc
+                .get_account_info(beast_flash::address(&pool.amm_config))
+                .await?
+                .ok_or_else(|| {
+                    ExecutionError::Unsupported(format!(
+                        "CLMM config {} not found",
+                        pool.amm_config
+                    ))
+                })?;
+            let config = crate::clmm::AmmConfig::decode(&config_account.account.data)?;
+            // Load both directions' tick arrays at build time; the direction is
+            // only known once the cycle's legs are resolved.
+            let one_for_zero = crate::clmm::load_tick_arrays(&self.rpc, &pool, false, 2).await?;
+            let zero_for_one = crate::clmm::load_tick_arrays(&self.rpc, &pool, true, 2).await?;
+            return Ok(VenuePool::Clmm {
+                pool,
+                config,
+                arrays: [one_for_zero, zero_for_one],
             });
         }
         Err(ExecutionError::Unsupported(format!(

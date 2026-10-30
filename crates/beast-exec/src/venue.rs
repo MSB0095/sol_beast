@@ -22,6 +22,8 @@ use beast_dex::Address;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
 
+use crate::clmm::{self, AmmConfig, ClmmPool};
+
 /// One pool on one venue, plus whatever that venue needs to quote it.
 #[derive(Debug, Clone)]
 pub enum VenuePool {
@@ -32,6 +34,13 @@ pub enum VenuePool {
     },
     /// Raydium AMM v4.
     AmmV4(AmmV4Pool),
+    /// Raydium CLMM, with the tick arrays needed to quote each direction and
+    /// the fee table from its `AmmConfig`.
+    Clmm {
+        pool: ClmmPool,
+        config: AmmConfig,
+        arrays: [Vec<crate::clmm::TickArray>; 2],
+    },
     /// Orca Whirlpool, with the tick arrays needed to quote each direction.
     ///
     /// `arrays[0]` is the b-to-a set and `arrays[1]` the a-to-b set, because
@@ -50,6 +59,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { .. } => "raydium-cpmm",
             Self::AmmV4(_) => "raydium-amm-v4",
+            Self::Clmm { .. } => "raydium-clmm",
             Self::Whirlpool { .. } => "orca-whirlpool",
         }
     }
@@ -59,6 +69,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { .. } => "raydium_cpmm",
             Self::AmmV4(_) => "raydium_amm_v4",
+            Self::Clmm { .. } => "raydium_clmm",
             Self::Whirlpool { .. } => "orca_whirlpool",
         }
     }
@@ -67,6 +78,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.address,
             Self::AmmV4(pool) => pool.address,
+            Self::Clmm { pool, .. } => pool.address,
             Self::Whirlpool { pool, .. } => pool.address,
         }
     }
@@ -76,6 +88,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.mints,
             Self::AmmV4(pool) => pool.mints,
+            Self::Clmm { pool, .. } => pool.mints,
             Self::Whirlpool { pool, .. } => pool.mints,
         }
     }
@@ -88,6 +101,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.vaults,
             Self::AmmV4(pool) => pool.vaults,
+            Self::Clmm { pool, .. } => pool.vaults,
             Self::Whirlpool { pool, .. } => pool.vaults,
         }
     }
@@ -102,6 +116,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.effective_reserve(side, raw).ok(),
             Self::AmmV4(pool) => Some(pool.effective_reserve(side, raw)),
+            Self::Clmm { .. } => Some(raw),
             // Whirlpool prices from concentrated liquidity, not from vault
             // balances. The raw balance is still the right bound for "how big
             // can this leg be", which is all this method is used for here.
@@ -137,6 +152,16 @@ impl VenuePool {
                 // `quote_base_in` takes the pool for its fee, which is read
                 // from the pool account rather than assumed.
                 amm_v4::quote_base_in(pool, amount_in, reserve_in, reserve_out)
+                    .map_err(|error| ExecutionError::Unsupported(error.to_string()))
+            }
+            Self::Clmm {
+                pool,
+                config,
+                arrays,
+            } => {
+                let zero_for_one = input_side == 0;
+                let arrays = if zero_for_one { &arrays[1] } else { &arrays[0] };
+                pool.quote_exact_in(arrays, amount_in, zero_for_one, config.trade_fee_rate)
                     .map_err(|error| ExecutionError::Unsupported(error.to_string()))
             }
             Self::Whirlpool { pool, arrays } => {
@@ -197,6 +222,33 @@ impl VenuePool {
                     minimum_amount_out,
                 )?)
             }
+            Self::Clmm { pool, config, arrays } => {
+                let input_side = pool.mint_index(&input_mint).ok_or_else(|| {
+                    ExecutionError::Unsupported(format!(
+                        "clmm pool {} does not hold {input_mint}",
+                        pool.address
+                    ))
+                })?;
+                let zero_for_one = input_side == 0;
+                let set = if zero_for_one { &arrays[1] } else { &arrays[0] };
+                let keys: Vec<Pubkey> = set.iter().map(|array| array.address).collect();
+                if keys.is_empty() {
+                    return Err(ExecutionError::Unsupported(format!(
+                        "clmm pool {} has no tick arrays for this direction",
+                        pool.address
+                    )));
+                }
+                Ok(clmm::swap_instruction(
+                    pool,
+                    config,
+                    &keys,
+                    payer,
+                    input_mint,
+                    output_mint,
+                    amount_in,
+                    minimum_amount_out,
+                )?)
+            }
         }
     }
 
@@ -208,6 +260,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { .. } => Ok(cpmm::as_swap_instructions(instruction)?),
             Self::AmmV4(_) => Ok(amm_v4::as_swap_instructions(instruction)?),
+            Self::Clmm { .. } => Ok(clmm::as_swap_instructions(instruction)?),
             Self::Whirlpool { .. } => Ok(whirlpool::as_swap_instructions(instruction)?),
         }
     }
@@ -220,6 +273,7 @@ impl VenuePool {
         match self {
             Self::Cpmm { pool, .. } => pool.token_programs[side],
             Self::AmmV4(_) => spl_token::id(),
+            Self::Clmm { .. } => spl_token::id(),
             Self::Whirlpool { .. } => spl_token::id(),
         }
     }
@@ -232,7 +286,12 @@ impl VenuePool {
     /// instead of being quoted optimistically.
     pub fn is_classic_spl(&self) -> bool {
         let classic = spl_token::id();
-        self.token_program(0) == classic && self.token_program(1) == classic
+        match self {
+            Self::Cpmm { pool, .. } => pool.token_programs[0] == classic && pool.token_programs[1] == classic,
+            Self::AmmV4(_) => true,
+            Self::Clmm { .. } => true,
+            Self::Whirlpool { .. } => true,
+        }
     }
 
     /// Vault addresses as RPC addresses, in pool order.

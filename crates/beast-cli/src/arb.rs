@@ -22,7 +22,7 @@ use beast_core::types::Mode;
 use beast_core::types::{CostBreakdown, LegPlan, Opportunity, OutcomeLabel, StrategyKind};
 use beast_dex::Address;
 use beast_exec::venue::VenuePool;
-use beast_exec::{amm_v4, cpmm, Executor, RentReclaimer, WSOL_MINT};
+use beast_exec::{amm_v4, cpmm, clmm, Executor, RentReclaimer, WSOL_MINT};
 
 /// Base fee charged once per transaction in a composed cycle plus guard.
 const DEFAULT_CYCLE_BASE_FEE: u64 = 5_000;
@@ -239,19 +239,20 @@ async fn discover_pair_pools(
     wsol: Address,
     other: Address,
 ) -> Result<Vec<PoolShape>> {
-    // The three venues are independent, so their round trips overlap. Running
-    // them in sequence made each pair wait for the slowest one three times
-    // over, which is most of a scan's wall time on a free-tier endpoint.
-    let (cpmm, amm_v4, whirlpool) = tokio::join!(
+    // The four venues are independent, so their round trips overlap. Running
+    // them in sequence made each pair wait for the slowest one four times over,
+    // which is most of a scan's wall time on a free-tier endpoint.
+    let (cpmm, amm_v4, whirlpool, clmm) = tokio::join!(
         fetch_cpmm_pools(rpc, wsol, other),
         fetch_amm_v4_pools(rpc, wsol, other),
         fetch_whirlpool_pools(rpc, wsol, other),
+        fetch_clmm_pools(rpc, wsol, other),
     );
     let mut shapes = Vec::new();
     // One venue failing is a coverage gap, not a reason to drop the pair: the
     // other venues' pools are still real and still quotable.
     let mut errors = Vec::new();
-    for result in [cpmm, amm_v4, whirlpool] {
+    for result in [cpmm, amm_v4, whirlpool, clmm] {
         match result {
             Ok(pools) => shapes.extend(pools),
             Err(error) => errors.push(error.to_string()),
@@ -267,9 +268,9 @@ async fn discover_pair_pools(
 
 /// A discovered pool, with only the parts that do not move every block.
 ///
-/// Balances and Whirlpool tick arrays are deliberately absent: a cached copy of
-/// either would be a stale price, and a stale price is indistinguishable from
-/// an edge right up until the transaction reverts.
+/// Balances and concentrated-liquidity tick arrays are deliberately absent: a
+/// cached copy of either would be a stale price, and a stale price is
+/// indistinguishable from an edge right up until the transaction reverts.
 #[derive(Debug, Clone)]
 enum PoolShape {
     Cpmm {
@@ -278,6 +279,10 @@ enum PoolShape {
     },
     AmmV4(amm_v4::AmmV4Pool),
     Whirlpool(beast_exec::whirlpool::WhirlpoolPool),
+    Clmm {
+        pool: clmm::ClmmPool,
+        config: clmm::AmmConfig,
+    },
 }
 
 impl PoolShape {
@@ -286,28 +291,15 @@ impl PoolShape {
             Self::Cpmm { pool, .. } => pool.vaults,
             Self::AmmV4(pool) => pool.vaults,
             Self::Whirlpool(pool) => pool.vaults,
+            Self::Clmm { pool, .. } => pool.vaults,
         };
         [address(&vaults[0]), address(&vaults[1])]
-    }
-
-    /// Pair the shape with freshly read state. A Whirlpool whose tick arrays
-    /// cannot be read in both directions cannot be quoted and is dropped.
-    fn into_venue(self, arrays: Option<[Vec<beast_exec::whirlpool::TickArray>; 2]>) -> Option<VenuePool> {
-        match self {
-            Self::Cpmm { pool, trade_fee_rate } => {
-                Some(VenuePool::Cpmm { pool, trade_fee_rate })
-            }
-            Self::AmmV4(pool) => Some(VenuePool::AmmV4(pool)),
-            Self::Whirlpool(pool) => {
-                let arrays = arrays?;
-                Some(VenuePool::Whirlpool { pool, arrays })
-            }
-        }
     }
 }
 
 /// Read the state that moves: vault balances for every pool, and tick arrays
-/// for every Whirlpool. One batched read each, whatever the pool count.
+/// for every concentrated-liquidity pool. One batched read each, whatever the
+/// pool count.
 async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolView> {
     let whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = shapes
         .iter()
@@ -316,26 +308,65 @@ async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolV
             _ => None,
         })
         .collect();
+    let clmms: Vec<(clmm::ClmmPool, clmm::AmmConfig)> = shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            PoolShape::Clmm { pool, config } => Some((pool.clone(), *config)),
+            _ => None,
+        })
+        .collect();
     let vault_keys: Vec<Address> = shapes.iter().flat_map(|shape| shape.vaults()).collect();
-
-    let (balances, arrays) = tokio::join!(
+    let clmm_pools: Vec<clmm::ClmmPool> = clmms.iter().map(|(pool, _)| pool.clone()).collect();
+    // One batched read for every vault in the whole scan, and one batched read
+    // for every Whirlpool and CLMM tick array the pair needs in both directions.
+    let (balances, whirlpool_arrays, clmm_arrays) = tokio::join!(
         vault_balances(rpc, &vault_keys),
         beast_exec::whirlpool::load_tick_arrays_batch(rpc, &whirlpools),
+        beast_exec::clmm::load_tick_arrays_batch(rpc, &clmm_pools, 2),
     );
-    let arrays = arrays.unwrap_or_else(|_| vec![None; whirlpools.len()]);
+    let whirlpool_arrays = whirlpool_arrays.unwrap_or_else(|_| vec![None; whirlpools.len()]);
+    let clmm_arrays = clmm_arrays.unwrap_or_else(|_| vec![None; clmms.len()]);
 
     let mut whirlpool_index = 0;
+    let mut clmm_index = 0;
     let mut views = Vec::with_capacity(shapes.len());
     for (index, shape) in shapes.into_iter().enumerate() {
-        let arrays = if matches!(shape, PoolShape::Whirlpool(_)) {
-            let entry = arrays.get(whirlpool_index).cloned().flatten();
-            whirlpool_index += 1;
-            entry
-        } else {
-            None
-        };
-        let Some(venue) = shape.into_venue(arrays) else {
-            continue;
+        let venue = match shape {
+            PoolShape::Cpmm { pool, trade_fee_rate } => {
+                VenuePool::Cpmm { pool, trade_fee_rate }
+            }
+            PoolShape::AmmV4(pool) => VenuePool::AmmV4(pool),
+            PoolShape::Whirlpool(pool) => {
+                let Some([b_to_a, a_to_b]) = whirlpool_arrays
+                    .get(whirlpool_index)
+                    .cloned()
+                    .flatten()
+                else {
+                    whirlpool_index += 1;
+                    continue;
+                };
+                whirlpool_index += 1;
+                VenuePool::Whirlpool {
+                    pool,
+                    arrays: [b_to_a, a_to_b],
+                }
+            }
+            PoolShape::Clmm { pool, config } => {
+                let Some([one_for_zero, zero_for_one]) = clmm_arrays
+                    .get(clmm_index)
+                    .cloned()
+                    .flatten()
+                else {
+                    clmm_index += 1;
+                    continue;
+                };
+                clmm_index += 1;
+                VenuePool::Clmm {
+                    pool,
+                    config,
+                    arrays: [one_for_zero, zero_for_one],
+                }
+            }
         };
         views.push(PoolView {
             venue,
@@ -605,6 +636,65 @@ async fn fetch_whirlpool_pools(
     Ok(shapes)
 }
 
+/// Every Raydium CLMM pool for the pair.
+///
+/// CLMM is concentrated liquidity: it can only be priced by walking initialized
+/// ticks, and it charges the pool's own trade fee from `AmmConfig`. Pools that
+/// charge fees off the output side, or that enable dynamic fees, need state
+/// this pricer does not model, so they are rejected rather than mispriced.
+async fn fetch_clmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolShape>> {
+    let program = Address::from_str(clmm::CLMM_PROGRAM_ID)
+        .map_err(|error| anyhow::anyhow!("clmm program: {error}"))?;
+    let accounts = program_accounts_for_pair(
+        rpc,
+        program,
+        Some(clmm::POOL_LEN),
+        (clmm::MINT_0_OFFSET, clmm::MINT_1_OFFSET),
+        wsol,
+        other,
+    )
+    .await?;
+
+    let mut decoded = Vec::with_capacity(accounts.len());
+    for (key, data) in accounts {
+        let Ok(pool) = clmm::ClmmPool::decode(beast_flash::pubkey(&key), &data) else {
+            continue;
+        };
+        if pool.ensure_swappable().is_err() {
+            continue;
+        }
+        decoded.push((beast_flash::pubkey(&key), pool));
+    }
+
+    // One batched read for every AmmConfig, then decode its trade fee rate.
+    let configs: Vec<Address> = decoded
+        .iter()
+        .map(|(_, pool)| address(&pool.amm_config))
+        .collect();
+    let config_data = rpc.get_multiple_accounts(&configs).await.unwrap_or_default();
+
+    let mut shapes = Vec::with_capacity(decoded.len());
+    for (_index, (_, pool)) in decoded.into_iter().enumerate() {
+        let Some(config_index) = configs
+            .iter()
+            .position(|candidate| *candidate == address(&pool.amm_config))
+        else {
+            continue;
+        };
+        let Some(account) = config_data.get(config_index).and_then(Option::as_ref) else {
+            continue;
+        };
+        let Ok(config) = clmm::AmmConfig::decode(&account.data) else {
+            continue;
+        };
+        if u64::from(config.trade_fee_rate) >= clmm::FEE_RATE_DENOMINATOR {
+            continue;
+        }
+        shapes.push(PoolShape::Clmm { pool, config });
+    }
+    Ok(shapes)
+}
+
 /// A decoded pool plus everything needed to price a swap against it.
 #[derive(Debug, Clone)]
 struct PoolView {
@@ -637,6 +727,9 @@ impl PoolView {
             VenuePool::Whirlpool { pool, .. } => {
                 // `fee_rate` is hundredths of a basis point.
                 u16::try_from(pool.fee_rate / 100).unwrap_or(u16::MAX)
+            }
+            VenuePool::Clmm { config, .. } => {
+                u16::try_from(config.trade_fee_rate / 100).unwrap_or(u16::MAX)
             }
         }
     }
@@ -1460,6 +1553,7 @@ async fn execute_best(
     // build simulates clean and then submits it immediately.
     const BUILD_ATTEMPTS: usize = 8;
     let mut built: Option<(beast_exec::BundlePlan, beast_rpc::SimulationResult)> = None;
+    let mut last_candidate: Option<beast_exec::BundlePlan> = None;
     let mut last_error = String::new();
     let mut last_logs: Vec<String> = Vec::new();
     for attempt in 1..=BUILD_ATTEMPTS {
@@ -1482,6 +1576,7 @@ async fn execute_best(
                 continue;
             }
         };
+        last_candidate = Some(candidate.clone());
         match executor.simulate_cycle(&candidate).await {
             Ok(simulation) if simulation.err.is_none() => {
                 built = Some((candidate, simulation));
@@ -1515,34 +1610,104 @@ async fn execute_best(
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
     }
-    let Some((plan, simulation)) = built else {
-        state.rejected += 1;
-        // The program's own log names the failing instruction and its error
-        // text; without it a custom code is unguessable.
-        for line in last_logs.iter().rev().take(4).rev() {
-            state.note(format!("    sim log: {line}"));
-        }
+    // Force-submit path: if no clean simulation was found, submit the last
+    // built candidate anyway so the user can see the attempt on Solscan. The
+    // chain is the final gate — a revert costs only the base fee.
+    if built.is_none() {
+        let candidate = match last_candidate {
+            Some(c) => c,
+            None => {
+                state.rejected += 1;
+                for line in last_logs.iter().rev().take(4).rev() {
+                    state.note(format!("    sim log: {line}"));
+                }
+                let _ = store.update_attempt(
+                    &attempt_id,
+                    &AttemptUpdate {
+                        status: Some("simulation_rejected".into()),
+                        error: Some(last_error.clone()),
+                        simulated: Some(true),
+                        ..AttemptUpdate::default()
+                    },
+                );
+                state.note(format!(
+                    "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
+                ));
+                return;
+            }
+        };
+        let _simulation = executor.simulate_cycle(&candidate).await;
         let _ = store.update_attempt(
             &attempt_id,
             &AttemptUpdate {
-                status: Some("simulation_rejected".into()),
-                error: Some(last_error.clone()),
+                status: Some("submitting_forced".into()),
                 simulated: Some(true),
                 ..AttemptUpdate::default()
             },
         );
-        state.note(format!(
-            "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
-        ));
+        let signature = candidate.signatures.first().cloned().unwrap_or_default();
+        let _ = store.update_attempt(
+            &attempt_id,
+            &AttemptUpdate {
+                status: Some("forced_submit".into()),
+                signature: Some(signature.clone()),
+                simulated: Some(true),
+                ..AttemptUpdate::default()
+            },
+        );
+        match executor.submit(&candidate).await {
+            Ok(bundle_id) => {
+                state.note(format!("{attempt_id} forced-submitted to Jito: {bundle_id}"));
+                let _ = store.update_attempt(
+                    &attempt_id,
+                    &AttemptUpdate {
+                        status: Some("submitted".into()),
+                        bundle_id: Some(bundle_id),
+                        ..AttemptUpdate::default()
+                    },
+                );
+            }
+            Err(error) => {
+                state.note(format!("{attempt_id} forced submit failed: {error}"));
+            }
+        }
         return;
+    }
+
+    // Normal path: clean simulation found, submit to Jito and poll for landing.
+    let Some((plan, simulation)) = built else {
+        unreachable!("built is None but we already handled that above");
     };
-    let signature = plan
-        .signatures
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "unknown".into());
-    let _ = store.update_attempt(
+    submit_clean(
         &attempt_id,
+        &plan,
+        &simulation,
+        cycle,
+        state,
+        store,
+        &*executor,
+        rpc,
+        start_balance,
+    )
+    .await;
+}
+
+/// The normal submit path: a clean simulation was found, so submit to Jito and
+/// poll for landing.
+async fn submit_clean(
+    attempt_id: &str,
+    plan: &beast_exec::BundlePlan,
+    simulation: &beast_rpc::SimulationResult,
+    cycle: &CycleLog,
+    state: &mut ArbState,
+    store: &Store,
+    executor: &Executor,
+    rpc: &RpcClient,
+    start_balance: u64,
+) {
+    let signature = plan.signatures.first().cloned().unwrap_or_default();
+    let _ = store.update_attempt(
+        attempt_id,
         &AttemptUpdate {
             status: Some("simulated".into()),
             signature: Some(signature.clone()),
@@ -1564,12 +1729,12 @@ async fn execute_best(
         return;
     }
 
-    let bundle_id = match executor.submit(&plan).await {
+    let bundle_id = match executor.submit(plan).await {
         Ok(bundle_id) => bundle_id,
         Err(error) => {
             state.rejected += 1;
             let _ = store.update_attempt(
-                &attempt_id,
+                attempt_id,
                 &AttemptUpdate {
                     status: Some("submit_failed".into()),
                     error: Some(error.to_string()),
@@ -1582,7 +1747,7 @@ async fn execute_best(
         }
     };
     let _ = store.update_attempt(
-        &attempt_id,
+        attempt_id,
         &AttemptUpdate {
             status: Some("submitted".into()),
             bundle_id: Some(bundle_id.clone()),
@@ -1615,7 +1780,7 @@ async fn execute_best(
         Some(status) if status.err.is_none() => {
             state.wallet_lamports = final_balance;
             let _ = store.update_attempt(
-                &attempt_id,
+                attempt_id,
                 &AttemptUpdate {
                     status: Some("landed".into()),
                     bundle_id: Some(bundle_id),
@@ -1634,7 +1799,7 @@ async fn execute_best(
         Some(status) => {
             state.wallet_lamports = final_balance;
             let _ = store.update_attempt(
-                &attempt_id,
+                attempt_id,
                 &AttemptUpdate {
                     status: Some("reverted".into()),
                     bundle_id: Some(bundle_id),
@@ -1652,7 +1817,7 @@ async fn execute_best(
         }
         None => {
             let _ = store.update_attempt(
-                &attempt_id,
+                attempt_id,
                 &AttemptUpdate {
                     status: Some("unconfirmed".into()),
                     bundle_id: Some(bundle_id),

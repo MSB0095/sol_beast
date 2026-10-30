@@ -132,6 +132,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Quote and simulate one WSOL -> token swap on a Raydium CLMM pool against
+    /// mainnet. Reports the local quote and the output vault's actual gain; a
+    /// non-zero quote error means the local pricer is not exact.
+    ClmmProbe {
+        /// CLMM pool address.
+        #[arg(long)]
+        pool: String,
+        /// Input amount in lamports.
+        #[arg(long, default_value_t = 5_000_000)]
+        amount: u64,
+        /// Slippage tolerance applied to the quoted output, in basis points.
+        #[arg(long, default_value_t = 50)]
+        slippage_bps: u16,
+        /// How many consecutive tick arrays to load in the swap direction.
+        #[arg(long, default_value_t = 4)]
+        arrays: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Create an address lookup table carrying the flash provider's stable
     /// accounts. Some provider lifecycles (Marginfi + CPMM) exceed the
     /// 1232-byte transaction limit without one. Simulates by default; sends
@@ -357,6 +376,24 @@ async fn main() -> Result<()> {
             init_logging("info", cli.json_logs)?;
             commands::whirlpool_probe(cli.config.as_deref(), &pool, amount, slippage_bps, json).await
         }
+        Command::ClmmProbe {
+            pool,
+            amount,
+            slippage_bps,
+            arrays,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::clmm_probe(
+                cli.config.as_deref(),
+                &pool,
+                amount,
+                slippage_bps,
+                arrays,
+                json,
+            )
+            .await
+        }
         Command::FlashAlt {
             real,
             confirm,
@@ -390,16 +427,23 @@ async fn main() -> Result<()> {
                 refresh_ms,
                 min_profit_lamports,
                 mints: {
-                    let mut defaults: Vec<String> = crate::arb::DEFAULT_PAIR_MINTS
-                        .iter()
-                        .map(|mint| (*mint).to_string())
-                        .collect();
-                    for mint in mints {
-                        if !defaults.contains(&mint) {
-                            defaults.push(mint);
+                    if let Ok(env) = std::env::var("BEAST_MINTS") {
+                        env.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    } else {
+                        let mut defaults: Vec<String> = crate::arb::DEFAULT_PAIR_MINTS
+                            .iter()
+                            .map(|mint| (*mint).to_string())
+                            .collect();
+                        for mint in mints {
+                            if !defaults.contains(&mint) {
+                                defaults.push(mint);
+                            }
                         }
+                        defaults
                     }
-                    defaults
                 },
                 amount_ladder: if amounts.is_empty() {
                     crate::arb::ArbOptions::default().amount_ladder

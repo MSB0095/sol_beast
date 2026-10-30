@@ -2080,11 +2080,6 @@ pub async fn whirlpool_probe(
             let delta = outcome.amount_in.abs_diff(reverse);
             println!("round trip  {reverse} ({sign}{delta} vs input)");
         }
-        if let Some(reverse) = outcome.reverse_quoted {
-            let sign = if reverse <= outcome.amount_in { "-" } else { "+" };
-            let delta = outcome.amount_in.abs_diff(reverse);
-            println!("round trip  {reverse} ({sign}{delta} vs input)");
-        }
         if let Some(actual) = outcome.actual_out {
             println!("actual      {actual}");
         }
@@ -2110,6 +2105,101 @@ pub async fn whirlpool_probe(
 
     if !outcome.ok() {
         bail!("Whirlpool simulation failed");
+    }
+    Ok(())
+}
+
+/// Quote and simulate one Raydium CLMM swap on mainnet.
+pub async fn clmm_probe(
+    path: Option<&Path>,
+    pool: &str,
+    amount: u64,
+    slippage_bps: u16,
+    array_count: usize,
+    json_output: bool,
+) -> Result<()> {
+    let loaded = load(path, false)?;
+    let config = &loaded.config;
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required for the CLMM probe"))?;
+    let rpc = rpc(config)?;
+    let pool_address = Address::from_str(pool).context("pool address")?;
+    let balance = rpc.get_balance(wallet.address()).await?;
+    if balance < amount.saturating_add(3_000_000) {
+        bail!(
+            "wallet holds {balance} lamports; the probe needs the swap amount plus ATA rent and fees"
+        );
+    }
+
+    let outcome = beast_exec::clmm::probe_swap(
+        &rpc,
+        &wallet,
+        pool_address,
+        amount,
+        slippage_bps,
+        array_count,
+    )
+    .await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&outcome)?);
+    } else {
+        println!("pool        {}", outcome.pool);
+        println!(
+            "direction   {} -> {} ({})",
+            outcome.input_mint,
+            outcome.output_mint,
+            if outcome.zero_for_one { "0->1" } else { "1->0" }
+        );
+        println!("amount      {}", outcome.amount_in);
+        println!(
+            "state       sqrt={} liquidity={} tick={} spacing={} fee={}",
+            outcome.sqrt_price_x64,
+            outcome.liquidity,
+            outcome.tick_current,
+            outcome.tick_spacing,
+            outcome.trade_fee_rate
+        );
+        println!("arrays      {}", outcome.tick_arrays.join(", "));
+        println!("quoted      {}", outcome.quoted_out);
+        if let Some(reverse) = outcome.reverse_quoted {
+            let sign = if reverse <= outcome.amount_in { "-" } else { "+" };
+            let delta = outcome.amount_in.abs_diff(reverse);
+            println!("round trip  {reverse} ({sign}{delta} vs input)");
+        }
+        if let Some(actual) = outcome.actual_out {
+            println!("actual      {actual}");
+        }
+        if let Some(error) = outcome.quote_error {
+            println!("quote error {error}");
+        }
+        println!(
+            "read        {}",
+            if outcome.stale_read {
+                "pool moved between the read and the swap; not a claim about the math"
+            } else {
+                "pool unchanged; quote and swap priced the same books"
+            }
+        );
+        println!("minimum     {}", outcome.minimum_out);
+        println!(
+            "result      {}",
+            if outcome.ok() {
+                "ok".to_string()
+            } else {
+                format!("{:?}", outcome.err)
+            }
+        );
+        if let Some(units) = outcome.units_consumed {
+            println!("compute     {units}");
+        }
+        for line in &outcome.logs {
+            println!("  log {line}");
+        }
+    }
+
+    if !outcome.ok() {
+        bail!("CLMM simulation failed");
     }
     Ok(())
 }

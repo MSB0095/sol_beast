@@ -1665,12 +1665,16 @@ impl Executor {
             // reverts, nothing is spent beyond the base fee; if it lands, the
             // profit hits the wallet.
             //
-            // final_min_out is set slightly below principal+fee to allow for
-            // slippage between the build and the on-chain execution. Without
-            // this tolerance, every cycle would revert on the smallest adverse
-            // price move and nothing would ever land.
-            let slippage_tolerance = principal_plus_fee.saturating_div(50); // 2%
-            let final_min_out = principal_plus_fee.saturating_sub(slippage_tolerance);
+            // The enforced minimum is break-even plus the configured minimum
+            // profit and the lamports that leave the wallet (base fee and tip).
+            // A looser floor lets a bundle land at a loss, which is the one
+            // outcome the design forbids: green or revert, never red.
+            let min_profit = u128::from(self.config.min_profit_lamports);
+            let overhead = u128::from(fees_lamports) + u128::from(MIN_JITO_TIP_LAMPORTS);
+            let floor = u128::from(principal_plus_fee) + min_profit + overhead;
+            let final_min_out = u64::try_from(floor).map_err(|_| {
+                ExecutionError::Guard("break-even floor does not fit in u64".into())
+            })?;
             let tip_lamports = MIN_JITO_TIP_LAMPORTS;
             (final_min_out, 0, tip_lamports)
         };

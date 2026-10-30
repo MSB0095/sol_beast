@@ -275,10 +275,12 @@ async fn discover_pair_pools(
     Ok(shapes)
 }
 
-/// A discovered pool, with only the parts that do not move every block.
+/// A discovered pool's identity, with every price-bearing field refreshed from
+/// the chain before it is priced.
 ///
-/// Balances and concentrated-liquidity tick arrays are deliberately absent: a
-/// cached copy of either would be a stale price, and a stale price is
+/// The pool account is re-read on each pass (see [`PoolShape::refreshed`]);
+/// balances and concentrated-liquidity tick arrays are read fresh as well. A
+/// cached copy of any of them would be a stale price, and a stale price is
 /// indistinguishable from an edge right up until the transaction reverts.
 #[derive(Debug, Clone)]
 enum PoolShape {
@@ -295,6 +297,15 @@ enum PoolShape {
 }
 
 impl PoolShape {
+    fn address(&self) -> Address {
+        match self {
+            Self::Cpmm { pool, .. } => address(&pool.address),
+            Self::AmmV4(pool) => address(&pool.address),
+            Self::Whirlpool(pool) => address(&pool.address),
+            Self::Clmm { pool, .. } => address(&pool.address),
+        }
+    }
+
     fn vaults(&self) -> [Address; 2] {
         let vaults = match self {
             Self::Cpmm { pool, .. } => pool.vaults,
@@ -304,32 +315,88 @@ impl PoolShape {
         };
         [address(&vaults[0]), address(&vaults[1])]
     }
+
+    /// Re-decode this pool from a freshly read account.
+    ///
+    /// Each venue's pool account carries state that changes every swap:
+    /// `sqrt_price`, `liquidity` and `tick_current_index` for the concentrated
+    /// venues, and the booked-but-uncollected fees for the constant-product
+    /// ones. The cached shape is only good for its identity (mints, vaults,
+    /// fee tier), so the account is decoded again on every pass. A decode
+    /// failure returns `None`: a pool without fresh state must not be priced.
+    fn refreshed(&self, data: &[u8]) -> Option<PoolShape> {
+        match self {
+            Self::Cpmm {
+                pool,
+                trade_fee_rate,
+            } => Some(Self::Cpmm {
+                pool: cpmm::CpmmPool::decode(pool.address, data).ok()?,
+                trade_fee_rate: *trade_fee_rate,
+            }),
+            Self::AmmV4(pool) => Some(Self::AmmV4(
+                amm_v4::AmmV4Pool::decode(pool.address, data).ok()?,
+            )),
+            Self::Whirlpool(pool) => Some(Self::Whirlpool(
+                beast_exec::whirlpool::WhirlpoolPool::decode(pool.address, data).ok()?,
+            )),
+            Self::Clmm { pool, config } => Some(Self::Clmm {
+                pool: clmm::ClmmPool::decode(pool.address, data).ok()?,
+                config: *config,
+            }),
+        }
+    }
 }
 
-/// Read the state that moves: vault balances for every pool, and tick arrays
-/// for every concentrated-liquidity pool. One batched read each, whatever the
-/// pool count.
+/// Read the state that moves: every pool account, every vault balance, and the
+/// tick arrays of every concentrated-liquidity pool. Each family is read with
+/// batched `getMultipleAccounts` calls, so the count of round trips depends on
+/// how many pools exist, not on how many quotes are priced.
 async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolView> {
-    let whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = shapes
+    // Every pool account is re-read, not just its vaults. `sqrt_price`,
+    // `liquidity` and `tick_current_index` *are* the price of a whirlpool or a
+    // CLMM, and they change on every swap; reusing the copy cached by discovery
+    // priced a five-minute-old market and manufactured a few basis points of
+    // edge that disappeared the instant the executor re-read the pool.
+    let pool_keys: Vec<Address> = shapes.iter().map(PoolShape::address).collect();
+    let vault_keys: Vec<Address> = shapes.iter().flat_map(|shape| shape.vaults()).collect();
+    let (balances, pool_accounts) = tokio::join!(
+        vault_balances(rpc, &vault_keys),
+        read_accounts(rpc, &pool_keys),
+    );
+
+    // A pool whose account could not be read has no current price. Dropping it
+    // for this pass is the only honest option: its cached price is not the
+    // market, and pricing it would resurrect exactly the fake edge this refresh
+    // exists to remove. The original index is kept because `balances` is
+    // positional over the unshortened pool list.
+    let live: Vec<(usize, PoolShape)> = shapes
         .iter()
-        .filter_map(|shape| match shape {
+        .enumerate()
+        .filter_map(|(index, shape)| {
+            let account = pool_accounts.get(index).and_then(Option::as_ref)?;
+            Some((index, shape.refreshed(&account.data)?))
+        })
+        .collect();
+
+    let whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = live
+        .iter()
+        .filter_map(|(_, shape)| match shape {
             PoolShape::Whirlpool(pool) => Some(pool.clone()),
             _ => None,
         })
         .collect();
-    let clmms: Vec<(clmm::ClmmPool, clmm::AmmConfig)> = shapes
+    let clmms: Vec<(clmm::ClmmPool, clmm::AmmConfig)> = live
         .iter()
-        .filter_map(|shape| match shape {
+        .filter_map(|(_, shape)| match shape {
             PoolShape::Clmm { pool, config } => Some((pool.clone(), *config)),
             _ => None,
         })
         .collect();
-    let vault_keys: Vec<Address> = shapes.iter().flat_map(|shape| shape.vaults()).collect();
     let clmm_pools: Vec<clmm::ClmmPool> = clmms.iter().map(|(pool, _)| pool.clone()).collect();
-    // One batched read for every vault in the whole scan, and one batched read
-    // for every Whirlpool and CLMM tick array the pair needs in both directions.
-    let (balances, whirlpool_arrays, clmm_arrays) = tokio::join!(
-        vault_balances(rpc, &vault_keys),
+    // One batched read for every Whirlpool and CLMM tick array the pair needs in
+    // both directions. The start indexes depend on the fresh `tick_current_index`,
+    // which is why this runs after the pool accounts are decoded.
+    let (whirlpool_arrays, clmm_arrays) = tokio::join!(
         beast_exec::whirlpool::load_tick_arrays_batch(rpc, &whirlpools),
         beast_exec::clmm::load_tick_arrays_batch(rpc, &clmm_pools, 1),
     );
@@ -338,8 +405,8 @@ async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolV
 
     let mut whirlpool_index = 0;
     let mut clmm_index = 0;
-    let mut views = Vec::with_capacity(shapes.len());
-    for (index, shape) in shapes.into_iter().enumerate() {
+    let mut views = Vec::with_capacity(live.len());
+    for (index, shape) in live {
         let venue = match shape {
             PoolShape::Cpmm { pool, trade_fee_rate } => {
                 VenuePool::Cpmm { pool, trade_fee_rate }
@@ -460,6 +527,30 @@ async fn program_accounts_for_pair(
     let mut seen = std::collections::HashSet::new();
     accounts.retain(|(key, _)| seen.insert(*key));
     Ok(accounts)
+}
+
+/// Read full accounts for a list of keys, in the same order.
+///
+/// Same chunking as [`vault_balances`]: `getMultipleAccounts` accepts at most
+/// 100 keys, and the result stays positional so a missing account cannot shift
+/// every later pool onto the wrong address.
+async fn read_accounts(
+    rpc: &RpcClient,
+    keys: &[Address],
+) -> Vec<Option<beast_rpc::Account>> {
+    let mut accounts_out = Vec::with_capacity(keys.len());
+    let chunks: Vec<&[Address]> = keys.chunks(100).collect();
+    let responses = futures_util::future::join_all(
+        chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)),
+    )
+    .await;
+    for (chunk, accounts) in chunks.iter().zip(responses) {
+        let accounts = accounts.unwrap_or_default();
+        for index in 0..chunk.len() {
+            accounts_out.push(accounts.get(index).cloned().flatten());
+        }
+    }
+    accounts_out
 }
 
 /// Read token-account amounts for a list of vault keys, in the same order.

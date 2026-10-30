@@ -443,7 +443,7 @@ async fn main() -> Result<()> {
             explain,
             pool_ttl_ms,
         } => {
-            init_logging(if scan_only && !explain { "warn" } else { "error" }, cli.json_logs)?;
+            init_logging(if scan_only { "info" } else { "error" }, cli.json_logs)?;
             let mut options = crate::arb::ArbOptions {
                 refresh_ms,
                 min_profit_lamports,

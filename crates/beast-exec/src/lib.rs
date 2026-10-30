@@ -1931,13 +1931,13 @@ impl Executor {
                 })?;
             let config = crate::clmm::AmmConfig::decode(&config_account.account.data)?;
             // Load both directions' tick arrays at build time; the direction is
-            // only known once the cycle's legs are resolved. One array per
-            // direction keeps the composed transaction under the 1232-byte
-            // limit (CLMM + Whirlpool tick arrays would otherwise exceed it).
-            // Some cycles may fail with "no initialized tick" but that's better
-            // than all cycles failing with size limits.
-            let one_for_zero = crate::clmm::load_tick_arrays(&self.rpc, &pool, false, 1).await?;
-            let zero_for_one = crate::clmm::load_tick_arrays(&self.rpc, &pool, true, 1).await?;
+            // only known once the cycle's legs are resolved. Two arrays per
+            // direction is the smallest set that lets the walk cross a tick: a
+            // single array fails with "no initialized tick in this direction"
+            // whenever the current tick sits near the edge of its array, which
+            // is most of the time.
+            let one_for_zero = crate::clmm::load_tick_arrays(&self.rpc, &pool, false, 2).await?;
+            let zero_for_one = crate::clmm::load_tick_arrays(&self.rpc, &pool, true, 2).await?;
             return Ok(VenuePool::Clmm {
                 pool,
                 config,

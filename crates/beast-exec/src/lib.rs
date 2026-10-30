@@ -1262,15 +1262,38 @@ impl Executor {
 
         let (blockhash_string, _) = self.rpc.get_latest_blockhash().await?;
         let blockhash = parse_hash(&blockhash_string)?;
-        let transaction = build_composed_transaction(
-            &composed,
+        let tip_account = self.choose_tip_account().await?;
+        // Build the instruction sequence first, tip included, then let the
+        // packer decide how many transactions it takes. A cycle is never
+        // dropped for being large: it is split in order across the bundle, and
+        // only Jito's five-transaction bundle limit can refuse it.
+        let mut sequence = composed;
+        let mut tip_inlined = false;
+        if !guard_applicable {
+            let tip_pubkey = Pubkey::from_str(&tip_account.to_string())
+                .map_err(|_| ExecutionError::JitoDisabled)?;
+            sequence.instructions.push(system_instruction::transfer(
+                &self.wallet.pubkey(),
+                &tip_pubkey,
+                tip_lamports,
+            ));
+            tip_inlined = true;
+        }
+        let packed = build_composed_transactions(
+            &sequence,
             self.wallet.pubkey(),
             blockhash,
             &self.wallet.keypair,
             &tables,
         )?;
-        let mut encoded_transactions = vec![encode_versioned(&transaction)?];
-        let mut signatures = vec![transaction.signatures[0].to_string()];
+        let mut encoded_transactions: Vec<String> = packed
+            .iter()
+            .map(encode_versioned)
+            .collect::<Result<Vec<_>>>()?;
+        let mut signatures: Vec<String> = packed
+            .iter()
+            .map(|transaction| transaction.signatures[0].to_string())
+            .collect();
         let guard_required = if guard_applicable {
             let guard = build_guard_transaction(
                 &self.config.guard_program,
@@ -1292,35 +1315,6 @@ impl Executor {
         } else {
             0
         };
-        let tip_account = self.choose_tip_account().await?;
-        // A bundle's tip must sit in its last transaction. When the cycle is
-        // the whole bundle, folding the tip into it removes an entire
-        // transaction: one base fee instead of two, and a single atomic unit
-        // that cannot be reordered or half-dropped. The fallback keeps the
-        // separate tip transaction for the guarded shape, where the guard
-        // transaction has to come last.
-        let mut tip_inlined = false;
-        if !guard_applicable {
-            let tip_pubkey = Pubkey::from_str(&tip_account.to_string())
-                .map_err(|_| ExecutionError::JitoDisabled)?;
-            let mut with_tip = composed.clone();
-            with_tip.instructions.push(system_instruction::transfer(
-                &self.wallet.pubkey(),
-                &tip_pubkey,
-                tip_lamports,
-            ));
-            if let Ok(transaction) = build_composed_transaction(
-                &with_tip,
-                self.wallet.pubkey(),
-                blockhash,
-                &self.wallet.keypair,
-                &tables,
-            ) {
-                encoded_transactions = vec![encode_versioned(&transaction)?];
-                signatures = vec![transaction.signatures[0].to_string()];
-                tip_inlined = true;
-            }
-        }
         if !tip_inlined {
             let tip = build_tip_transaction(
                 self.wallet.pubkey(),
@@ -2134,6 +2128,91 @@ impl Executor {
 /// legs overflow the 1232-byte limit. Jupiter already returns the lookup tables
 /// it used, so the composed transaction is rebuilt as v0 against those tables,
 /// where each extra account costs one index byte.
+/// Pack a composed cycle into as many transactions as it needs.
+///
+/// The 1232-byte cap is a Solana protocol constant, so it cannot be raised.
+/// What can be removed is the *rejection*: a Jito bundle is atomic across up to
+/// five transactions that execute in order in one slot, so a cycle that does not
+/// fit in one transaction is split at an instruction boundary and still lands
+/// all-or-nothing. Instruction order is what makes the split safe — the flash
+/// borrow opens the sequence and the repay closes it — so the packer only ever
+/// cuts between whole instructions.
+fn build_composed_transactions(
+    composed: &compose::ComposedCycle,
+    wallet: solana_sdk::pubkey::Pubkey,
+    blockhash: Hash,
+    keypair: &Keypair,
+    tables: &[compose::AddressLookupTable],
+) -> Result<Vec<VersionedTransaction>> {
+    /// Jito refuses a bundle with more than five transactions.
+    const MAX_BUNDLE_TRANSACTIONS: usize = 5;
+    if composed.instructions.is_empty() {
+        return Err(ExecutionError::Transaction(
+            "composed cycle has no instructions".into(),
+        ));
+    }
+
+    // Greedy fill: an instruction joins the current transaction while the
+    // assembled message still fits, and opens the next one when it does not.
+    let mut groups: Vec<Vec<Instruction>> = vec![Vec::new()];
+    for instruction in &composed.instructions {
+        let index = groups.len() - 1;
+        groups[index].push(instruction.clone());
+        if !group_fits(&groups[index], wallet, blockhash, tables) && groups[index].len() > 1 {
+            groups[index].pop();
+            groups.push(vec![instruction.clone()]);
+        }
+    }
+    if groups.len() > MAX_BUNDLE_TRANSACTIONS {
+        return Err(ExecutionError::Unsupported(format!(
+            "composed cycle needs {} transactions, above the {}-transaction bundle limit; \
+             the 1232-byte transaction cap is a protocol constant, not a policy",
+            groups.len(),
+            MAX_BUNDLE_TRANSACTIONS
+        )));
+    }
+
+    let mut transactions = Vec::with_capacity(groups.len());
+    for instructions in groups {
+        let group = compose::ComposedCycle {
+            instructions,
+            signatures_required: composed.signatures_required,
+            lookup_tables: composed.lookup_tables.clone(),
+            estimated_bytes: 0,
+        };
+        let mut transaction = compose::assemble_v0(&group, wallet, blockhash, tables)?;
+        let message_bytes = transaction.message.serialize();
+        transaction.signatures = vec![keypair.sign_message(&message_bytes)];
+        transactions.push(transaction);
+    }
+    tracing::debug!(
+        transactions = transactions.len(),
+        "packed composed cycle"
+    );
+    Ok(transactions)
+}
+
+/// Would these instructions assemble into one legal transaction?
+fn group_fits(
+    instructions: &[Instruction],
+    wallet: solana_sdk::pubkey::Pubkey,
+    blockhash: Hash,
+    tables: &[compose::AddressLookupTable],
+) -> bool {
+    let probe = compose::ComposedCycle {
+        instructions: instructions.to_vec(),
+        signatures_required: 1,
+        lookup_tables: tables.iter().map(|table| table.key.to_string()).collect(),
+        estimated_bytes: 0,
+    };
+    match compose::assemble_v0(&probe, wallet, blockhash, tables) {
+        Ok(transaction) => {
+            transaction.message.serialize().len() + 65 <= compose::MAX_TRANSACTION_BYTES
+        }
+        Err(_) => false,
+    }
+}
+
 fn build_composed_transaction(
     composed: &compose::ComposedCycle,
     wallet: solana_sdk::pubkey::Pubkey,

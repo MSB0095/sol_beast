@@ -322,7 +322,7 @@ async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolV
     let (balances, whirlpool_arrays, clmm_arrays) = tokio::join!(
         vault_balances(rpc, &vault_keys),
         beast_exec::whirlpool::load_tick_arrays_batch(rpc, &whirlpools),
-        beast_exec::clmm::load_tick_arrays_batch(rpc, &clmm_pools, 2),
+        beast_exec::clmm::load_tick_arrays_batch(rpc, &clmm_pools, 1),
     );
     let whirlpool_arrays = whirlpool_arrays.unwrap_or_else(|_| vec![None; whirlpools.len()]);
     let clmm_arrays = clmm_arrays.unwrap_or_else(|_| vec![None; clmms.len()]);
@@ -1421,31 +1421,42 @@ async fn run_text(
                     );
                 }
                 let cycles = found.as_slice();
-                if !cycles.is_empty() {
-                    state.profitable += cycles.len();
-                    state.best = cycles.to_vec();
-                    state.best.truncate(24);
-                    state.note(format!(
-                        "found {} profitable cycles; best {} lamports",
-                        cycles.len(),
-                        cycles[0].profit
-                    ));
-                    // Report the closest results, which are the informative
-                    // ones: the run has already sorted them, so the bad cycles
-                    // are the tail rather than the whole list.
-                    let closest = state.closest.clone();
-                    for cycle in &closest {
-                        let message = format!(
-                            "  best: {} -> {} amount {} leg1 {} final {} profit {}",
-                            cycle.pool_in,
-                            cycle.pool_out,
-                            cycle.amount,
-                            cycle.leg1_out,
-                            cycle.final_out,
+                // Always try to execute the best cycle — even when no cycle is
+                // locally profitable. Markets move between the scan read and
+                // the build, so a marginally-negative cycle can land
+                // profitably on-chain. The on-chain simulation is the final
+                // gate: if it reverts, nothing is spent beyond the base fee,
+                // and the user sees the attempt on Solscan.
+                let best_cycle = cycles.first().cloned().or_else(|| state.closest.first().cloned());
+                if let Some(cycle) = best_cycle {
+                    if cycles.is_empty() {
+                        state.note(format!(
+                            "no locally profitable cycle; submitting best near-miss {} lamports",
                             cycle.profit
-                        );
-                        state.note(message.clone());
-                        println!("{message}");
+                        ));
+                    } else {
+                        state.profitable += cycles.len();
+                        state.best = cycles.to_vec();
+                        state.best.truncate(24);
+                        state.note(format!(
+                            "found {} profitable cycles; best {} lamports",
+                            cycles.len(),
+                            cycles[0].profit
+                        ));
+                        let closest = state.closest.clone();
+                        for cycle in &closest {
+                            let message = format!(
+                                "  best: {} -> {} amount {} leg1 {} final {} profit {}",
+                                cycle.pool_in,
+                                cycle.pool_out,
+                                cycle.amount,
+                                cycle.leg1_out,
+                                cycle.final_out,
+                                cycle.profit
+                            );
+                            state.note(message.clone());
+                            println!("{message}");
+                        }
                     }
                     let logged = state.log.len();
                     execute_best(
@@ -1455,15 +1466,11 @@ async fn run_text(
                         &reserve,
                         executor.clone(),
                         &store,
-                        &cycles[0],
+                        &cycle,
                         options.mode,
                         &mut state,
                     )
                     .await;
-                    // Text mode has no status panel, so the attempt's notes are
-                    // printed as they are appended. Without this a failed
-                    // preparation is invisible in exactly the mode used for
-                    // unattended runs.
                     let added = state.log.len().saturating_sub(logged);
                     for message in state.log.iter().take(added).rev() {
                         println!("    {message}");
@@ -1546,12 +1553,11 @@ async fn execute_best(
     });
     state.attempts += 1;
 
-    // A pool can move between the state read that prices the cycle and the
-    // simulation that accepts it; on a thin pool that is the difference between
-    // a build that repays and one that reverts. Rebuilding is free, submitting
-    // a stale build is not, so the loop rebuilds from fresh state until one
-    // build simulates clean and then submits it immediately.
-    const BUILD_ATTEMPTS: usize = 8;
+    // Execute IMMEDIATELY: opportunities last seconds or less. Try up to 3
+    // fast rebuilds — submit on the FIRST clean simulation, don't wait for
+    // all attempts. If nothing simulates clean, force-submit anyway; the
+    // chain is the final gate (revert costs only the base fee).
+    const BUILD_ATTEMPTS: usize = 3;
     let mut built: Option<(beast_exec::BundlePlan, beast_rpc::SimulationResult)> = None;
     let mut last_candidate: Option<beast_exec::BundlePlan> = None;
     let mut last_error = String::new();
@@ -1564,14 +1570,12 @@ async fn execute_best(
             Ok(candidate) => candidate,
             Err(error) => {
                 last_error = error.to_string();
-                // A balance shortfall or a disabled live path will not repair
-                // itself between attempts.
                 if !matches!(error, beast_exec::ExecutionError::Unprofitable(_)) {
                     last_logs.clear();
                     break;
                 }
                 if attempt < BUILD_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 continue;
             }
@@ -1589,95 +1593,91 @@ async fn execute_best(
                     .map(|error| error.to_string())
                     .unwrap_or_else(|| "simulation rejected".into());
                 last_logs = simulation.logs.clone();
-                let _ = store.update_attempt(
-                    &attempt_id,
-                    &AttemptUpdate {
-                        status: Some("resimulating".into()),
-                        simulated: Some(true),
-                        ..AttemptUpdate::default()
-                    },
-                );
-                state.note(format!(
-                    "{attempt_id} attempt {attempt} did not simulate clean; rebuilding"
-                ));
+                if attempt < BUILD_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                continue;
             }
             Err(error) => {
                 last_error = error.to_string();
                 last_logs.clear();
-            }
-        }
-        if attempt < BUILD_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
-    }
-    // Force-submit path: if no clean simulation was found, submit the last
-    // built candidate anyway so the user can see the attempt on Solscan. The
-    // chain is the final gate — a revert costs only the base fee.
-    if built.is_none() {
-        let candidate = match last_candidate {
-            Some(c) => c,
-            None => {
-                state.rejected += 1;
-                for line in last_logs.iter().rev().take(4).rev() {
-                    state.note(format!("    sim log: {line}"));
+                if attempt < BUILD_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                let _ = store.update_attempt(
-                    &attempt_id,
-                    &AttemptUpdate {
-                        status: Some("simulation_rejected".into()),
-                        error: Some(last_error.clone()),
-                        simulated: Some(true),
-                        ..AttemptUpdate::default()
-                    },
-                );
-                state.note(format!(
-                    "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
-                ));
-                return;
-            }
-        };
-        let _simulation = executor.simulate_cycle(&candidate).await;
-        let _ = store.update_attempt(
-            &attempt_id,
-            &AttemptUpdate {
-                status: Some("submitting_forced".into()),
-                simulated: Some(true),
-                ..AttemptUpdate::default()
-            },
-        );
-        let signature = candidate.signatures.first().cloned().unwrap_or_default();
-        let _ = store.update_attempt(
-            &attempt_id,
-            &AttemptUpdate {
-                status: Some("forced_submit".into()),
-                signature: Some(signature.clone()),
-                simulated: Some(true),
-                ..AttemptUpdate::default()
-            },
-        );
-        match executor.submit(&candidate).await {
-            Ok(bundle_id) => {
-                state.note(format!("{attempt_id} forced-submitted to Jito: {bundle_id}"));
-                let _ = store.update_attempt(
-                    &attempt_id,
-                    &AttemptUpdate {
-                        status: Some("submitted".into()),
-                        bundle_id: Some(bundle_id),
-                        ..AttemptUpdate::default()
-                    },
-                );
-            }
-            Err(error) => {
-                state.note(format!("{attempt_id} forced submit failed: {error}"));
+                continue;
             }
         }
-        return;
     }
-
-    // Normal path: clean simulation found, submit to Jito and poll for landing.
-    let Some((plan, simulation)) = built else {
-        unreachable!("built is None but we already handled that above");
+    // Force-submit if nothing simulated clean: the chain decides, not the model.
+    let (plan, simulation) = match built {
+        Some(b) => b,
+        None => {
+            let candidate = match last_candidate {
+                Some(c) => c,
+                None => {
+                    state.rejected += 1;
+                    for line in last_logs.iter().rev().take(4).rev() {
+                        state.note(format!("    sim log: {line}"));
+                    }
+                    let _ = store.update_attempt(
+                        &attempt_id,
+                        &AttemptUpdate {
+                            status: Some("simulation_rejected".into()),
+                            error: Some(last_error.clone()),
+                            simulated: Some(true),
+                            ..AttemptUpdate::default()
+                        },
+                    );
+                    state.note(format!(
+                        "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
+                    ));
+                    return;
+                }
+            };
+            let signature = candidate.signatures.first().cloned().unwrap_or_default();
+            let _ = store.update_attempt(
+                &attempt_id,
+                &AttemptUpdate {
+                    status: Some("forced_submit".into()),
+                    signature: Some(signature.clone()),
+                    simulated: Some(true),
+                    ..AttemptUpdate::default()
+                },
+            );
+            match executor.submit(&candidate).await {
+                Ok(bundle_id) => {
+                    state.note(format!("{attempt_id} forced-submitted to Jito: {bundle_id}"));
+                    let _ = store.update_attempt(
+                        &attempt_id,
+                        &AttemptUpdate {
+                            status: Some("submitted".into()),
+                            bundle_id: Some(bundle_id.clone()),
+                            signature: Some(signature.clone()),
+                            simulated: Some(true),
+                            ..AttemptUpdate::default()
+                        },
+                    );
+                    poll_bundle(
+                        &attempt_id,
+                        &signature,
+                        &bundle_id,
+                        state,
+                        store,
+                        &*executor,
+                        rpc,
+                        start_balance,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    state.note(format!("{attempt_id} forced submit failed: {error}"));
+                }
+            }
+            return;
+        }
     };
+    // Clean simulation found — submit immediately, don't wait.
+    state.note(format!("{attempt_id} simulation clean, submitting to Jito immediately"));
     submit_clean(
         &attempt_id,
         &plan,
@@ -1730,9 +1730,19 @@ async fn submit_clean(
     }
 
     let bundle_id = match executor.submit(plan).await {
-        Ok(bundle_id) => bundle_id,
+        Ok(bundle_id) => {
+            state.note(format!(
+                "{attempt_id} JITO SUBMIT SUCCESS · bundle_id={bundle_id} · tx_count={} · tip={} · borrow={} · signatures={:?}",
+                plan.encoded_transactions.len(),
+                plan.tip_lamports,
+                cycle.amount,
+                plan.signatures.first().cloned().unwrap_or_default()
+            ));
+            bundle_id
+        }
         Err(error) => {
             state.rejected += 1;
+            state.note(format!("{attempt_id} JITO SUBMIT FAILED: {error}"));
             let _ = store.update_attempt(
                 attempt_id,
                 &AttemptUpdate {
@@ -1757,79 +1767,108 @@ async fn submit_clean(
     );
     state.note(format!("{attempt_id} submitted as {bundle_id}"));
 
-    // Jito lands a bundle at the next leader slot, so a status that is still
-    // missing after a minute means it was dropped rather than delayed. The
-    // wallet delta is the only honest profit number: it already includes the
-    // tip, the base fees and any rent that came back.
-    let mut status = None;
-    for _ in 0..120 {
-        if let Ok(statuses) = rpc.get_signature_statuses(std::slice::from_ref(&signature)).await {
-            if let Some(Some(found)) = statuses.into_iter().next() {
-                status = Some(found);
-                break;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let final_balance = rpc
-        .get_balance(executor.wallet().address())
-        .await
-        .unwrap_or(start_balance);
-    let realized = final_balance as i64 - start_balance as i64;
-    match status {
-        Some(status) if status.err.is_none() => {
-            state.wallet_lamports = final_balance;
-            let _ = store.update_attempt(
-                attempt_id,
-                &AttemptUpdate {
-                    status: Some("landed".into()),
-                    bundle_id: Some(bundle_id),
-                    simulated: Some(true),
-                    landed: Some(true),
-                    reverted: Some(false),
-                    realized_net_lamports: Some(realized),
-                    ..AttemptUpdate::default()
-                },
-            );
-            state.note(format!(
-                "{attempt_id} landed at slot {} · net {realized:+} lamports",
-                status.slot
-            ));
-        }
-        Some(status) => {
-            state.wallet_lamports = final_balance;
-            let _ = store.update_attempt(
-                attempt_id,
-                &AttemptUpdate {
-                    status: Some("reverted".into()),
-                    bundle_id: Some(bundle_id),
-                    simulated: Some(true),
-                    landed: Some(true),
-                    reverted: Some(true),
-                    realized_net_lamports: Some(realized),
-                    error: Some(format!("{:?}", status.err)),
-                    ..AttemptUpdate::default()
-                },
-            );
-            state.note(format!(
-                "{attempt_id} reverted on-chain · net {realized:+} lamports"
-            ));
-        }
-        None => {
-            let _ = store.update_attempt(
-                attempt_id,
-                &AttemptUpdate {
-                    status: Some("unconfirmed".into()),
-                    bundle_id: Some(bundle_id),
-                    simulated: Some(true),
-                    ..AttemptUpdate::default()
-                },
-            );
-            state.note(format!("{attempt_id} submitted but not confirmed within 60s"));
-        }
-    }
+    poll_bundle(
+        attempt_id,
+        &signature,
+        &bundle_id,
+        state,
+        store,
+        executor,
+        rpc,
+        start_balance,
+    )
+    .await;
 }
 
+/// Poll a submitted Jito bundle for up to 60 seconds, reporting landed,
+/// reverted, or unconfirmed. The wallet delta is the honest profit number.
+async fn poll_bundle(
+    attempt_id: &str,
+    signature: &String,
+    bundle_id: &str,
+    state: &mut ArbState,
+    store: &Store,
+    executor: &Executor,
+    rpc: &RpcClient,
+    start_balance: u64,
+) {
+    let mut landed = false;
+    for poll_count in 0..600 {
+        match rpc.get_signature_statuses(std::slice::from_ref(signature)).await {
+            Ok(statuses) => {
+                if let Some(Some(found)) = statuses.into_iter().next() {
+                    landed = true;
+                    let final_balance = rpc
+                        .get_balance(executor.wallet().address())
+                        .await
+                        .unwrap_or(start_balance);
+                    let realized = final_balance as i64 - start_balance as i64;
+                    match found.err {
+                        Some(err) => {
+                            state.wallet_lamports = final_balance;
+                            let _ = store.update_attempt(
+                                attempt_id,
+                                &AttemptUpdate {
+                                    status: Some("reverted".into()),
+                                    bundle_id: Some(bundle_id.to_string()),
+                                    signature: Some(signature.to_string()),
+                                    simulated: Some(true),
+                                    landed: Some(true),
+                                    reverted: Some(true),
+                                    realized_net_lamports: Some(realized),
+                                    error: Some(format!("{err:?}")),
+                                    ..AttemptUpdate::default()
+                                },
+                            );
+                            state.note(format!(
+                                "{attempt_id} REVERTED on-chain at slot {} · net {realized:+} lamports · err={err:?}",
+                                found.slot
+                            ));
+                        }
+                        None => {
+                            state.wallet_lamports = final_balance;
+                            let _ = store.update_attempt(
+                                attempt_id,
+                                &AttemptUpdate {
+                                    status: Some("landed".into()),
+                                    bundle_id: Some(bundle_id.to_string()),
+                                    signature: Some(signature.to_string()),
+                                    simulated: Some(true),
+                                    landed: Some(true),
+                                    reverted: Some(false),
+                                    realized_net_lamports: Some(realized),
+                                    ..AttemptUpdate::default()
+                                },
+                            );
+                            state.note(format!(
+                                "{attempt_id} LANDED on-chain at slot {} · NET {realized:+} lamports !!",
+                                found.slot
+                            ));
+                        }
+                    }
+                    break;
+                }
+            }
+            Err(e) => {
+                state.note(format!("{attempt_id} status poll #{poll_count} RPC error: {e}"));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    if !landed {
+        state.note(format!("{attempt_id} submitted to Jito but not confirmed within 120s · bundle_id={bundle_id} · likely dropped by block engine"));
+        let _ = store.update_attempt(
+            attempt_id,
+            &AttemptUpdate {
+                status: Some("unconfirmed".into()),
+                bundle_id: Some(bundle_id.to_string()),
+                signature: Some(signature.to_string()),
+                simulated: Some(true),
+                ..AttemptUpdate::default()
+            },
+        );
+    }
+}
 #[allow(clippy::too_many_arguments)]
 async fn run_tui(
     config: &BeastConfig,

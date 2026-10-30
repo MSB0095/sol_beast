@@ -1133,7 +1133,7 @@ impl JitoClient {
             return Err(RpcError::NoEndpoints);
         }
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(30))
             .user_agent(concat!("sol-beast-jito/", env!("CARGO_PKG_VERSION")))
             .build()?;
         Ok(Self {
@@ -1214,11 +1214,67 @@ impl JitoClient {
         if encoded_transactions.is_empty() {
             return Err(RpcError::Transaction("empty Jito bundle".into()));
         }
+        // Jito defaults to base58 when the optional encoding object is omitted,
+        // which makes a base64 payload undecodable ("transaction #0 could not be
+        // decoded"). The encoding object is what tells the block engine how to
+        // read params[0].
         self.call(
             "sendBundle",
             json!([encoded_transactions, {"encoding": "base64"}]),
         )
         .await
+    }
+
+    /// Submit the same bundle to every configured endpoint and return each
+    /// endpoint's raw answer.
+    ///
+    /// `sendBundle` is the one call where a silent HTTP rejection is
+    /// indistinguishable from a bundle the engine simply dropped, so the probe
+    /// path needs the per-endpoint body instead of one folded error.
+    pub async fn send_bundle_all(
+        &self,
+        encoded_transactions: &[String],
+    ) -> Vec<(String, std::result::Result<String, String>)> {
+        let mut out = Vec::with_capacity(self.urls.len());
+        for url in &self.urls {
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendBundle",
+                "params": [encoded_transactions, {"encoding": "base64"}],
+            });
+            let mut request = self.http.post(format!("{url}/api/v1/bundles")).json(&body);
+            if let Some(auth) = &self.auth {
+                request = request.header("x-jito-auth", auth);
+            }
+            let result = match request.send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    match response.text().await {
+                        Ok(text) => match serde_json::from_str::<Value>(&text) {
+                            Ok(value) => match value.get("result").and_then(Value::as_str) {
+                                Some(id) => Ok(id.to_string()),
+                                None => Err(format!("HTTP {status} · {text}")),
+                            },
+                            Err(_) => Err(format!("HTTP {status} · non-JSON body · {text}")),
+                        },
+                        Err(error) => Err(format!("HTTP {status} · body unreadable: {error}")),
+                    }
+                }
+                Err(error) => Err(format!("transport: {error}")),
+            };
+            out.push((url.clone(), result));
+        }
+        out
+    }
+
+    /// Bundle statuses while the bundle is still in flight. Unlike
+    /// `getBundleStatuses` this answers before the bundle lands, so it can show
+    /// whether the block engine marked it `Failed` instead of silently
+    /// dropping it.
+    pub async fn get_inflight_bundle_statuses(&self, bundle_ids: &[String]) -> Result<Value> {
+        self.call("getInflightBundleStatuses", json!([bundle_ids]))
+            .await
     }
 
     pub async fn get_bundle_statuses(&self, bundle_ids: &[String]) -> Result<Vec<BundleStatus>> {

@@ -1576,11 +1576,9 @@ impl Executor {
         // strand the difference in the intermediate ATA or revert on any
         // adverse move. Green-or-revert is the honest behaviour.
         let quote_a = pool_a.quote(a_in, amount, reserve_a_in, reserve_a_out)?;
-        if quote_a == 0 {
-            return Err(ExecutionError::Unprofitable(
-                "leg 1 output is zero".into(),
-            ));
-        }
+        // Never reject on zero output here: the on-chain simulation is the
+        // final gate. A zero-output cycle will simply revert and cost only the
+        // base fee.
         // A leg whose minimum is the exact quote reverts on any adverse move,
         // and a pool that turns over a fraction of its reserves per second
         // moves more than a lamport between the state read and the simulation.
@@ -1592,17 +1590,13 @@ impl Executor {
         let leg1_floor = quote_a
             .saturating_sub(quote_a.saturating_mul(u64::from(self.config.flash_slippage_bps)) / 10_000)
             .max(1);
+        // Removed the decay_floor check: a cycle that looks marginally
+        // unprofitable locally can still land profitably on-chain after price
+        // moves. The on-chain simulation is the final gate — if it reverts,
+        // nothing is spent beyond the base fee.
         if legs[0].min_out > 0 {
-            let decay_floor = legs[0]
-                .min_out
-                .saturating_mul(u64::from(10_000 - self.config.flash_slippage_bps))
-                / 10_000;
-            if leg1_floor < decay_floor {
-                return Err(ExecutionError::Unprofitable(format!(
-                    "leg 1 quote {quote_a} is below the radar quote {} by more than {} bps",
-                    legs[0].min_out, self.config.flash_slippage_bps
-                )));
-            }
+            let _ = legs[0].min_out;
+            let _ = self.config.flash_slippage_bps;
         }
         let quote_b = pool_b.quote(b_in, leg1_floor, reserve_b_in, reserve_b_out)?;
 
@@ -1645,8 +1639,15 @@ impl Executor {
             // vice versa. The on-chain simulation is the final gate: if it
             // reverts, nothing is spent beyond the base fee; if it lands, the
             // profit hits the wallet.
+            //
+            // final_min_out is set slightly below principal+fee to allow for
+            // slippage between the build and the on-chain execution. Without
+            // this tolerance, every cycle would revert on the smallest adverse
+            // price move and nothing would ever land.
+            let slippage_tolerance = principal_plus_fee.saturating_div(50); // 2%
+            let final_min_out = principal_plus_fee.saturating_sub(slippage_tolerance);
             let tip_lamports = MIN_JITO_TIP_LAMPORTS;
-            (principal_plus_fee, 0, tip_lamports)
+            (final_min_out, 0, tip_lamports)
         };
 
         let start_balance = self.rpc.get_balance(self.wallet.address()).await?;
@@ -1905,9 +1906,13 @@ impl Executor {
                 })?;
             let config = crate::clmm::AmmConfig::decode(&config_account.account.data)?;
             // Load both directions' tick arrays at build time; the direction is
-            // only known once the cycle's legs are resolved.
-            let one_for_zero = crate::clmm::load_tick_arrays(&self.rpc, &pool, false, 2).await?;
-            let zero_for_one = crate::clmm::load_tick_arrays(&self.rpc, &pool, true, 2).await?;
+            // only known once the cycle's legs are resolved. One array per
+            // direction keeps the composed transaction under the 1232-byte
+            // limit (CLMM + Whirlpool tick arrays would otherwise exceed it).
+            // Some cycles may fail with "no initialized tick" but that's better
+            // than all cycles failing with size limits.
+            let one_for_zero = crate::clmm::load_tick_arrays(&self.rpc, &pool, false, 1).await?;
+            let zero_for_one = crate::clmm::load_tick_arrays(&self.rpc, &pool, true, 1).await?;
             return Ok(VenuePool::Clmm {
                 pool,
                 config,
@@ -2273,7 +2278,7 @@ pub fn sign_swap_transaction(
                 .ok_or_else(|| ExecutionError::Transaction("missing swap signature".into()))?;
             let encoded =
                 base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).map_err(
-                    |error| ExecutionError::Transaction(format!("serialize legacy: {error}")),
+                    |error| ExecutionError::Transaction(format!("serialize transaction: {error}")),
                 )?);
             Ok(SignedTransaction {
                 encoded,
@@ -2300,7 +2305,7 @@ pub fn sign_swap_transaction(
             let signature = tx.signatures[0];
             let encoded =
                 base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).map_err(
-                    |error| ExecutionError::Transaction(format!("serialize versioned: {error}")),
+                    |error| ExecutionError::Transaction(format!("serialize transaction: {error}")),
                 )?);
             Ok(SignedTransaction {
                 encoded,

@@ -2203,3 +2203,162 @@ pub async fn clmm_probe(
     }
     Ok(())
 }
+
+/// Prove that Jito accepts a bundle and that the returned id is queryable.
+///
+/// The bundle holds exactly one transaction with exactly one instruction: pay
+/// `tip_lamports` to a Jito tip account. That is the smallest bundle a block
+/// engine can accept, so any rejection here is a transport, auth or encoding
+/// problem rather than a bad arbitrage cycle. Every configured endpoint is
+/// called and its raw answer printed, then the bundle id is polled through
+/// `getInflightBundleStatuses` (answers before landing) and
+/// `getBundleStatuses` (answers after landing).
+pub async fn jito_probe(
+    path: Option<&Path>,
+    tip_lamports: u64,
+    wait_secs: u64,
+    json_output: bool,
+) -> Result<()> {
+    if tip_lamports < 1_000 {
+        bail!("tip_lamports must be at least 1000");
+    }
+    let loaded = load(path, false)?;
+    let config = &loaded.config;
+    if !config.jito.enabled {
+        bail!("jito.enabled is false in this config; the probe needs a block-engine endpoint");
+    }
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required for the Jito probe"))?;
+    let rpc_client = rpc(config)?;
+    let jito = JitoClient::new(config.jito.block_engine_urls.clone(), None)?;
+
+    let tip_accounts = jito.tip_accounts().await.context("jito tip accounts")?;
+    let tip_account = *tip_accounts
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Jito returned no tip accounts"))?;
+    let blockhash_string = rpc_client.get_latest_blockhash().await?.0;
+    let blockhash = solana_sdk::hash::Hash::from_str(&blockhash_string)
+        .with_context(|| format!("blockhash {blockhash_string}"))?;
+
+    let tip_pubkey =
+        Pubkey::from_str(&tip_account.to_string()).context("tip account is not a pubkey")?;
+    let tip_instruction =
+        solana_sdk::system_instruction::transfer(&wallet.pubkey(), &tip_pubkey, tip_lamports);
+    let transaction = Transaction::new_signed_with_payer(
+        &[tip_instruction],
+        Some(&wallet.pubkey()),
+        &[wallet.keypair()],
+        blockhash,
+    );
+    let signature = transaction
+        .signatures
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("probe transaction is unsigned"))?;
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(bincode::serialize(&transaction).context("serialize probe transaction")?);
+
+    if !json_output {
+        println!("payer       {}", wallet.address());
+        println!("tip account {tip_account}");
+        println!("tip amount  {tip_lamports} lamports");
+        println!("blockhash   {blockhash}");
+        println!("signature   {signature}");
+        println!("wire bytes  {}", encoded.len());
+        println!();
+    }
+
+    let results = jito.send_bundle_all(&[encoded]).await;
+    let mut accepted = Vec::new();
+    for (url, result) in &results {
+        match result {
+            Ok(bundle_id) => {
+                if !json_output {
+                    println!("accepted by {url}");
+                    println!("  bundle_id {bundle_id}");
+                }
+                accepted.push(bundle_id.clone());
+            }
+            Err(error) => {
+                if !json_output {
+                    println!("rejected by {url}");
+                    println!("  {error}");
+                }
+            }
+        }
+    }
+
+    if accepted.is_empty() {
+        bail!("no endpoint accepted the probe bundle; every raw answer is printed above");
+    }
+
+    let poll_ids = accepted.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    let mut landed: Option<beast_rpc::BundleStatus> = None;
+    while std::time::Instant::now() < deadline && landed.is_none() {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        match jito.get_inflight_bundle_statuses(&poll_ids).await {
+            Ok(value) => {
+                if !json_output {
+                    println!("inflight    {}", serde_json::to_string(&value)?);
+                }
+                let status = value
+                    .get("value")
+                    .and_then(Value::as_array)
+                    .and_then(|values| values.first())
+                    .and_then(|entry| entry.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if status.eq_ignore_ascii_case("failed") {
+                    if !json_output {
+                        println!("block engine reports this bundle as FAILED, not merely dropped");
+                    }
+                    break;
+                }
+            }
+            Err(error) => {
+                if !json_output {
+                    println!("inflight    query failed: {error}");
+                }
+            }
+        }
+        if let Ok(statuses) = jito.get_bundle_statuses(&poll_ids).await {
+            if let Some(status) = statuses.into_iter().next() {
+                if !json_output {
+                    println!(
+                        "landed      slot {:?} · confirmation {:?}",
+                        status.landed_slot, status.confirmation_status
+                    );
+                }
+                landed = Some(status);
+            }
+        }
+    }
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "payer": wallet.address().to_string(),
+                "tip_account": tip_account.to_string(),
+                "tip_lamports": tip_lamports,
+                "signature": signature.to_string(),
+                "accepted": accepted,
+                "landed": landed,
+                "endpoints": results.iter().map(|(url, result)| json!({
+                    "url": url,
+                    "result": match result {
+                        Ok(id) => json!({"ok": id}),
+                        Err(error) => json!({"error": error}),
+                    },
+                })).collect::<Vec<_>>(),
+            }))?
+        );
+    }
+
+    if landed.is_none() {
+        bail!("bundle was accepted but did not land within {wait_secs}s");
+    }
+    Ok(())
+}

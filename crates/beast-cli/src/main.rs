@@ -151,6 +151,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Prove end-to-end that Jito accepts a bundle. Sends a single transaction
+    /// whose only instruction is the tip, prints the raw answer of every
+    /// configured block engine, then polls until the bundle lands.
+    JitoProbe {
+        /// Tip paid to the selected Jito tip account, in lamports.
+        #[arg(long, default_value_t = 10_000)]
+        tip_lamports: u64,
+        /// How long to watch the bundle before giving up.
+        #[arg(long, default_value_t = 60)]
+        wait_secs: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// Create an address lookup table carrying the flash provider's stable
     /// accounts. Some provider lifecycles (Marginfi + CPMM) exceed the
     /// 1232-byte transaction limit without one. Simulates by default; sends
@@ -393,6 +406,14 @@ async fn main() -> Result<()> {
                 json,
             )
             .await
+        }
+        Command::JitoProbe {
+            tip_lamports,
+            wait_secs,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            commands::jito_probe(cli.config.as_deref(), tip_lamports, wait_secs, json).await
         }
         Command::FlashAlt {
             real,

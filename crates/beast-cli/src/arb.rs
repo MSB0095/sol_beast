@@ -1674,6 +1674,16 @@ async fn execute_best(
                 }
             };
             let signature = candidate.signatures.first().cloned().unwrap_or_default();
+            // The chain is the final judge, but an operator still needs to know
+            // why the local simulation failed before a bundle went out on a
+            // forced submit: "dropped" and "reverted for lack of balance" are
+            // different problems with different fixes.
+            state.note(format!(
+                "{attempt_id} forcing submit after simulation failed: {last_error}"
+            ));
+            for line in last_logs.iter().rev().take(4).rev() {
+                state.note(format!("    sim log: {line}"));
+            }
             let _ = store.update_attempt(
                 &attempt_id,
                 &AttemptUpdate {

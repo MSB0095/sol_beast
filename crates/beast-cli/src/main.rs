@@ -237,6 +237,11 @@ enum Command {
         /// is cached, because `getProgramAccounts` is what free tiers throttle.
         #[arg(long, default_value_t = 300_000)]
         pool_ttl_ms: u64,
+        /// How long a pool's tick arrays may be reused, in milliseconds.
+        /// Arrays move only when liquidity is added or removed; the executor
+        /// re-reads them before every build, so this only bounds scan latency.
+        #[arg(long, default_value_t = 2_000)]
+        array_ttl_ms: u64,
     },
     /// Quote a swap through Jupiter.
     Quote {
@@ -442,6 +447,7 @@ async fn main() -> Result<()> {
             jupiter_triangles,
             explain,
             pool_ttl_ms,
+            array_ttl_ms,
         } => {
             init_logging(if scan_only { "info" } else { "error" }, cli.json_logs)?;
             let mut options = crate::arb::ArbOptions {
@@ -477,6 +483,7 @@ async fn main() -> Result<()> {
                 jupiter_triangles,
                 explain,
                 discovery_ttl: std::time::Duration::from_millis(pool_ttl_ms),
+                array_ttl: std::time::Duration::from_millis(array_ttl_ms),
             };
             options.mints.retain(|mint| !mint.trim().is_empty());
             crate::arb::arb(cli.config.as_deref(), real, options).await

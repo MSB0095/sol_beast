@@ -35,6 +35,18 @@ const DEFAULT_CYCLE_BASE_FEE: u64 = 5_000;
 /// That is a necessary condition at every size, and checking it costs one cheap
 /// quote instead of a full size search.
 const SPREAD_PROBE_LAMPORTS: u64 = 1_000_000;
+
+/// How many ordered pairs get a full size search per scan.
+///
+/// The spread screen runs on every pair and costs nothing, but sizing one pair
+/// means walking its concentrated-liquidity ticks, which needs the tick arrays:
+/// roughly six accounts per pool, and a batched RPC call only carries a hundred.
+/// Pairs are therefore ranked by the profit they could *possibly* pay —
+/// spread × the shallower pool's depth — and only the head of that ranking is
+/// sized. The cap is what keeps a scan inside a block instead of inside a
+/// coffee break; the ranking is monotone in the only thing that matters, so a
+/// pair is dropped for being small, never for being large.
+const MAX_SIZED_PAIRS: usize = 32;
 use beast_flash::{FlashProvider, FlashReserve};
 use beast_rpc::RpcClient;
 use beast_store::{AttemptRecord, AttemptUpdate, Store};
@@ -46,6 +58,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Row, Table};
 use ratatui::Terminal;
 use solana_sdk::pubkey::Pubkey;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -182,6 +195,13 @@ pub struct ArbOptions {
     /// How long a discovered pool set stays valid. Balances and tick arrays are
     /// always read fresh; only the (nearly static) list of pools is reused.
     pub discovery_ttl: std::time::Duration,
+    /// How long a pool's tick arrays may be reused.
+    ///
+    /// Arrays change only when liquidity is added or removed at one of their
+    /// ticks. Re-reading all of them on every pass is the dominant cost of a
+    /// scan; execution re-reads them regardless, so a brief cache only trades a
+    /// few wasted builds for a scan that finishes inside one block.
+    pub array_ttl: std::time::Duration,
 }
 
 impl Default for ArbOptions {
@@ -217,6 +237,7 @@ impl Default for ArbOptions {
             jupiter_triangles: false,
             explain: false,
             discovery_ttl: std::time::Duration::from_secs(300),
+            array_ttl: std::time::Duration::from_millis(2_000),
         }
     }
 }
@@ -316,6 +337,15 @@ impl PoolShape {
         [address(&vaults[0]), address(&vaults[1])]
     }
 
+    fn mints(&self) -> [Pubkey; 2] {
+        match self {
+            Self::Cpmm { pool, .. } => pool.mints,
+            Self::AmmV4(pool) => pool.mints,
+            Self::Whirlpool(pool) => pool.mints,
+            Self::Clmm { pool, .. } => pool.mints,
+        }
+    }
+
     /// Re-decode this pool from a freshly read account.
     ///
     /// Each venue's pool account carries state that changes every swap:
@@ -347,29 +377,171 @@ impl PoolShape {
     }
 }
 
-/// Read the state that moves: every pool account, every vault balance, and the
-/// tick arrays of every concentrated-liquidity pool. Each family is read with
-/// batched `getMultipleAccounts` calls, so the count of round trips depends on
-/// how many pools exist, not on how many quotes are priced.
-async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolView> {
+/// A pool with fresh account state and fresh vault balances, but no tick
+/// arrays.
+///
+/// This is enough to compare two venues' prices, which is all the spread screen
+/// needs, and it costs two batched RPC calls for the whole scan instead of the
+/// ten that fetching every tick array in both directions costs. Tick arrays are
+/// loaded afterwards, and only for the pools a surviving pair actually uses.
+struct LitePool {
+    venue: VenuePool,
+    balances: [u64; 2],
+}
+
+impl Clone for LitePool {
+    fn clone(&self) -> Self {
+        Self {
+            venue: self.venue.clone(),
+            balances: self.balances,
+        }
+    }
+}
+
+/// The gross result of a two-leg cycle at the marginal price, at the probe
+/// size. Positive means the two pools disagree; it says nothing about fees.
+fn spot_profit(pool_in: &LitePool, pool_out: &LitePool) -> i128 {
+    let wsol_key = beast_flash::pubkey(&wsol());
+    let unpriceable = i128::MIN / 4;
+    let Some(a_in) = pool_in.venue.mint_index(&wsol_key) else {
+        return unpriceable;
+    };
+    let Some(b_out) = pool_out.venue.mint_index(&wsol_key) else {
+        return unpriceable;
+    };
+    let Some(leg1) = pool_in.spot_out(a_in, SPREAD_PROBE_LAMPORTS) else {
+        return unpriceable;
+    };
+    if leg1 == 0 {
+        return unpriceable;
+    }
+    let Some(final_out) = pool_out.spot_out(1 - b_out, leg1) else {
+        return unpriceable;
+    };
+    i128::from(final_out) - i128::from(SPREAD_PROBE_LAMPORTS)
+}
+
+impl LitePool {
+    fn effective(&self, side: usize) -> Option<u64> {
+        let raw = *self.balances.get(side)?;
+        let reserve = self.venue.effective_reserve(side, raw)?;
+        (reserve > 0).then_some(reserve)
+    }
+
+    /// How much of the cycle's start asset this pool can actually absorb.
+    ///
+    /// Both legs of a cycle start and end in WSOL, so the WSOL-side vault
+    /// balance is a real capacity bound in the same units for every venue:
+    /// the concentrated pools can pay out no more than their vault holds, and
+    /// the constant-product ones are priced against exactly this reserve.
+    fn wsol_capacity(&self, wsol: &Pubkey) -> u64 {
+        self.venue
+            .mint_index(wsol)
+            .and_then(|side| self.effective(side))
+            .unwrap_or(0)
+    }
+
+    /// Output for `amount` at the pool's *marginal* price, ignoring the walk
+    /// through its liquidity. For a concentrated pool this is an upper bound on
+    /// the exact quote (pushing into the book moves the price against the
+    /// trader, never for them), which is what a necessary condition needs.
+    fn spot_out(&self, input_side: usize, amount: u64) -> Option<u64> {
+        let reserve_in = self.effective(input_side)?;
+        let reserve_out = self.effective(1 - input_side)?;
+        match &self.venue {
+            // A constant-product pool's exact quote *is* its marginal quote at
+            // a size this small, so it is used unchanged.
+            VenuePool::Cpmm { .. } | VenuePool::AmmV4(_) => self
+                .venue
+                .quote(input_side, amount, reserve_in, reserve_out)
+                .ok(),
+            VenuePool::Whirlpool { pool, .. } => {
+                let out = sqrt_price_out(pool.sqrt_price, amount, input_side == 0)?;
+                Some(apply_fee(out, u64::from(pool.fee_rate)))
+            }
+            VenuePool::Clmm { pool, config, .. } => {
+                let out = sqrt_price_out(pool.sqrt_price_x64, amount, input_side == 0)?;
+                Some(apply_fee(out, u64::from(config.trade_fee_rate)))
+            }
+        }
+    }
+
+    /// Attach the tick arrays a real quote needs. `None` means the arrays could
+    /// not be read, and the pool cannot be priced this pass.
+    fn hydrate(
+        self,
+        whirlpool_arrays: &HashMap<Pubkey, [Vec<beast_exec::whirlpool::TickArray>; 2]>,
+        clmm_arrays: &HashMap<Pubkey, [Vec<clmm::TickArray>; 2]>,
+    ) -> Option<PoolView> {
+        let venue = match self.venue {
+            VenuePool::Whirlpool { pool, .. } => VenuePool::Whirlpool {
+                arrays: whirlpool_arrays.get(&pool.address)?.clone(),
+                pool,
+            },
+            VenuePool::Clmm { pool, config, .. } => VenuePool::Clmm {
+                arrays: clmm_arrays.get(&pool.address)?.clone(),
+                pool,
+                config,
+            },
+            other => other,
+        };
+        Some(PoolView {
+            venue,
+            balances: self.balances,
+        })
+    }
+}
+
+/// Output in token1 for `amount` of token0 at a Q64.64 sqrt price, and the
+/// reverse direction, without walking any ticks.
+fn sqrt_price_out(sqrt_price_x64: u128, amount: u64, a_to_b: bool) -> Option<u64> {
+    if sqrt_price_x64 == 0 {
+        return None;
+    }
+    let amount = u128::from(amount);
+    // price = (sqrt / 2^64)^2, so a single leg is `amount * sqrt / 2^64` twice.
+    let out = if a_to_b {
+        let half = amount.checked_mul(sqrt_price_x64)? >> 64;
+        half.checked_mul(sqrt_price_x64)? >> 64
+    } else {
+        let half = (amount << 64) / sqrt_price_x64;
+        (half << 64) / sqrt_price_x64
+    };
+    u64::try_from(out).ok()
+}
+
+/// Deduct an on-chain fee expressed in millionths.
+fn apply_fee(amount: u64, fee_rate: u64) -> u64 {
+    if fee_rate >= 1_000_000 {
+        return 0;
+    }
+    ((u128::from(amount) * u128::from(1_000_000 - fee_rate)) / 1_000_000) as u64
+}
+
+/// Read every pool account and every vault balance, fresh.
+///
+/// Two batched calls regardless of how many pools there are. The original index
+/// is kept because the balance list is positional over the unshortened pools.
+async fn read_live_pools(
+    rpc: &RpcClient,
+    shapes: &[PoolShape],
+) -> (Vec<(usize, PoolShape)>, Vec<u64>) {
+    let pool_keys: Vec<Address> = shapes.iter().map(PoolShape::address).collect();
+    let vault_keys: Vec<Address> = shapes.iter().flat_map(|shape| shape.vaults()).collect();
     // Every pool account is re-read, not just its vaults. `sqrt_price`,
     // `liquidity` and `tick_current_index` *are* the price of a whirlpool or a
     // CLMM, and they change on every swap; reusing the copy cached by discovery
     // priced a five-minute-old market and manufactured a few basis points of
     // edge that disappeared the instant the executor re-read the pool.
-    let pool_keys: Vec<Address> = shapes.iter().map(PoolShape::address).collect();
-    let vault_keys: Vec<Address> = shapes.iter().flat_map(|shape| shape.vaults()).collect();
     let (balances, pool_accounts) = tokio::join!(
         vault_balances(rpc, &vault_keys),
         read_accounts(rpc, &pool_keys),
     );
-
     // A pool whose account could not be read has no current price. Dropping it
     // for this pass is the only honest option: its cached price is not the
     // market, and pricing it would resurrect exactly the fake edge this refresh
-    // exists to remove. The original index is kept because `balances` is
-    // positional over the unshortened pool list.
-    let live: Vec<(usize, PoolShape)> = shapes
+    // exists to remove.
+    let live = shapes
         .iter()
         .enumerate()
         .filter_map(|(index, shape)| {
@@ -377,82 +549,109 @@ async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolV
             Some((index, shape.refreshed(&account.data)?))
         })
         .collect();
+    (live, balances)
+}
 
-    let whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = live
+/// Load the tick arrays for exactly the pools that survived the spread screen,
+/// in both directions.
+///
+/// Arrays already read within `ttl` are reused; the rest are fetched in two
+/// batched round trips. The result is keyed by pool address. A pool missing
+/// from a map could not be read, and is dropped rather than quoted against
+/// arrays that are not known to exist.
+async fn hydrate_arrays(
+    rpc: &RpcClient,
+    venues: &[VenuePool],
+    cache: &mut PoolCache,
+    ttl: std::time::Duration,
+) -> (
+    HashMap<Pubkey, [Vec<beast_exec::whirlpool::TickArray>; 2]>,
+    HashMap<Pubkey, [Vec<clmm::TickArray>; 2]>,
+) {
+    let whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = venues
         .iter()
-        .filter_map(|(_, shape)| match shape {
-            PoolShape::Whirlpool(pool) => Some(pool.clone()),
+        .filter_map(|venue| match venue {
+            VenuePool::Whirlpool { pool, .. } => Some(pool.clone()),
             _ => None,
         })
         .collect();
-    let clmms: Vec<(clmm::ClmmPool, clmm::AmmConfig)> = live
+    let clmms: Vec<clmm::ClmmPool> = venues
         .iter()
-        .filter_map(|(_, shape)| match shape {
-            PoolShape::Clmm { pool, config } => Some((pool.clone(), *config)),
+        .filter_map(|venue| match venue {
+            VenuePool::Clmm { pool, .. } => Some(pool.clone()),
             _ => None,
         })
         .collect();
-    let clmm_pools: Vec<clmm::ClmmPool> = clmms.iter().map(|(pool, _)| pool.clone()).collect();
-    // One batched read for every Whirlpool and CLMM tick array the pair needs in
-    // both directions. The start indexes depend on the fresh `tick_current_index`,
-    // which is why this runs after the pool accounts are decoded.
+    let stale_whirlpools: Vec<beast_exec::whirlpool::WhirlpoolPool> = whirlpools
+        .iter()
+        .filter(|pool| {
+            cache
+                .whirlpool_arrays
+                .get(&pool.address)
+                .map(|(at, _)| at.elapsed() >= ttl)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    let stale_clmms: Vec<clmm::ClmmPool> = clmms
+        .iter()
+        .filter(|pool| {
+            cache
+                .clmm_arrays
+                .get(&pool.address)
+                .map(|(at, _)| at.elapsed() >= ttl)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+
+    // The executor hands the venue up to three whirlpool arrays per direction
+    // and two CLMM arrays, so the scanner reads the same sets; a shorter set
+    // would price a swap the builder then refuses to build.
     let (whirlpool_arrays, clmm_arrays) = tokio::join!(
-        beast_exec::whirlpool::load_tick_arrays_batch(rpc, &whirlpools),
-        beast_exec::clmm::load_tick_arrays_batch(rpc, &clmm_pools, 1),
+        beast_exec::whirlpool::load_tick_arrays_batch(rpc, &stale_whirlpools),
+        beast_exec::clmm::load_tick_arrays_batch(rpc, &stale_clmms, 2),
     );
-    let whirlpool_arrays = whirlpool_arrays.unwrap_or_else(|_| vec![None; whirlpools.len()]);
-    let clmm_arrays = clmm_arrays.unwrap_or_else(|_| vec![None; clmms.len()]);
-
-    let mut whirlpool_index = 0;
-    let mut clmm_index = 0;
-    let mut views = Vec::with_capacity(live.len());
-    for (index, shape) in live {
-        let venue = match shape {
-            PoolShape::Cpmm { pool, trade_fee_rate } => {
-                VenuePool::Cpmm { pool, trade_fee_rate }
+    if let Ok(arrays) = whirlpool_arrays {
+        for (pool, set) in stale_whirlpools.iter().zip(arrays) {
+            // A `None` set means the pool is not quotable; leaving it uncached
+            // makes the next pass retry instead of remembering a failure.
+            if let Some(set) = set {
+                cache
+                    .whirlpool_arrays
+                    .insert(pool.address, (Instant::now(), set));
             }
-            PoolShape::AmmV4(pool) => VenuePool::AmmV4(pool),
-            PoolShape::Whirlpool(pool) => {
-                let Some([b_to_a, a_to_b]) = whirlpool_arrays
-                    .get(whirlpool_index)
-                    .cloned()
-                    .flatten()
-                else {
-                    whirlpool_index += 1;
-                    continue;
-                };
-                whirlpool_index += 1;
-                VenuePool::Whirlpool {
-                    pool,
-                    arrays: [b_to_a, a_to_b],
-                }
-            }
-            PoolShape::Clmm { pool, config } => {
-                let Some([one_for_zero, zero_for_one]) = clmm_arrays
-                    .get(clmm_index)
-                    .cloned()
-                    .flatten()
-                else {
-                    clmm_index += 1;
-                    continue;
-                };
-                clmm_index += 1;
-                VenuePool::Clmm {
-                    pool,
-                    config,
-                    arrays: [one_for_zero, zero_for_one],
-                }
-            }
-        };
-        views.push(PoolView {
-            venue,
-            balances: [
-                balances.get(index * 2).copied().unwrap_or(0),
-                balances.get(index * 2 + 1).copied().unwrap_or(0),
-            ],
-        });
+        }
     }
-    views
+    if let Ok(arrays) = clmm_arrays {
+        for (pool, set) in stale_clmms.iter().zip(arrays) {
+            if let Some(set) = set {
+                cache.clmm_arrays.insert(pool.address, (Instant::now(), set));
+            }
+        }
+    }
+
+    let mut by_whirlpool = HashMap::with_capacity(whirlpools.len());
+    for pool in &whirlpools {
+        if let Some((_, set)) = cache.whirlpool_arrays.get(&pool.address) {
+            by_whirlpool.insert(pool.address, set.clone());
+        }
+    }
+    let mut by_clmm = HashMap::with_capacity(clmms.len());
+    for pool in &clmms {
+        if let Some((_, set)) = cache.clmm_arrays.get(&pool.address) {
+            by_clmm.insert(pool.address, set.clone());
+        }
+    }
+    // Drop entries for pools that have not been quoted in a while, so a long
+    // run does not accumulate every pool it has ever seen.
+    cache
+        .whirlpool_arrays
+        .retain(|_, (at, _)| at.elapsed() < ttl.max(std::time::Duration::from_secs(60)));
+    cache
+        .clmm_arrays
+        .retain(|_, (at, _)| at.elapsed() < ttl.max(std::time::Duration::from_secs(60)));
+    (by_whirlpool, by_clmm)
 }
 
 /// Per-mint discovery cache.
@@ -464,6 +663,16 @@ async fn materialize_pools(rpc: &RpcClient, shapes: Vec<PoolShape>) -> Vec<PoolV
 #[derive(Debug, Default)]
 struct PoolCache {
     entries: std::collections::HashMap<String, CachedPools>,
+    /// Tick arrays per pool, with the instant they were read.
+    ///
+    /// Arrays only change when liquidity is added or removed at one of their
+    /// ticks, which is far rarer than a swap. Re-reading every array in both
+    /// directions on every pass cost ~7 s of RPC time per scan, so they are
+    /// cached briefly. Execution never trusts this cache: the builder re-reads
+    /// the pool, the vaults and the arrays and re-quotes, so a stale snapshot
+    /// can only cost a wasted build, never a bad trade.
+    whirlpool_arrays: HashMap<Pubkey, (Instant, [Vec<beast_exec::whirlpool::TickArray>; 2])>,
+    clmm_arrays: HashMap<Pubkey, (Instant, [Vec<clmm::TickArray>; 2])>,
 }
 
 #[derive(Debug)]
@@ -1322,34 +1531,60 @@ async fn scan_once(
         .flatten()
         .cloned()
         .collect();
-    let views = materialize_pools(rpc, flat).await;
-    let mut by_pair: Vec<Option<Vec<Arc<PoolView>>>> = (0..wanted.len()).map(|_| None).collect();
-    for view in views {
-        // Attribute the pool to the wanted pair it actually belongs to, by
-        // mint rather than by position, so a dropped discovery cannot shift
-        // pools onto the wrong pair.
+    let (live, balances) = read_live_pools(rpc, &flat).await;
+    let mut by_pair: Vec<Option<Vec<Arc<LitePool>>>> = (0..wanted.len()).map(|_| None).collect();
+    for (index, shape) in live {
+        // Attribute the pool to the wanted pair it actually belongs to, by mint
+        // rather than by position, so a dropped discovery cannot shift pools
+        // onto the wrong pair.
         let wsol_key = beast_flash::pubkey(&wsol());
-        let mints = view.venue.mints();
+        let mints = shape.mints();
         let Some(other) = mints.iter().find(|mint| **mint != wsol_key) else {
             continue;
         };
-        let Some(index) = wanted
+        let Some(pair_index) = wanted
             .iter()
             .position(|(_, address)| *address.as_bytes() == other.to_bytes())
         else {
             continue;
         };
-        by_pair[index]
+        let venue = match shape {
+            PoolShape::Cpmm {
+                pool,
+                trade_fee_rate,
+            } => VenuePool::Cpmm {
+                pool,
+                trade_fee_rate,
+            },
+            PoolShape::AmmV4(pool) => VenuePool::AmmV4(pool),
+            PoolShape::Whirlpool(pool) => VenuePool::Whirlpool {
+                pool,
+                arrays: [Vec::new(), Vec::new()],
+            },
+            PoolShape::Clmm { pool, config } => VenuePool::Clmm {
+                pool,
+                config,
+                arrays: [Vec::new(), Vec::new()],
+            },
+        };
+        let lite = LitePool {
+            venue,
+            balances: [
+                balances.get(index * 2).copied().unwrap_or(0),
+                balances.get(index * 2 + 1).copied().unwrap_or(0),
+            ],
+        };
+        by_pair[pair_index]
             .get_or_insert_with(Vec::new)
-            .push(Arc::new(view));
+            .push(Arc::new(lite));
     }
     let fetched = by_pair;
 
-    // Every ordered pair of pools within a mint, priced in parallel. Pricing is
-    // pure arithmetic over state already in hand: an exact quote can walk
-    // dozens of concentrated-liquidity ticks, so a few thousand of them is the
-    // bulk of a scan's CPU.
-    let mut jobs: Vec<(Arc<PoolView>, Arc<PoolView>)> = Vec::new();
+    // Every ordered pair of pools within a mint. The screen below runs on the
+    // marginal price, so it needs no tick arrays at all: two batched reads per
+    // scan have produced everything it compares. This is what turns a scan
+    // from ten batched RPC calls into four, and from ~5 s into ~1 s.
+    let mut jobs: Vec<(Arc<LitePool>, Arc<LitePool>)> = Vec::new();
     for (index, slot) in fetched.iter().enumerate() {
         let Some(pools) = slot else { continue };
         if pools.len() < 2 {
@@ -1370,11 +1605,80 @@ async fn scan_once(
 
     let fetch_ms = fetch_started.elapsed().as_millis();
     let price_started = Instant::now();
+    let ordered_pairs = jobs.len();
     // A two-leg cycle is only worth sizing when the two pools disagree at all.
     // Pricing all 2,652 ordered pairs of a 51-pool pair at 50 samples each cost
     // eight seconds per scan, most of it proving that a spread which does not
-    // exist is still absent at every size. One 0.001 SOL quote per ordered pair
-    // settles that question, and only the survivors get the full search.
+    // exist is still absent at every size. One 0.001 SOL quote at the marginal
+    // price per ordered pair settles that question, and only the survivors pay
+    // for tick arrays and the full size search.
+    //
+    // The marginal quote is an upper bound on the exact one, so this screen can
+    // only ever pass a pair it should have rejected, never reject one it should
+    // have kept: the exact screen still runs on every survivor.
+    //
+    // A positive spread is not the same as a tradable one, and there are
+    // thousands of ordered pairs. The ranking bounds what each pair could pay:
+    // the spread times the shallower side's depth is approximately the most
+    // profit the cycle can ever return, so the pairs at the head of that list
+    // are the only ones worth the tick arrays.
+    let wsol_key = beast_flash::pubkey(&wsol());
+    let mut ranked: Vec<(i128, Arc<LitePool>, Arc<LitePool>)> = {
+        use rayon::prelude::*;
+        jobs.par_iter()
+            .filter_map(|(pool_in, pool_out)| {
+                let spread = spot_profit(pool_in, pool_out);
+                if spread <= 0 {
+                    return None;
+                }
+                let capacity = pool_in
+                    .wsol_capacity(&wsol_key)
+                    .min(pool_out.wsol_capacity(&wsol_key));
+                let bound = spread.saturating_mul(i128::from(capacity))
+                    / i128::from(SPREAD_PROBE_LAMPORTS);
+                Some((bound, pool_in.clone(), pool_out.clone()))
+            })
+            .collect()
+    };
+    let spread_pairs = ranked.len();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    ranked.truncate(MAX_SIZED_PAIRS);
+    let sized_pairs = ranked.len();
+    let survivors: Vec<(Arc<LitePool>, Arc<LitePool>)> =
+        ranked.into_iter().map(|(_, a, b)| (a, b)).collect();
+    let screen_ms = price_started.elapsed().as_millis();
+
+    // Load tick arrays for the pools the survivors use, and nothing else.
+    let mut wanted_venues: Vec<VenuePool> = Vec::new();
+    for (pool_in, pool_out) in &survivors {
+        for pool in [pool_in, pool_out] {
+            if !wanted_venues
+                .iter()
+                .any(|venue| venue.address() == pool.venue.address())
+            {
+                wanted_venues.push(pool.venue.clone());
+            }
+        }
+    }
+    let hydrate_started = Instant::now();
+    let (whirlpool_arrays, clmm_arrays) =
+        hydrate_arrays(rpc, &wanted_venues, cache, options.array_ttl).await;
+    let hydrate_ms = hydrate_started.elapsed().as_millis();
+    let jobs: Vec<(Arc<PoolView>, Arc<PoolView>)> = survivors
+        .into_iter()
+        .filter_map(|(pool_in, pool_out)| {
+            let pool_in = Arc::new(pool_in.as_ref().clone().hydrate(
+                &whirlpool_arrays,
+                &clmm_arrays,
+            )?);
+            let pool_out = Arc::new(pool_out.as_ref().clone().hydrate(
+                &whirlpool_arrays,
+                &clmm_arrays,
+            )?);
+            Some((pool_in, pool_out))
+        })
+        .collect();
+
     let cleared = std::sync::atomic::AtomicUsize::new(0);
     let priced: Vec<CycleLog> = {
         use rayon::prelude::*;
@@ -1402,9 +1706,8 @@ async fn scan_once(
             .collect()
     };
     state.note(format!(
-        "{} of {} ordered pairs cleared the spread screen",
-        cleared.load(Ordering::Relaxed),
-        jobs.len()
+        "price screen · {spread_pairs} spread of {ordered_pairs} · {sized_pairs} sized · {screen_ms} ms · {} pools · arrays {hydrate_ms} ms",
+        wanted_venues.len(),
     ));
     let price_ms = price_started.elapsed().as_millis();
     let priced_count = priced.len();

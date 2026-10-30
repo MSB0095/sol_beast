@@ -17,6 +17,7 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 solana-sdk.workspace = true
+futures-util.workspace = true
 spl-token = { version = "8", features = ["no-entrypoint"] }
 spl-associated-token-account = "7"
 thiserror.workspace = true

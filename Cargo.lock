@@ -617,6 +617,7 @@ dependencies = [
  "beast-store",
  "bincode",
  "chrono",
+ "futures-util",
  "serde",
  "serde_json",
  "solana-sdk",

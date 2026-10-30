@@ -1269,12 +1269,7 @@ impl Executor {
             &self.wallet.keypair,
             &tables,
         )?;
-        let cycle_encoded = base64::engine::general_purpose::STANDARD.encode(
-            bincode::serialize(&transaction)
-                .map_err(|error| ExecutionError::Transaction(format!("serialize v0: {error}")))?,
-        );
-
-        let mut encoded_transactions = vec![cycle_encoded];
+        let mut encoded_transactions = vec![encode_versioned(&transaction)?];
         let mut signatures = vec![transaction.signatures[0].to_string()];
         let guard_required = if guard_applicable {
             let guard = build_guard_transaction(
@@ -1298,15 +1293,45 @@ impl Executor {
             0
         };
         let tip_account = self.choose_tip_account().await?;
-        let tip = build_tip_transaction(
-            self.wallet.pubkey(),
-            tip_account,
-            tip_lamports,
-            blockhash,
-            &self.wallet.keypair,
-        )?;
-        encoded_transactions.push(tip.encoded);
-        signatures.push(tip.signature);
+        // A bundle's tip must sit in its last transaction. When the cycle is
+        // the whole bundle, folding the tip into it removes an entire
+        // transaction: one base fee instead of two, and a single atomic unit
+        // that cannot be reordered or half-dropped. The fallback keeps the
+        // separate tip transaction for the guarded shape, where the guard
+        // transaction has to come last.
+        let mut tip_inlined = false;
+        if !guard_applicable {
+            let tip_pubkey = Pubkey::from_str(&tip_account.to_string())
+                .map_err(|_| ExecutionError::JitoDisabled)?;
+            let mut with_tip = composed.clone();
+            with_tip.instructions.push(system_instruction::transfer(
+                &self.wallet.pubkey(),
+                &tip_pubkey,
+                tip_lamports,
+            ));
+            if let Ok(transaction) = build_composed_transaction(
+                &with_tip,
+                self.wallet.pubkey(),
+                blockhash,
+                &self.wallet.keypair,
+                &tables,
+            ) {
+                encoded_transactions = vec![encode_versioned(&transaction)?];
+                signatures = vec![transaction.signatures[0].to_string()];
+                tip_inlined = true;
+            }
+        }
+        if !tip_inlined {
+            let tip = build_tip_transaction(
+                self.wallet.pubkey(),
+                tip_account,
+                tip_lamports,
+                blockhash,
+                &self.wallet.keypair,
+            )?;
+            encoded_transactions.push(tip.encoded);
+            signatures.push(tip.signature);
+        }
 
         tracing::info!(
             provider = provider.id(),
@@ -2387,6 +2412,18 @@ fn build_tip_transaction(
     let tx =
         Transaction::new_signed_with_payer(&[instruction], Some(&wallet), &[keypair], blockhash);
     encode_signed(&tx)
+}
+
+/// Serialize a versioned transaction in Solana wire format.
+///
+/// `VersionedTransaction`'s serde impl already writes the compact-u16
+/// signature count and the versioned message, so `bincode::serialize` is the
+/// wire format and not a struct dump.
+fn encode_versioned(transaction: &VersionedTransaction) -> Result<String> {
+    Ok(base64::engine::general_purpose::STANDARD.encode(
+        bincode::serialize(transaction)
+            .map_err(|error| ExecutionError::Transaction(format!("serialize v0: {error}")))?,
+    ))
 }
 
 fn encode_signed(tx: &Transaction) -> Result<SignedTransaction> {

@@ -640,8 +640,14 @@ pub async fn load_tick_arrays_batch(
     }
 
     let mut lookup: HashMap<Address, Account> = HashMap::with_capacity(addresses.len());
-    for chunk in addresses.chunks(100) {
-        let accounts = rpc.get_multiple_accounts(chunk).await?;
+    // Overlap the chunks: each one is an independent round trip.
+    let chunks: Vec<&[Address]> = addresses.chunks(100).collect();
+    let responses = futures_util::future::join_all(
+        chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)),
+    )
+    .await;
+    for (chunk, accounts) in chunks.iter().zip(responses) {
+        let accounts = accounts?;
         for (key, account) in chunk.iter().zip(accounts) {
             if let Some(account) = account {
                 lookup.insert(*key, account);

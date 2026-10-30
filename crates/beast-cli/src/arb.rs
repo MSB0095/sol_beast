@@ -26,6 +26,15 @@ use beast_exec::{amm_v4, cpmm, clmm, Executor, RentReclaimer, WSOL_MINT};
 
 /// Base fee charged once per transaction in a composed cycle plus guard.
 const DEFAULT_CYCLE_BASE_FEE: u64 = 5_000;
+
+/// Size used to test whether two pools actually disagree.
+///
+/// At 0.001 SOL the trade's own price impact is negligible, so the gross result
+/// of a two-leg cycle measured here is the spread itself: it is positive only if
+/// one pool really sells the middle mint cheaper than the other buys it back.
+/// That is a necessary condition at every size, and checking it costs one cheap
+/// quote instead of a full size search.
+const SPREAD_PROBE_LAMPORTS: u64 = 1_000_000;
 use beast_flash::{FlashProvider, FlashReserve};
 use beast_rpc::RpcClient;
 use beast_store::{AttemptRecord, AttemptUpdate, Store};
@@ -460,8 +469,13 @@ async fn program_accounts_for_pair(
 /// or malformed account becomes 0 rather than shifting every later balance.
 async fn vault_balances(rpc: &RpcClient, keys: &[Address]) -> Vec<u64> {
     let mut balances = Vec::with_capacity(keys.len());
-    for chunk in keys.chunks(100) {
-        let accounts = rpc.get_multiple_accounts(chunk).await.unwrap_or_default();
+    let chunks: Vec<&[Address]> = keys.chunks(100).collect();
+    let responses = futures_util::future::join_all(
+        chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)),
+    )
+    .await;
+    for (chunk, accounts) in chunks.iter().zip(responses) {
+        let accounts = accounts.unwrap_or_default();
         for index in 0..chunk.len() {
             balances.push(
                 accounts
@@ -1265,6 +1279,12 @@ async fn scan_once(
 
     let fetch_ms = fetch_started.elapsed().as_millis();
     let price_started = Instant::now();
+    // A two-leg cycle is only worth sizing when the two pools disagree at all.
+    // Pricing all 2,652 ordered pairs of a 51-pool pair at 50 samples each cost
+    // eight seconds per scan, most of it proving that a spread which does not
+    // exist is still absent at every size. One 0.001 SOL quote per ordered pair
+    // settles that question, and only the survivors get the full search.
+    let cleared = std::sync::atomic::AtomicUsize::new(0);
     let priced: Vec<CycleLog> = {
         use rayon::prelude::*;
         jobs.par_iter()
@@ -1273,10 +1293,28 @@ async fn scan_once(
                 // fee is amount-dependent on every provider, so it is resolved
                 // inside the search rather than assumed constant.
                 let fee_for = |amount: u64| provider.flash_fee(reserve, amount).unwrap_or(0);
+                // Costs are deliberately excluded: this asks only whether the
+                // pools disagree, not whether the disagreement is big enough.
+                let probe = evaluate_cycle(
+                    pool_in,
+                    pool_out,
+                    SPREAD_PROBE_LAMPORTS,
+                    fee_for(SPREAD_PROBE_LAMPORTS),
+                    0,
+                )?;
+                if probe.profit <= 0 {
+                    return None;
+                }
+                cleared.fetch_add(1, Ordering::Relaxed);
                 optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
             })
             .collect()
     };
+    state.note(format!(
+        "{} of {} ordered pairs cleared the spread screen",
+        cleared.load(Ordering::Relaxed),
+        jobs.len()
+    ));
     let price_ms = price_started.elapsed().as_millis();
     let priced_count = priced.len();
     state.cycles_seen += priced_count;
@@ -1345,9 +1383,10 @@ async fn scan_once(
 /// also excluded, because it is applied once as the accept threshold rather
 /// than counted as a cost as well.
 fn cycle_costs(_config: &BeastConfig) -> u64 {
-    // The cycle and the guard are separate transactions, each paying a base
-    // fee, plus the smallest tip a bundle can carry.
-    2 * DEFAULT_CYCLE_BASE_FEE + MIN_JITO_TIP_LAMPORTS
+    // The tip rides inside the cycle transaction, so a landed cycle pays one
+    // base fee and one tip. Charging a second fee here made the scan reject
+    // cycles that the builder would have executed.
+    DEFAULT_CYCLE_BASE_FEE + MIN_JITO_TIP_LAMPORTS
 }
 
 #[allow(clippy::too_many_arguments)]

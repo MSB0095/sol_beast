@@ -611,8 +611,16 @@ pub async fn load_tick_arrays_batch(
     // `getMultipleAccounts` caps at 100 keys, and each pool contributes up to
     // six, so a large pair can exceed one call.
     let mut lookup: HashMap<Address, Account> = HashMap::with_capacity(addresses.len());
-    for chunk in addresses.chunks(100) {
-        let accounts = rpc.get_multiple_accounts(chunk).await?;
+    // The reads are independent, so they overlap instead of queueing: with a
+    // free-tier endpoint each getMultipleAccounts costs a few hundred
+    // milliseconds, and a pair easily needs four chunks.
+    let chunks: Vec<&[Address]> = addresses.chunks(100).collect();
+    let responses = futures_util::future::join_all(
+        chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)),
+    )
+    .await;
+    for (chunk, accounts) in chunks.iter().zip(responses) {
+        let accounts = accounts?;
         for (key, account) in chunk.iter().zip(accounts) {
             if let Some(account) = account {
                 lookup.insert(*key, account);

@@ -163,7 +163,7 @@ restrict_intermediate_tokens = true
 # with an empty mint so the engine loads the deepest active reserve per mint;
 # set a mint to restrict discovery.
 enabled = true
-provider = "kamino"
+provider = "jupiter"
 mint = ""
 max_borrow_lamports = 1000000000
 reserve = ""
@@ -175,7 +175,8 @@ slippage_bps = 20
 # is recovered with `beast flash-alt-close --table <address>`.
 # Marginfi + two CPMM swaps needs one (1177 bytes with, 1326 without), and so
 # does Jupiter Lend (1050 with, 1264 without).
-# Kamino and Solend cycles fit without a table; leave this empty for them.
+# Jupiter Lend two-leg cycles may need a table depending on the selected
+# instruction set; leave this empty until `beast check` reports one is needed.
 lookup_table = ""
 
 [rent]

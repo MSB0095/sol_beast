@@ -48,6 +48,12 @@ proves the account list, discriminators and fee math are accepted by the
 program; landing a bundle additionally depends on Jito, compute budget, wallet
 balance and network conditions.
 
+The arbitrage driver is fail-closed: it never selects a closest losing cycle,
+never submits after a failed simulation, and refuses live mode without an
+explicit `--confirm` flag. `--scan-only` is read-only and never builds or sends
+a transaction. A first live attempt must therefore be initiated manually after
+reviewing the freshly simulated candidate.
+
 ### Why the reference transaction is not the proof
 
 The reference transaction's borrow succeeded but its swap failed with

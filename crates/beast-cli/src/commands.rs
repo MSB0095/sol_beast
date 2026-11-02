@@ -130,6 +130,28 @@ pub fn check(path: Option<&Path>, real: bool, json_output: bool) -> Result<()> {
         && config.guard.mode == GuardMode::Program
         && config.jito.enabled
         && wallet_present;
+    let mut readiness_blockers = Vec::new();
+    if !config.runtime.real {
+        readiness_blockers.push("runtime.real is false".to_string());
+    }
+    if !config.guard.enabled {
+        readiness_blockers.push("profit guard is disabled".to_string());
+    }
+    if config.guard.mode != GuardMode::Program {
+        readiness_blockers.push("guard.mode is not program".to_string());
+    }
+    if !guard_program_ok {
+        readiness_blockers.push("guard.program_id is missing or invalid".to_string());
+    }
+    if !config.jito.enabled {
+        readiness_blockers.push("Jito is disabled".to_string());
+    }
+    if !wallet_present {
+        readiness_blockers.push("wallet keypair is not configured".to_string());
+    }
+    if config.flash.enabled && config.flash.provider.trim().is_empty() {
+        readiness_blockers.push("flash provider is empty".to_string());
+    }
 
     if json_output {
         let value = json!({
@@ -158,6 +180,8 @@ pub fn check(path: Option<&Path>, real: bool, json_output: bool) -> Result<()> {
                 "jito_enabled": config.jito.enabled,
                 "wallet_present": wallet_present,
                 "live_ready": live_ready,
+                "network_verification": "not_run",
+                "readiness_blockers": readiness_blockers,
             },
             "api": {
                 "enabled": config.api.enabled,
@@ -1392,7 +1416,7 @@ pub async fn doctor(path: Option<&Path>, json_output: bool, no_network: bool) ->
             detail: "skipped (--no-network)".into(),
         });
     } else {
-        let rpc = rpc(config)?;
+        let rpc = Arc::new(rpc(config)?);
 
         // Probe each configured endpoint independently. Free tiers disagree on
         // which heavy methods they allow, so a global health check would hide a
@@ -1501,6 +1525,48 @@ pub async fn doctor(path: Option<&Path>, json_output: bool, no_network: bool) ->
                     detail: error.to_string(),
                 }),
             }
+        }
+
+        if config.flash.enabled {
+            match crate::engine::discover_provider_reserves(
+                &config.flash.provider,
+                &rpc,
+                config
+                    .flash
+                    .mint
+                    .parse::<Address>()
+                    .ok()
+                    .or_else(|| Some(Address::from_str(WSOL_MINT).expect("WSOL"))),
+            )
+            .await
+            {
+                Ok(reserves) => {
+                    let borrowable = reserves
+                        .iter()
+                        .filter(|reserve| reserve.flash_enabled() && reserve.available > 0)
+                        .count();
+                    checks.push(DoctorCheck {
+                        name: "flash_reserves",
+                        ok: borrowable > 0,
+                        detail: format!(
+                            "provider={} reserves={} borrowable={borrowable}",
+                            config.flash.provider,
+                            reserves.len()
+                        ),
+                    });
+                }
+                Err(error) => checks.push(DoctorCheck {
+                    name: "flash_reserves",
+                    ok: false,
+                    detail: error.to_string(),
+                }),
+            }
+        } else {
+            checks.push(DoctorCheck {
+                name: "flash_reserves",
+                ok: true,
+                detail: "flash disabled".into(),
+            });
         }
     }
 

@@ -3,6 +3,7 @@
 mod arb;
 mod commands;
 mod engine;
+mod wss_monitor;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -204,6 +205,10 @@ enum Command {
         /// Print one text report per scan instead of the TUI.
         #[arg(long)]
         scan_only: bool,
+        /// Use the text runner, which prompts for an exact candidate
+        /// fingerprint immediately before a live submission.
+        #[arg(long)]
+        text: bool,
         /// Milliseconds between scans.
         #[arg(long, default_value_t = 750)]
         refresh_ms: u64,
@@ -214,6 +219,9 @@ enum Command {
         /// always included.
         #[arg(long = "mint")]
         mints: Vec<String>,
+        /// Use only the supplied mints instead of the built-in pair list.
+        #[arg(long)]
+        replace_defaults: bool,
         /// Replace the default borrow-size ladder with one amount in lamports.
         #[arg(long = "amount")]
         amounts: Vec<u64>,
@@ -221,6 +229,9 @@ enum Command {
         /// runtime.real = true; without it the driver stays read-only.
         #[arg(long)]
         real: bool,
+        /// Explicitly approve live bundle submission. Required with --real.
+        #[arg(long)]
+        confirm: bool,
         /// Also price three-mint triangles through Jupiter. Off by default:
         /// an aggregator's quotes are mutually consistent, so a triangle is
         /// always negative by its fees, and the public rate limit makes the
@@ -392,7 +403,8 @@ async fn main() -> Result<()> {
             json,
         } => {
             init_logging("info", cli.json_logs)?;
-            commands::whirlpool_probe(cli.config.as_deref(), &pool, amount, slippage_bps, json).await
+            commands::whirlpool_probe(cli.config.as_deref(), &pool, amount, slippage_bps, json)
+                .await
         }
         Command::ClmmProbe {
             pool,
@@ -439,11 +451,14 @@ async fn main() -> Result<()> {
         }
         Command::Arb {
             scan_only,
+            text,
             refresh_ms,
             min_profit_lamports,
             mints,
             amounts,
+            replace_defaults,
             real,
+            confirm,
             jupiter_triangles,
             explain,
             pool_ttl_ms,
@@ -460,10 +475,14 @@ async fn main() -> Result<()> {
                             .filter(|s| !s.is_empty())
                             .collect()
                     } else {
-                        let mut defaults: Vec<String> = crate::arb::DEFAULT_PAIR_MINTS
-                            .iter()
-                            .map(|mint| (*mint).to_string())
-                            .collect();
+                        let mut defaults: Vec<String> = if replace_defaults {
+                            Vec::new()
+                        } else {
+                            crate::arb::DEFAULT_PAIR_MINTS
+                                .iter()
+                                .map(|mint| (*mint).to_string())
+                                .collect()
+                        };
                         for mint in mints {
                             if !defaults.contains(&mint) {
                                 defaults.push(mint);
@@ -478,6 +497,8 @@ async fn main() -> Result<()> {
                     amounts
                 },
                 scan_only,
+                text,
+                confirm,
                 jupiter: None,
                 mode: beast_core::types::Mode::Canary,
                 jupiter_triangles,

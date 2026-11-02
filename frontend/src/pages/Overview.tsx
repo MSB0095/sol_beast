@@ -104,13 +104,7 @@ export function Overview({
   )
   const landRate =
     metrics.bundles_submitted > 0 ? metrics.bundles_landed / metrics.bundles_submitted : 0
-  const liveReady =
-    status.signing_enabled &&
-    status.jito_enabled &&
-    status.guard.enabled &&
-    status.guard.mode === 'program' &&
-    status.guard.program_id_configured &&
-    status.wallet.keypair_configured
+  const liveReady = status.readiness.live_ready
   const riskState = status.risk?.state || 'unknown'
   const riskTone =
     riskState === 'healthy' || riskState === 'ok' ? 'good' : riskState === 'degraded' ? 'warn' : 'bad'
@@ -322,13 +316,42 @@ export function Overview({
             {status.risk?.reasons.length ? (
               <p>{status.risk.reasons.map((reason) => reason.detail).join(' · ')}</p>
             ) : (
-              <p>No active risk reasons. {status.real ? 'Live gates are evaluated per opportunity.' : 'Radar never signs transactions.'}</p>
+              <p>
+                {status.readiness.blockers.length
+                  ? `Blocked: ${status.readiness.blockers.join(' · ')}`
+                  : status.real
+                    ? 'Live gates are evaluated per opportunity.'
+                    : 'Radar never signs transactions.'}
+              </p>
             )}
           </div>
         </Panel>
       </div>
 
       <div className="grid-1-1">
+        <Panel>
+          <PanelHeader
+            title="Approval ledger"
+            subtitle="Exact simulated candidates approved by an operator"
+            icon={<ShieldCheck size={17} />}
+            actions={<Badge tone={data.approvals.length ? 'good' : 'muted'}>{data.approvals.length} recorded</Badge>}
+          />
+          {data.approvals.length ? (
+            <div className="activity-list">
+              {data.approvals.slice(0, 5).map((approval) => (
+                <div className="activity-row" key={approval.attempt_id}>
+                  <div>
+                    <strong>{approval.attempt_id}</strong>
+                    <span>{approval.operator} · {dateTime(approval.approved_at_ms)}</span>
+                  </div>
+                  <code>{shortAddress(approval.signature, 8, 8)}</code>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState compact icon={<LockKeyhole size={22} />} title="No approvals" description="Only clean, manually approved simulations appear here." />
+          )}
+        </Panel>
         <Panel>
           <PanelHeader
             title="Best modeled route"

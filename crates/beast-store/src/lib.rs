@@ -89,6 +89,15 @@ pub struct AttemptRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRecord {
+    pub attempt_id: String,
+    pub opportunity_id: Option<String>,
+    pub signature: String,
+    pub approved_at_ms: i64,
+    pub operator: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleRecord {
     pub bundle_id: String,
     pub attempt_id: Option<String>,
@@ -229,6 +238,15 @@ CREATE TABLE IF NOT EXISTS settlements (
     settled_at_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS approvals (
+    attempt_id TEXT PRIMARY KEY,
+    opportunity_id TEXT,
+    signature TEXT NOT NULL,
+    approved_at_ms INTEGER NOT NULL,
+    operator TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_time ON approvals(approved_at_ms DESC);
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -303,6 +321,20 @@ impl Store {
         if version < 1 {
             conn.execute_batch(SCHEMA_V1)?;
             conn.pragma_update(None, "user_version", 1)?;
+        }
+        if version < 2 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS approvals (
+                    attempt_id TEXT PRIMARY KEY,
+                    opportunity_id TEXT,
+                    signature TEXT NOT NULL,
+                    approved_at_ms INTEGER NOT NULL,
+                    operator TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_approvals_time
+                    ON approvals(approved_at_ms DESC);",
+            )?;
+            conn.pragma_update(None, "user_version", 2)?;
         }
         Ok(())
     }
@@ -560,6 +592,47 @@ impl Store {
             "#,
         )?;
         let rows = statement.query_map(params![limit as i64], row_to_attempt)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn insert_approval(&self, approval: &ApprovalRecord) -> Result<()> {
+        self.conn()?.execute(
+            r#"
+            INSERT OR REPLACE INTO approvals (
+                attempt_id, opportunity_id, signature, approved_at_ms, operator
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                approval.attempt_id,
+                approval.opportunity_id,
+                approval.signature,
+                approval.approved_at_ms,
+                approval.operator,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_approvals(&self, limit: usize) -> Result<Vec<ApprovalRecord>> {
+        let conn = self.conn()?;
+        let mut statement = conn.prepare(
+            r#"
+            SELECT attempt_id, opportunity_id, signature, approved_at_ms, operator
+            FROM approvals
+            ORDER BY approved_at_ms DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows = statement.query_map(params![limit as i64], |row| {
+            Ok(ApprovalRecord {
+                attempt_id: row.get(0)?,
+                opportunity_id: row.get(1)?,
+                signature: row.get(2)?,
+                approved_at_ms: row.get(3)?,
+                operator: row.get(4)?,
+            })
+        })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
@@ -1105,6 +1178,24 @@ mod tests {
         let stats = store.stats().unwrap();
         assert_eq!(stats.landed, 1);
         assert_eq!(stats.realized_net_lamports, 5_000);
+    }
+
+    #[test]
+    fn approval_roundtrip_is_signature_bound() {
+        let store = Store::in_memory().unwrap();
+        store
+            .insert_approval(&ApprovalRecord {
+                attempt_id: "attempt-1".into(),
+                opportunity_id: Some("opp-1".into()),
+                signature: "simulated-signature".into(),
+                approved_at_ms: 42,
+                operator: "interactive-cli".into(),
+            })
+            .unwrap();
+        let approvals = store.list_approvals(10).unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].signature, "simulated-signature");
+        assert_eq!(approvals[0].operator, "interactive-cli");
     }
 
     #[test]

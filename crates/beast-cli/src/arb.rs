@@ -22,7 +22,7 @@ use beast_core::types::Mode;
 use beast_core::types::{CostBreakdown, LegPlan, Opportunity, OutcomeLabel, StrategyKind};
 use beast_dex::Address;
 use beast_exec::venue::VenuePool;
-use beast_exec::{amm_v4, cpmm, clmm, Executor, RentReclaimer, WSOL_MINT};
+use beast_exec::{amm_v4, clmm, cpmm, Executor, RentReclaimer, WSOL_MINT};
 
 /// Base fee charged once per transaction in a composed cycle plus guard.
 const DEFAULT_CYCLE_BASE_FEE: u64 = 5_000;
@@ -49,7 +49,7 @@ const SPREAD_PROBE_LAMPORTS: u64 = 1_000_000;
 const MAX_SIZED_PAIRS: usize = 32;
 use beast_flash::{FlashProvider, FlashReserve};
 use beast_rpc::RpcClient;
-use beast_store::{AttemptRecord, AttemptUpdate, Store};
+use beast_store::{ApprovalRecord, AttemptRecord, AttemptUpdate, Store};
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -59,6 +59,7 @@ use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Row, Ta
 use ratatui::Terminal;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
+use std::io::{self, IsTerminal, Write};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -108,6 +109,55 @@ pub struct CycleLog {
     /// exactly the pools the scan priced.
     pub venue_in: String,
     pub venue_out: String,
+}
+
+fn select_executable_cycle(cycles: &[CycleLog], min_profit_lamports: u64) -> Option<&CycleLog> {
+    let floor = min_profit_lamports as i128;
+    cycles.iter().find(|cycle| cycle.profit >= floor)
+}
+
+fn approval_matches(input: &str, signature: &str) -> bool {
+    input.trim() == format!("APPROVE {signature}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cycle(profit: i128) -> CycleLog {
+        CycleLog {
+            pool_in: "in".into(),
+            pool_out: "out".into(),
+            middle_mint: "middle".into(),
+            amount: 1,
+            leg1_out: 1,
+            final_out: 1,
+            profit,
+            fee_bps_in: 0,
+            fee_bps_out: 0,
+            venue_in: "test".into(),
+            venue_out: "test".into(),
+        }
+    }
+
+    #[test]
+    fn empty_scan_has_no_executable_cycle() {
+        assert!(select_executable_cycle(&[], 1).is_none());
+    }
+
+    #[test]
+    fn scan_selection_does_not_invent_a_near_miss() {
+        let near_miss = cycle(-1);
+        assert!(select_executable_cycle(&[], 1).is_none());
+        assert!(select_executable_cycle(&[near_miss], 1).is_none());
+    }
+
+    #[test]
+    fn approval_is_bound_to_the_simulated_signature() {
+        assert!(approval_matches(" APPROVE sig-1\n", "sig-1"));
+        assert!(!approval_matches("APPROVE sig-2", "sig-1"));
+        assert!(!approval_matches("yes", "sig-1"));
+    }
 }
 
 /// Everything the TUI and the text report render.
@@ -176,6 +226,8 @@ pub struct ArbOptions {
     pub mints: Vec<String>,
     pub amount_ladder: Vec<u64>,
     pub scan_only: bool,
+    pub text: bool,
+    pub confirm: bool,
     /// Jupiter client used to price the legs that only Jupiter can execute.
     pub jupiter: Option<Arc<crate::commands::JupiterClient>>,
     /// The effective process mode. `Live` only when `--real` was passed, which
@@ -232,6 +284,8 @@ impl Default for ArbOptions {
                 2_000_000_000,
             ],
             scan_only: false,
+            text: false,
+            confirm: false,
             jupiter: None,
             mode: Mode::Canary,
             jupiter_triangles: false,
@@ -626,7 +680,9 @@ async fn hydrate_arrays(
     if let Ok(arrays) = clmm_arrays {
         for (pool, set) in stale_clmms.iter().zip(arrays) {
             if let Some(set) = set {
-                cache.clmm_arrays.insert(pool.address, (Instant::now(), set));
+                cache
+                    .clmm_arrays
+                    .insert(pool.address, (Instant::now(), set));
             }
         }
     }
@@ -728,10 +784,12 @@ async fn program_accounts_for_pair(
         }
         filters.push(serde_json::json!({ "memcmp": { "offset": mint_offsets.0, "bytes": first.to_string() } }));
         filters.push(serde_json::json!({ "memcmp": { "offset": mint_offsets.1, "bytes": second.to_string() } }));
-        let entries = rpc
-            .get_program_accounts(program, filters, None)
-            .await?;
-        accounts.extend(entries.into_iter().map(|(key, account)| (key, account.data)));
+        let entries = rpc.get_program_accounts(program, filters, None).await?;
+        accounts.extend(
+            entries
+                .into_iter()
+                .map(|(key, account)| (key, account.data)),
+        );
     }
     let mut seen = std::collections::HashSet::new();
     accounts.retain(|(key, _)| seen.insert(*key));
@@ -743,16 +801,12 @@ async fn program_accounts_for_pair(
 /// Same chunking as [`vault_balances`]: `getMultipleAccounts` accepts at most
 /// 100 keys, and the result stays positional so a missing account cannot shift
 /// every later pool onto the wrong address.
-async fn read_accounts(
-    rpc: &RpcClient,
-    keys: &[Address],
-) -> Vec<Option<beast_rpc::Account>> {
+async fn read_accounts(rpc: &RpcClient, keys: &[Address]) -> Vec<Option<beast_rpc::Account>> {
     let mut accounts_out = Vec::with_capacity(keys.len());
     let chunks: Vec<&[Address]> = keys.chunks(100).collect();
-    let responses = futures_util::future::join_all(
-        chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)),
-    )
-    .await;
+    let responses =
+        futures_util::future::join_all(chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)))
+            .await;
     for (chunk, accounts) in chunks.iter().zip(responses) {
         let accounts = accounts.unwrap_or_default();
         for index in 0..chunk.len() {
@@ -770,10 +824,9 @@ async fn read_accounts(
 async fn vault_balances(rpc: &RpcClient, keys: &[Address]) -> Vec<u64> {
     let mut balances = Vec::with_capacity(keys.len());
     let chunks: Vec<&[Address]> = keys.chunks(100).collect();
-    let responses = futures_util::future::join_all(
-        chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)),
-    )
-    .await;
+    let responses =
+        futures_util::future::join_all(chunks.iter().map(|chunk| rpc.get_multiple_accounts(chunk)))
+            .await;
     for (chunk, accounts) in chunks.iter().zip(responses) {
         let accounts = accounts.unwrap_or_default();
         for index in 0..chunk.len() {
@@ -791,7 +844,11 @@ async fn vault_balances(rpc: &RpcClient, keys: &[Address]) -> Vec<u64> {
 }
 
 /// Every swappable Raydium CPMM pool for the pair.
-async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolShape>> {
+async fn fetch_cpmm_pools(
+    rpc: &RpcClient,
+    wsol: Address,
+    other: Address,
+) -> Result<Vec<PoolShape>> {
     let program = Address::from_str(cpmm::CPMM_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("cpmm program: {error}"))?;
     let accounts = program_accounts_for_pair(
@@ -857,17 +914,18 @@ async fn fetch_cpmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
 /// AMM v4 stores its base mint at 400 and its quote mint at 432. The fee comes
 /// out of the pool account itself, so a pool with a non-default fee is priced
 /// with its own number rather than the program's default.
-async fn fetch_amm_v4_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolShape>> {
+async fn fetch_amm_v4_pools(
+    rpc: &RpcClient,
+    wsol: Address,
+    other: Address,
+) -> Result<Vec<PoolShape>> {
     let program = Address::from_str(amm_v4::AMM_V4_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("amm v4 program: {error}"))?;
     let accounts = program_accounts_for_pair(
         rpc,
         program,
         Some(amm_v4::AMM_V4_POOL_LEN),
-        (
-            amm_v4::BASE_MINT_OFFSET,
-            amm_v4::QUOTE_MINT_OFFSET,
-        ),
+        (amm_v4::BASE_MINT_OFFSET, amm_v4::QUOTE_MINT_OFFSET),
         wsol,
         other,
     )
@@ -936,10 +994,9 @@ async fn fetch_whirlpool_pools(
 
     let mut shapes = Vec::with_capacity(accounts.len());
     for (key, data) in accounts {
-        let Ok(pool) = beast_exec::whirlpool::WhirlpoolPool::decode(
-            beast_flash::pubkey(&key),
-            &data,
-        ) else {
+        let Ok(pool) =
+            beast_exec::whirlpool::WhirlpoolPool::decode(beast_flash::pubkey(&key), &data)
+        else {
             continue;
         };
         if pool.ensure_swappable().is_err() {
@@ -956,7 +1013,11 @@ async fn fetch_whirlpool_pools(
 /// ticks, and it charges the pool's own trade fee from `AmmConfig`. Pools that
 /// charge fees off the output side, or that enable dynamic fees, need state
 /// this pricer does not model, so they are rejected rather than mispriced.
-async fn fetch_clmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Result<Vec<PoolShape>> {
+async fn fetch_clmm_pools(
+    rpc: &RpcClient,
+    wsol: Address,
+    other: Address,
+) -> Result<Vec<PoolShape>> {
     let program = Address::from_str(clmm::CLMM_PROGRAM_ID)
         .map_err(|error| anyhow::anyhow!("clmm program: {error}"))?;
     let accounts = program_accounts_for_pair(
@@ -985,7 +1046,10 @@ async fn fetch_clmm_pools(rpc: &RpcClient, wsol: Address, other: Address) -> Res
         .iter()
         .map(|(_, pool)| address(&pool.amm_config))
         .collect();
-    let config_data = rpc.get_multiple_accounts(&configs).await.unwrap_or_default();
+    let config_data = rpc
+        .get_multiple_accounts(&configs)
+        .await
+        .unwrap_or_default();
 
     let mut shapes = Vec::with_capacity(decoded.len());
     for (_index, (_, pool)) in decoded.into_iter().enumerate() {
@@ -1151,13 +1215,7 @@ fn optimize_cycle(
             None => i128::MIN / 4,
         }
     })?;
-    evaluate_cycle(
-        pool_in,
-        pool_out,
-        best.amount,
-        fee_for(best.amount),
-        costs,
-    )
+    evaluate_cycle(pool_in, pool_out, best.amount, fee_for(best.amount), costs)
 }
 
 /// The largest input the first leg can take: the reserve's liquidity, further
@@ -1245,13 +1303,15 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     if real && !config.runtime.real {
         bail!("--real requires runtime.real = true in the config");
     }
+    if real && !options.confirm && !options.scan_only && !options.explain {
+        bail!("live arbitrage requires explicit --confirm approval");
+    }
     let rpc = Arc::new(crate::commands::rpc(config)?);
     let wallet = Arc::new(
         crate::commands::load_wallet(config, &loaded.secrets)?
             .ok_or_else(|| anyhow::anyhow!("a wallet keypair is required to run arbitrage"))?,
     );
     let provider = crate::engine::flash_provider(config)?;
-    // Discovery is per-adapter, because reserve decoders differ per protocol.
     let reserve = crate::engine::discover_provider_reserves(provider.id(), &rpc, Some(wsol()))
         .await?
         .into_iter()
@@ -1265,8 +1325,6 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
         })?;
 
     let store = Arc::new(Store::open(&config.storage.path)?);
-    // Jupiter and Jito come from the same clients the radar uses, so the quote
-    // and the bundle land exactly as they would in a live run.
     let jupiter = Arc::new(crate::commands::jupiter(config, &loaded.secrets)?);
     let jito = crate::engine::build_jito(config)?;
     // The executor only submits when it is built in Live mode, so the driver
@@ -1275,7 +1333,8 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
     // project refuses to ship.
     // `--explain` is a diagnostic: it must never submit, whatever the config
     // or `--real` says.
-    let effective = if real && !options.explain {
+    let live_requested = real && !options.explain && !options.scan_only;
+    let effective = if live_requested {
         Mode::Live
     } else {
         Mode::Canary
@@ -1287,7 +1346,7 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
         &jito,
         Some(wallet.clone()),
         effective,
-        real,
+        live_requested,
     )?
     .ok_or_else(|| anyhow::anyhow!("executor could not be built for this config"))?;
     let rent_reclaimer = RentReclaimer::new(rpc.clone(), wallet.clone(), config.rent.clone());
@@ -1304,8 +1363,61 @@ pub async fn arb(path: Option<&std::path::Path>, real: bool, options: ArbOptions
         state.fee_bits
     ));
 
+    // WSS price monitor is intentionally disabled during initial network debugging.
+    // It will be re-enabled once the RPC client works reliably.
+    let _helius_ws = config.rpc.ws_urls.get(0).cloned();
+    let _publicnode_ws = config.rpc.ws_urls.get(1).cloned();
+    let _rpc_for_monitor = rpc.clone();
+
+    // Start the WSS price monitor in the background to watch USDT/USDC pool
+    // vaults across Helius + PublicNode and report price divergences vs Jupiter.
+    // WSS failures are non-fatal: the scanner runs independently.
+    let helius_ws = config
+        .rpc
+        .ws_urls
+        .get(0)
+        .cloned()
+        .unwrap_or_else(|| "wss://mainnet.helius-rpc.com/".to_string());
+    let publicnode_ws = config
+        .rpc
+        .ws_urls
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "wss://solana-rpc.publicnode.com".to_string());
+    let helius_http = config
+        .rpc
+        .urls
+        .get(0)
+        .cloned()
+        .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+    let rpc_for_monitor = rpc.clone();
+    tokio::spawn(async move {
+        loop {
+            match crate::wss_monitor::run_wss_monitor(
+                helius_ws.clone(),
+                publicnode_ws.clone(),
+                helius_http.clone(),
+                rpc_for_monitor.clone(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    tracing::warn!("WSS price monitor exited cleanly; restarting in 2s");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "WSS price monitor error; restarting in 2s");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+
     let stop = Arc::new(AtomicBool::new(false));
-    if options.scan_only || options.explain {
+    let use_text = options.scan_only
+        || options.explain
+        || options.text
+        || !std::io::stdout().is_terminal();
+    if use_text {
         return run_text(
             config,
             rpc,
@@ -1525,12 +1637,7 @@ async fn scan_once(
     }
 
     // Read every pool's live state in one pass, then split it back per mint.
-    let flat: Vec<PoolShape> = shapes
-        .iter()
-        .flatten()
-        .flatten()
-        .cloned()
-        .collect();
+    let flat: Vec<PoolShape> = shapes.iter().flatten().flatten().cloned().collect();
     let (live, balances) = read_live_pools(rpc, &flat).await;
     let mut by_pair: Vec<Option<Vec<Arc<LitePool>>>> = (0..wanted.len()).map(|_| None).collect();
     for (index, shape) in live {
@@ -1634,8 +1741,8 @@ async fn scan_once(
                 let capacity = pool_in
                     .wsol_capacity(&wsol_key)
                     .min(pool_out.wsol_capacity(&wsol_key));
-                let bound = spread.saturating_mul(i128::from(capacity))
-                    / i128::from(SPREAD_PROBE_LAMPORTS);
+                let bound =
+                    spread.saturating_mul(i128::from(capacity)) / i128::from(SPREAD_PROBE_LAMPORTS);
                 Some((bound, pool_in.clone(), pool_out.clone()))
             })
             .collect()
@@ -1667,14 +1774,18 @@ async fn scan_once(
     let jobs: Vec<(Arc<PoolView>, Arc<PoolView>)> = survivors
         .into_iter()
         .filter_map(|(pool_in, pool_out)| {
-            let pool_in = Arc::new(pool_in.as_ref().clone().hydrate(
-                &whirlpool_arrays,
-                &clmm_arrays,
-            )?);
-            let pool_out = Arc::new(pool_out.as_ref().clone().hydrate(
-                &whirlpool_arrays,
-                &clmm_arrays,
-            )?);
+            let pool_in = Arc::new(
+                pool_in
+                    .as_ref()
+                    .clone()
+                    .hydrate(&whirlpool_arrays, &clmm_arrays)?,
+            );
+            let pool_out = Arc::new(
+                pool_out
+                    .as_ref()
+                    .clone()
+                    .hydrate(&whirlpool_arrays, &clmm_arrays)?,
+            );
             Some((pool_in, pool_out))
         })
         .collect();
@@ -1854,60 +1965,55 @@ async fn run_text(
                     );
                 }
                 let cycles = found.as_slice();
-                // Always try to execute the best cycle — even when no cycle is
-                // locally profitable. Markets move between the scan read and
-                // the build, so a marginally-negative cycle can land
-                // profitably on-chain. The on-chain simulation is the final
-                // gate: if it reverts, nothing is spent beyond the base fee,
-                // and the user sees the attempt on Solscan.
-                let best_cycle = cycles.first().cloned().or_else(|| state.closest.first().cloned());
-                if let Some(cycle) = best_cycle {
-                    if cycles.is_empty() {
-                        state.note(format!(
-                            "no locally profitable cycle; submitting best near-miss {} lamports",
+                if let Some(cycle) = select_executable_cycle(cycles, options.min_profit_lamports) {
+                    state.profitable += cycles.len();
+                    state.best = cycles.to_vec();
+                    state.best.truncate(24);
+                    state.note(format!(
+                        "found {} profitable cycles; best {} lamports",
+                        cycles.len(),
+                        cycles[0].profit
+                    ));
+                    let closest = state.closest.clone();
+                    for cycle in &closest {
+                        let message = format!(
+                            "  best: {} -> {} amount {} leg1 {} final {} profit {}",
+                            cycle.pool_in,
+                            cycle.pool_out,
+                            cycle.amount,
+                            cycle.leg1_out,
+                            cycle.final_out,
                             cycle.profit
-                        ));
-                    } else {
-                        state.profitable += cycles.len();
-                        state.best = cycles.to_vec();
-                        state.best.truncate(24);
-                        state.note(format!(
-                            "found {} profitable cycles; best {} lamports",
-                            cycles.len(),
-                            cycles[0].profit
-                        ));
-                        let closest = state.closest.clone();
-                        for cycle in &closest {
-                            let message = format!(
-                                "  best: {} -> {} amount {} leg1 {} final {} profit {}",
-                                cycle.pool_in,
-                                cycle.pool_out,
-                                cycle.amount,
-                                cycle.leg1_out,
-                                cycle.final_out,
-                                cycle.profit
-                            );
-                            state.note(message.clone());
-                            println!("{message}");
+                        );
+                        state.note(message.clone());
+                        println!("{message}");
+                    }
+                    if !options.scan_only {
+                        let logged = state.log.len();
+                        execute_best(
+                            config,
+                            rpc.as_ref(),
+                            provider.as_ref(),
+                            &reserve,
+                            executor.clone(),
+                            &store,
+                            cycle,
+                            options.mode,
+                            options.text,
+                            &mut state,
+                        )
+                        .await;
+                        let added = state.log.len().saturating_sub(logged);
+                        for message in state.log.iter().take(added).rev() {
+                            println!("    {message}");
                         }
+                    } else {
+                        state.note("scan-only mode: candidate prepared but no build or submission performed");
                     }
-                    let logged = state.log.len();
-                    execute_best(
-                        config,
-                        rpc.as_ref(),
-                        provider.as_ref(),
-                        &reserve,
-                        executor.clone(),
-                        &store,
-                        &cycle,
-                        options.mode,
-                        &mut state,
-                    )
-                    .await;
-                    let added = state.log.len().saturating_sub(logged);
-                    for message in state.log.iter().take(added).rev() {
-                        println!("    {message}");
-                    }
+                } else {
+                    state.note(
+                        "no profitable cycle cleared the configured execution floor; nothing sent",
+                    );
                 }
             }
             Err(error) => {
@@ -1946,6 +2052,7 @@ async fn execute_best(
     store: &Store,
     cycle: &CycleLog,
     mode: Mode,
+    manual_approval: bool,
     state: &mut ArbState,
 ) {
     let attempt_id = format!("arb-{}", uuid::Uuid::new_v4());
@@ -1986,13 +2093,11 @@ async fn execute_best(
     });
     state.attempts += 1;
 
-    // Execute IMMEDIATELY: opportunities last seconds or less. Try up to 3
-    // fast rebuilds — submit on the FIRST clean simulation, don't wait for
-    // all attempts. If nothing simulates clean, force-submit anyway; the
-    // chain is the final gate (revert costs only the base fee).
+    // Opportunities last seconds or less, so try a few fast rebuilds. A plan
+    // is eligible for submission only after a successful simulation; a failed
+    // simulation is a hard stop, never a reason to send a transaction anyway.
     const BUILD_ATTEMPTS: usize = 3;
     let mut built: Option<(beast_exec::BundlePlan, beast_rpc::SimulationResult)> = None;
-    let mut last_candidate: Option<beast_exec::BundlePlan> = None;
     let mut last_error = String::new();
     let mut last_logs: Vec<String> = Vec::new();
     for attempt in 1..=BUILD_ATTEMPTS {
@@ -2013,7 +2118,6 @@ async fn execute_best(
                 continue;
             }
         };
-        last_candidate = Some(candidate.clone());
         match executor.simulate_cycle(&candidate).await {
             Ok(simulation) if simulation.err.is_none() => {
                 built = Some((candidate, simulation));
@@ -2041,91 +2145,68 @@ async fn execute_best(
             }
         }
     }
-    // Force-submit if nothing simulated clean: the chain decides, not the model.
     let (plan, simulation) = match built {
         Some(b) => b,
         None => {
-            let candidate = match last_candidate {
-                Some(c) => c,
-                None => {
-                    state.rejected += 1;
-                    for line in last_logs.iter().rev().take(4).rev() {
-                        state.note(format!("    sim log: {line}"));
-                    }
-                    let _ = store.update_attempt(
-                        &attempt_id,
-                        &AttemptUpdate {
-                            status: Some("simulation_rejected".into()),
-                            error: Some(last_error.clone()),
-                            simulated: Some(true),
-                            ..AttemptUpdate::default()
-                        },
-                    );
-                    state.note(format!(
-                        "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
-                    ));
-                    return;
-                }
-            };
-            let signature = candidate.signatures.first().cloned().unwrap_or_default();
-            // The chain is the final judge, but an operator still needs to know
-            // why the local simulation failed before a bundle went out on a
-            // forced submit: "dropped" and "reverted for lack of balance" are
-            // different problems with different fixes.
-            state.note(format!(
-                "{attempt_id} forcing submit after simulation failed: {last_error}"
-            ));
+            state.rejected += 1;
             for line in last_logs.iter().rev().take(4).rev() {
                 state.note(format!("    sim log: {line}"));
             }
             let _ = store.update_attempt(
                 &attempt_id,
                 &AttemptUpdate {
-                    status: Some("forced_submit".into()),
-                    signature: Some(signature.clone()),
+                    status: Some("simulation_rejected".into()),
+                    error: Some(last_error.clone()),
                     simulated: Some(true),
                     ..AttemptUpdate::default()
                 },
             );
-            match executor.submit(&candidate).await {
-                Ok(bundle_id) => {
-                    state.note(format!("{attempt_id} forced-submitted to Jito: {bundle_id}"));
-                    let _ = store.update_attempt(
-                        &attempt_id,
-                        &AttemptUpdate {
-                            status: Some("submitted".into()),
-                            bundle_id: Some(bundle_id.clone()),
-                            signature: Some(signature.clone()),
-                            simulated: Some(true),
-                            ..AttemptUpdate::default()
-                        },
-                    );
-                    poll_bundle(
-                        &attempt_id,
-                        &signature,
-                        &bundle_id,
-                        state,
-                        store,
-                        &*executor,
-                        rpc,
-                        start_balance,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    state.note(format!("{attempt_id} forced submit failed: {error}"));
-                }
-            }
+            state.note(format!(
+                "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
+            ));
             return;
         }
     };
-    // Clean simulation found — submit immediately, don't wait.
-    state.note(format!("{attempt_id} simulation clean, submitting to Jito immediately"));
+    // RPC simulation proves the composed transaction against the current
+    // account state. Jito simulation is a separate gate: it validates the
+    // exact encoded bundle through the block-engine path that would receive
+    // it. Both must succeed before a candidate can reach approval or submit.
+    match executor.simulate(&plan).await {
+        Ok(bundle_simulation) => {
+            state.note(format!(
+                "{attempt_id} Jito simulation clean · {}",
+                compact_simulation_summary(&bundle_simulation)
+            ));
+        }
+        Err(error) => {
+            state.rejected += 1;
+            let message = format!("Jito bundle simulation rejected: {error}");
+            let _ = store.update_attempt(
+                &attempt_id,
+                &AttemptUpdate {
+                    status: Some("jito_simulation_rejected".into()),
+                    error: Some(message.clone()),
+                    simulated: Some(true),
+                    ..AttemptUpdate::default()
+                },
+            );
+            state.note(format!("{attempt_id} abandoned: {message}"));
+            return;
+        }
+    }
+
+    // Both simulations are clean — submit immediately only when live mode
+    // and the explicit approval gate permit it.
+    state.note(format!(
+        "{attempt_id} RPC + Jito simulations clean"
+    ));
     submit_clean(
         &attempt_id,
         &plan,
         &simulation,
         cycle,
+        opportunity.id.to_string(),
+        manual_approval,
         state,
         store,
         &*executor,
@@ -2135,6 +2216,14 @@ async fn execute_best(
     .await;
 }
 
+fn compact_simulation_summary(value: &serde_json::Value) -> String {
+    value
+        .pointer("/value/summary")
+        .or_else(|| value.get("summary"))
+        .map(|summary| summary.to_string())
+        .unwrap_or_else(|| "succeeded".into())
+}
+
 /// The normal submit path: a clean simulation was found, so submit to Jito and
 /// poll for landing.
 async fn submit_clean(
@@ -2142,6 +2231,8 @@ async fn submit_clean(
     plan: &beast_exec::BundlePlan,
     simulation: &beast_rpc::SimulationResult,
     cycle: &CycleLog,
+    opportunity_id: String,
+    manual_approval: bool,
     state: &mut ArbState,
     store: &Store,
     executor: &Executor,
@@ -2170,6 +2261,49 @@ async fn submit_clean(
     if !executor.config().real {
         state.note(format!("{attempt_id} simulated only · live disabled"));
         return;
+    }
+
+    if manual_approval {
+        let approval = format!("APPROVE {}", signature);
+        println!(
+            "\nLIVE CANDIDATE\n  attempt: {attempt_id}\n  borrow: {} lamports\n  modeled profit: {:+} lamports\n  expected minimum output: {}\n  tip: {} lamports\n  guard threshold: {} lamports\n  transactions: {}\n  simulation: clean\nType `{approval}` to submit exactly this simulated candidate, or anything else to reject: ",
+            cycle.amount,
+            cycle.profit,
+            plan.quoted_out_min,
+            plan.tip_lamports,
+            plan.guard_required_lamports,
+            plan.encoded_transactions.len(),
+        );
+        io::stdout().flush().map_err(|error| error.to_string()).ok();
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() || !approval_matches(&input, &signature) {
+            let _ = store.update_attempt(
+                attempt_id,
+                &AttemptUpdate {
+                    status: Some("approval_rejected".into()),
+                    error: Some("manual candidate fingerprint was not approved".into()),
+                    ..AttemptUpdate::default()
+                },
+            );
+            state.note(format!(
+                "{attempt_id} manual approval rejected; nothing submitted"
+            ));
+            return;
+        }
+        let _ = store.update_attempt(
+            attempt_id,
+            &AttemptUpdate {
+                status: Some("approved".into()),
+                ..AttemptUpdate::default()
+            },
+        );
+        let _ = store.insert_approval(&ApprovalRecord {
+            attempt_id: attempt_id.to_string(),
+            opportunity_id: Some(opportunity_id),
+            signature: signature.clone(),
+            approved_at_ms: chrono::Utc::now().timestamp_millis(),
+            operator: "interactive-cli".into(),
+        });
     }
 
     let bundle_id = match executor.submit(plan).await {
@@ -2237,7 +2371,10 @@ async fn poll_bundle(
 ) {
     let mut landed = false;
     for poll_count in 0..600 {
-        match rpc.get_signature_statuses(std::slice::from_ref(signature)).await {
+        match rpc
+            .get_signature_statuses(std::slice::from_ref(signature))
+            .await
+        {
             Ok(statuses) => {
                 if let Some(Some(found)) = statuses.into_iter().next() {
                     landed = true;
@@ -2293,7 +2430,9 @@ async fn poll_bundle(
                 }
             }
             Err(e) => {
-                state.note(format!("{attempt_id} status poll #{poll_count} RPC error: {e}"));
+                state.note(format!(
+                    "{attempt_id} status poll #{poll_count} RPC error: {e}"
+                ));
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2418,6 +2557,7 @@ async fn run_tui(
                             store.as_ref(),
                             &found[0],
                             options.mode,
+                            false,
                             &mut working,
                         )
                         .await;

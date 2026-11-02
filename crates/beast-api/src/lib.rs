@@ -15,7 +15,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use beast_core::config::BeastConfig;
+use beast_core::config::{BeastConfig, GuardMode};
 use beast_core::metrics::Metrics;
 use beast_core::risk::RiskEngine;
 use beast_core::types::{Mode, StrategyKind};
@@ -336,6 +336,7 @@ pub fn build_router(state: Arc<ApiState>) -> Result<Router> {
         .route("/v1/pools", get(pools))
         .route("/v1/opportunities", get(opportunities))
         .route("/v1/attempts", get(attempts))
+        .route("/v1/approvals", get(approvals))
         .route("/v1/bundles", get(bundles))
         .route("/v1/settlements", get(settlements))
         .route("/v1/report", get(report))
@@ -611,6 +612,25 @@ async fn dashboard(
         .and_then(|risk| risk.lock().ok().map(|risk| risk.snapshot()));
     let process_mode = *state.mode.read().await;
     let modes = state.strategies.read().await;
+    let mut readiness_blockers = Vec::new();
+    if !state.config.runtime.real {
+        readiness_blockers.push("runtime.real is false");
+    }
+    if !state.config.guard.enabled {
+        readiness_blockers.push("profit guard is disabled");
+    }
+    if state.config.guard.mode != GuardMode::Program {
+        readiness_blockers.push("guard.mode is not program");
+    }
+    if state.config.guard.program_id.trim().is_empty() {
+        readiness_blockers.push("guard.program_id is missing");
+    }
+    if !state.config.jito.enabled {
+        readiness_blockers.push("Jito is disabled");
+    }
+    if !keypair_present(&state.config) {
+        readiness_blockers.push("wallet keypair is not configured");
+    }
     let strategies: Vec<Value> = StrategyKind::ALL
         .iter()
         .map(|strategy| {
@@ -658,6 +678,11 @@ async fn dashboard(
             "wallet": {
                 "keypair_configured": keypair_present(&state.config),
             },
+            "readiness": {
+                "live_ready": readiness_blockers.is_empty(),
+                "network_verification": "not_run",
+                "blockers": readiness_blockers,
+            },
         },
         "strategies": strategies,
         "venues": {
@@ -666,6 +691,7 @@ async fn dashboard(
         },
         "opportunities": state.store.list_opportunities(limit)?,
         "attempts": state.store.list_attempts(limit)?,
+        "approvals": state.store.list_approvals(limit)?,
         "bundles": state.store.list_bundles(limit)?,
         "settlements": state.store.list_settlements(limit)?,
         "events": state.store.recent_events(limit)?,
@@ -857,6 +883,14 @@ async fn attempts(
 ) -> Result<Json<Value>> {
     let rows = state.store.list_attempts(limit(query.limit, 100, 1_000))?;
     Ok(Json(json!({ "count": rows.len(), "attempts": rows })))
+}
+
+async fn approvals(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>> {
+    let rows = state.store.list_approvals(limit(query.limit, 100, 1_000))?;
+    Ok(Json(json!({ "count": rows.len(), "approvals": rows })))
 }
 
 async fn bundles(

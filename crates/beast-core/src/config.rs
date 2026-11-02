@@ -892,7 +892,6 @@ impl StrategyConfig {
 /// Secrets are intentionally a separate type and never appear inside
 /// `BeastConfig`, so `GET /api/config` cannot leak them.
 #[derive(Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct Secrets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_bearer_token: Option<String>,
@@ -1414,6 +1413,14 @@ fn expand_rpc_urls(
             .map(|url| expand(url, warnings))
             .collect();
         *urls = expanded.into_iter().map(toml::Value::String).collect();
+    }
+    if let Some(ws_urls) = rpc.get_mut("ws_urls").and_then(toml::Value::as_array_mut) {
+        let expanded: Vec<String> = ws_urls
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(|url| expand(url, warnings))
+            .collect();
+        *ws_urls = expanded.into_iter().map(toml::Value::String).collect();
     }
     if let Some(endpoints) = rpc.get_mut("endpoints").and_then(toml::Value::as_array_mut) {
         let expanded: Vec<String> = endpoints
@@ -2124,6 +2131,19 @@ role = "exec"
         assert!(loaded.config.rpc.endpoints[0]
             .url
             .contains("secret-test-key"));
+    }
+
+    #[test]
+    fn legacy_provider_secret_keys_are_ignored_without_breaking_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets_path = temp_secrets(dir.path());
+        fs::write(
+            &secrets_path,
+            "tatum_api_key = \"legacy-key\"\nhelius_api_key = \"current-key\"\n",
+        )
+        .unwrap();
+        let loaded = Secrets::load(&secrets_path).unwrap();
+        assert_eq!(loaded.helius_api_key.as_deref(), Some("current-key"));
     }
 
     #[test]

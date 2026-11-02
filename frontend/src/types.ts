@@ -129,6 +129,11 @@ export interface Status {
   jito_enabled: boolean
   api: { enabled: boolean; bind: string }
   wallet: { keypair_configured: boolean }
+  readiness: {
+    live_ready: boolean
+    network_verification: string
+    blockers: string[]
+  }
 }
 
 export interface StrategyState {
@@ -218,6 +223,14 @@ export interface Settlement {
   settled_at_ms: number
 }
 
+export interface Approval {
+  attempt_id: string
+  opportunity_id: string | null
+  signature: string
+  approved_at_ms: number
+  operator: string
+}
+
 export interface EventRecord {
   id: number
   ts_ms: number
@@ -244,6 +257,7 @@ export interface Dashboard {
   }
   opportunities: OpportunityRecord[]
   attempts: Attempt[]
+  approvals: Approval[]
   bundles: Bundle[]
   settlements: Settlement[]
   events: EventRecord[]

@@ -1537,14 +1537,15 @@ fn optimize_triangle(
     upper: u64,
     fee_for: impl Fn(u64) -> u64,
     costs: u64,
+    min_profit: i128,
 ) -> Option<CycleLog> {
     let upper = usable_upper_triangle(pool1, upper)?;
-    let best = beast_exec::sizing::maximize_profit(upper, |amount| {
+    let best = beast_exec::sizing::solve_size(upper, |amount| {
         match evaluate_triangle(pool1, pool2, pool3, amount, fee_for(amount), costs) {
             Some(cycle) => cycle.profit,
             None => i128::MIN / 4,
         }
-    })?;
+    }, beast_exec::sizing::SizeObjective::MaxBorrowable, min_profit)?;
     evaluate_triangle(pool1, pool2, pool3, best.amount, fee_for(best.amount), costs)
 }
 
@@ -1575,16 +1576,17 @@ fn optimize_cycle(
     upper: u64,
     fee_for: impl Fn(u64) -> u64,
     costs: u64,
+    min_profit: i128,
 ) -> Option<CycleLog> {
     let upper = usable_upper(pool_in, upper)?;
-    let best = beast_exec::sizing::maximize_profit(upper, |amount| {
+    let best = beast_exec::sizing::solve_size(upper, |amount| {
         match evaluate_cycle(pool_in, pool_out, amount, fee_for(amount), costs) {
             Some(cycle) => cycle.profit,
             // Not a size the pools can serve. It must not win the search, and
             // it must also not poison the arithmetic with an overflow.
             None => i128::MIN / 4,
         }
-    })?;
+    }, beast_exec::sizing::SizeObjective::MaxBorrowable, min_profit)?;
     evaluate_cycle(pool_in, pool_out, best.amount, fee_for(best.amount), costs)
 }
 
@@ -2210,7 +2212,7 @@ async fn scan_once(
                     Some(cycle) if cycle.profit > 0 => {
                         probe_passed.fetch_add(1, Ordering::Relaxed);
                         cleared.fetch_add(1, Ordering::Relaxed);
-                        optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
+                        optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs, i128::from(options.min_profit_lamports))
                     }
                     Some(cycle) => {
                         // Probe passed but profit <= 0 at costs=0 - edge is negative
@@ -2423,7 +2425,7 @@ async fn scan_once(
                 if probe.profit <= 0 {
                     return None;
                 }
-                optimize_triangle(pool1, pool2, pool3, reserve.available, fee_for, costs)
+                optimize_triangle(pool1, pool2, pool3, reserve.available, fee_for, costs, i128::from(options.min_profit_lamports))
             })
             .collect()
     };

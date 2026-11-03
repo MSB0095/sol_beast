@@ -94,7 +94,8 @@ restrict_intermediate_tokens = true
 enabled = false
 provider = "kamino"
 mint = "So11111111111111111111111111111111111111112"
-max_borrow_lamports = 1000000000
+# No fixed ceiling: the four pool equations and the flash provider cap determine size.
+max_borrow_lamports = 9223372036854775807
 reserve = ""
 # Freshness guard, not an on-chain minimum. Local CPMM swaps are exact-in.
 slippage_bps = 20
@@ -193,7 +194,7 @@ pair_denylist = []
 [strategies.flash_arb]
 mode = "off"
 min_net_lamports = 20000
-max_notional_lamports = 1000000000
+max_notional_lamports = 9223372036854775807
 max_price_impact_bps = 80
 tip_alpha_initial = 0.5
 tip_cap_lamports = 2000000

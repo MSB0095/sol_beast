@@ -165,7 +165,8 @@ restrict_intermediate_tokens = true
 enabled = true
 provider = "jupiter"
 mint = ""
-max_borrow_lamports = 1000000000
+# No fixed ceiling: the four pool equations and the flash provider cap determine size.
+max_borrow_lamports = 9223372036854775807
 reserve = ""
 # Maximum adverse decay between the radar quote and the executor's fresh
 # quote. Local CPMM swaps are exact-in; this does not relax on-chain minimums.
@@ -272,7 +273,7 @@ pair_denylist = []
 # after a funded wallet, Jito access and the guard are in place.
 mode = "radar"
 min_net_lamports = 20000
-max_notional_lamports = 1000000000
+max_notional_lamports = 9223372036854775807
 max_price_impact_bps = 80
 tip_alpha_initial = 0.5
 tip_cap_lamports = 2000000

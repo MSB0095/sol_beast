@@ -1,26 +1,19 @@
-//! Optimal trade sizing for a two-pool cycle.
+//! Optimal trade sizing for every arbitrage route the executor supports.
 //!
 //! A fixed amount ladder is the wrong shape for this problem. Profit as a
 //! function of borrow size is zero at dust (costs dominate), rises while the
-//! price edge pays for the impact, peaks, and then falls as the second leg's
-//! impact eats the edge. Picking from a handful of sizes either overshoots the
-//! peak and reverts the cycle or undershoots it and leaves profit behind.
+//! price edge pays for the impact, peaks, and then falls as the legs push the
+//! pools further against the trader. Picking from a handful of sizes either
+//! overshoots the peak and reverts the cycle or undershoots it and leaves
+//! profit behind.
 //!
-//! For two constant-product pools the optimum has a closed form. With pool 1
-//! holding `(a1, b1)`, pool 2 holding `(a2, b2)`, and `g = 1 - fee`:
-//!
-//! ```text
-//! u* = (sqrt(g1*g2*a1*a2*b1*b2) - a1*b2) / (b2 + g2*b1)
-//! x* = u* / g1
-//! ```
-//!
-//! That form assumes the fee is strictly multiplicative, while both Raydium
-//! programs round the fee *up* to a whole lamport. Rather than accept the
-//! approximation, the closed form is used as a starting point and the exact
-//! quote function refines it: a geometric sweep brackets the peak, a ternary
-//! search narrows the bracket, and a final local scan settles the last few
-//! lamports. The search therefore sees exactly the numbers the programs will
-//! use, which is the only way "optimal" can mean anything here.
+//! Every route is priced through the caller's exact quote function, so the
+//! search sees the numbers the programs will use. For two constant-product
+//! pools the optimum has a closed form, which the tests use as an oracle; the
+//! implementation intentionally does *not* assume that form. AMM v4, CPMM,
+//! Whirlpool and CLMM have different fee, rounding and tick-crossing rules,
+//! so the generic curve is optimized rather than special-cased and functions
+//! for all venues remain valid inputs to the same solver.
 //!
 //! Nothing in this module reads the chain. It is pure arithmetic over reserves
 //! the caller already fetched, so it can be unit-tested against the closed form.
@@ -142,6 +135,64 @@ pub fn maximize_profit(
     })
 }
 
+/// Find the largest size whose exact profit remains at least `min_profit`.
+///
+/// Profit for these routes is increasing up to one peak and then decreases as
+/// the pools push price further against the trader. This first locates the
+/// unimodal peak with the exact quote function, then binary-searches only
+/// [peak, upper] for the last size that clears the threshold. If the function
+/// is not unimodal, the same search still returns the largest evaluated size
+/// that clears `min_profit`; it never invents an edge above the observed one.
+pub fn maximize_amount(
+    upper: u64,
+    mut profit: impl FnMut(u64) -> i128,
+    min_profit: i128,
+) -> Option<OptimalSize> {
+    let peak = maximize_profit(upper, |amount| profit(amount))?;
+    if peak.profit < min_profit {
+        return None;
+    }
+
+    let upper = upper.max(peak.amount);
+    let mut best_amount = peak.amount;
+    let mut best_profit = peak.profit;
+    let mut lo = peak.amount;
+    let mut hi = upper;
+
+    while lo < hi {
+        let mid = lo.saturating_add(hi.saturating_sub(lo).saturating_add(1) / 2);
+        let value = profit(mid);
+        if value >= min_profit {
+            if mid > best_amount {
+                best_amount = mid;
+                best_profit = value;
+            }
+            lo = mid;
+        } else {
+            hi = mid.saturating_sub(1);
+        }
+    }
+
+    // Rounding and tick boundaries can make a tiny, legitimate edge sit in the
+    // threshold gap. Check the narrow region around the crossing rather than
+    // assume a perfectly smooth integer curve.
+    let window = best_amount.saturating_div(100_000).max(4);
+    let lo_window = best_amount.saturating_sub(window);
+    let hi_window = best_amount.saturating_add(window).min(upper);
+    for amount in lo_window..=hi_window {
+        let value = profit(amount);
+        if value >= min_profit && amount > best_amount {
+            best_amount = amount;
+            best_profit = value;
+        }
+    }
+
+    Some(OptimalSize {
+        amount: best_amount,
+        profit: best_profit,
+    })
+}
+
 /// Ternary search over an integer bracket, seeded with the sweep's best point.
 fn refine(
     mut lo: u64,
@@ -239,5 +290,70 @@ mod tests {
     #[test]
     fn handles_zero_upper_bound() {
         assert!(maximize_profit(0, |x| x as i128).is_none());
+    }
+}
+
+/// Select the trade size objective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeObjective {
+    MaxProfit,
+    MaxBorrowable,
+}
+
+/// Shared core solver for every route in the bot.
+///
+/// `profit` may in turn read any number of invariants (AMM, CPMM, concentrated
+/// liquidity, Whirlpool, etc.); this function is deliberately ignorant of the
+/// venue. It uses that function to price every candidate and returns the first
+/// solution permitted by the chosen objective.
+pub fn solve_size(
+    upper: u64,
+    profit: impl FnMut(u64) -> i128,
+    objective: SizeObjective,
+    min_profit: i128,
+) -> Option<OptimalSize> {
+    match objective {
+        SizeObjective::MaxProfit => maximize_profit(upper, profit),
+        SizeObjective::MaxBorrowable => maximize_amount(upper, profit, min_profit),
+    }
+}
+
+#[cfg(test)]
+mod max_amount_tests {
+    use super::*;
+
+    fn two_pool_profit(x: u64, a1: u64, b1: u64, a2: u64, b2: u64, fee: f64) -> i128 {
+        let x = x as f64;
+        let g = 1.0 - fee;
+        let y = (x * g * b1 as f64) / (a1 as f64 + x * g);
+        let z = (y * g * a2 as f64) / (b2 as f64 + y * g);
+        (z - x) as i128
+    }
+
+    #[test]
+    fn finds_the_rightmost_zero_crossing() {
+        let (a1, b1) = (1_000_000_000_000u64, 10_100_000_000_000u64);
+        let (a2, b2) = (1_000_000_000_000u64, 10_000_000_000_000u64);
+        let fee = 0.0025;
+        let upper = 500_000_000_000u64;
+        let result = maximize_amount(upper, |x| two_pool_profit(x, a1, b1, a2, b2, fee), 0)
+            .expect("one edge exists");
+        let peak = maximize_profit(upper, |x| two_pool_profit(x, a1, b1, a2, b2, fee))
+            .expect("peak exists");
+        assert!(result.amount >= peak.amount);
+        assert!(two_pool_profit(result.amount, a1, b1, a2, b2, fee) >= 0);
+        if let Some(next) = result.amount.checked_add(1) {
+            assert!(two_pool_profit(next, a1, b1, a2, b2, fee) < 0);
+        }
+    }
+
+    #[test]
+    fn respects_reserve_bound_and_threshold() {
+        let result = maximize_amount(1_000, |_| -1, 0);
+        assert!(result.is_none());
+        let result = solve_size(1_000, |x| x as i128, SizeObjective::MaxBorrowable, 5_000);
+        assert!(result.is_none());
+        let result = solve_size(10_000, |x| x as i128, SizeObjective::MaxProfit, 0).unwrap();
+        assert_eq!(result.amount, 10_000);
     }
 }

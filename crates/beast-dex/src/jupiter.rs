@@ -306,23 +306,47 @@ impl JupiterClient {
         if let Some(max_accounts) = request.max_accounts {
             query.push(("maxAccounts", max_accounts.to_string()));
         }
-        let mut call = self
-            .http
-            .get(format!("{}/quote", self.base_url))
-            .query(&query);
-        if let Some(api_key) = &self.api_key {
-            call = call.header("x-api-key", api_key);
-        }
-        let response = call.send().await.map_err(http_error)?;
-        let status = response.status();
-        let body = response.text().await.map_err(http_error)?;
-        if !status.is_success() {
-            return Err(DexError::Http(format!(
+        // Retry with backoff on rate limits (429). The public endpoint allows
+        // ~0.5 req/s; a paid API key raises this materially.
+        let mut last_error = None;
+        for attempt in 0..5 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    1_000 * 2u64.pow(attempt - 1),
+                ))
+                .await;
+            }
+            let mut call = self
+                .http
+                .get(format!("{}/quote", self.base_url))
+                .query(&query);
+            if let Some(api_key) = &self.api_key {
+                call = call.header("x-api-key", api_key);
+            }
+            let response = match call.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = Some(http_error(e));
+                    continue;
+                }
+            };
+            let status = response.status();
+            let body = response.text().await.map_err(http_error)?;
+            if status.is_success() {
+                return serde_json::from_str(&body).map_err(DexError::from);
+            }
+            last_error = Some(DexError::Http(format!(
                 "Jupiter quote HTTP {status}: {}",
                 truncate(&body)
             )));
+            // Only retry on rate limits; other errors are deterministic.
+            if status.as_u16() != 429 {
+                return Err(last_error.unwrap());
+            }
         }
-        serde_json::from_str(&body).map_err(DexError::from)
+        Err(last_error.unwrap_or_else(|| {
+            DexError::Http("Jupiter quote retries exhausted".into())
+        }))
     }
 
     pub async fn swap(&self, request: &SwapRequest) -> Result<JupiterSwap, DexError> {
@@ -334,24 +358,45 @@ impl JupiterClient {
             "asLegacyTransaction": request.as_legacy_transaction,
             "prioritizationFeeLamports": 0,
         });
-        let mut call = self
-            .http
-            .post(format!("{}/swap", self.base_url))
-            .json(&body);
-        if let Some(api_key) = &self.api_key {
-            call = call.header("x-api-key", api_key);
-        }
-        let response = call.send().await.map_err(http_error)?;
-        let status = response.status();
-        let text = response.text().await.map_err(http_error)?;
-        if !status.is_success() {
-            return Err(DexError::Http(format!(
+        let mut last_error = None;
+        for attempt in 0..5 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    1_000 * 2u64.pow(attempt - 1),
+                ))
+                .await;
+            }
+            let mut call = self
+                .http
+                .post(format!("{}/swap", self.base_url))
+                .json(&body);
+            if let Some(api_key) = &self.api_key {
+                call = call.header("x-api-key", api_key);
+            }
+            let response = match call.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = Some(http_error(e));
+                    continue;
+                }
+            };
+            let status = response.status();
+            let text = response.text().await.map_err(http_error)?;
+            if status.is_success() {
+                let swap: JupiterSwap = serde_json::from_str(&text).map_err(DexError::from)?;
+                return validate_swap(swap);
+            }
+            last_error = Some(DexError::Http(format!(
                 "Jupiter swap HTTP {status}: {}",
                 truncate(&text)
             )));
+            if status.as_u16() != 429 {
+                return Err(last_error.unwrap());
+            }
         }
-        let swap: JupiterSwap = serde_json::from_str(&text).map_err(DexError::from)?;
-        validate_swap(swap)
+        Err(last_error.unwrap_or_else(|| {
+            DexError::Http("Jupiter swap retries exhausted".into())
+        }))
     }
 
     /// Request the *instruction set* for a swap instead of a signed transaction.

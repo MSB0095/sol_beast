@@ -878,12 +878,15 @@ impl Executor {
                 "raydium_cpmm" | "raydium_amm_v4" | "raydium_clmm" | "orca_whirlpool"
             )
         };
-        if is_wsol && legs.len() == 2 && legs.iter().all(|leg| locally_built(&leg.venue)) {
-            let first_pool = parse_mint(&legs[0].pool, "leg 0 pool")?;
-            let second_pool = parse_mint(&legs[1].pool, "leg 1 pool")?;
-            if first_pool == second_pool {
+        if is_wsol && legs.len() >= 2 && legs.len() <= 3 && legs.iter().all(|leg| locally_built(&leg.venue)) {
+            let pools: Vec<Address> = legs
+                .iter()
+                .map(|leg| parse_mint(&leg.pool, "leg pool"))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| ExecutionError::Config(format!("pool parse error: {e}")))?;
+            if pools.iter().any(|p| pools.iter().position(|other| other == p).map(|i| pools.iter().skip(i+1).any(|o| o == p)).unwrap_or(false)) {
                 return Err(ExecutionError::Unsupported(
-                    "local flash cycles require two distinct pools".into(),
+                    "local flash cycles require distinct pools".into(),
                 ));
             }
             return self
@@ -1279,13 +1282,36 @@ impl Executor {
             ));
             tip_inlined = true;
         }
-        let packed = build_composed_transactions(
+        // A configured lookup table is an optimisation, not a correctness
+        // requirement after the local venue builders exist: their account lists
+        // are compact enough for a plain static v0 message. So if the table is
+        // unavailable (missing, still deactivating, or encoding an address the
+        // runtime rejects) or the cycle does not fit with it, retry with no
+        // tables rather than failing the whole opportunity.
+        let packed = match build_composed_transactions(
             &sequence,
             self.wallet.pubkey(),
             blockhash,
             &self.wallet.keypair,
             &tables,
-        )?;
+        ) {
+            Ok(packed) => packed,
+            Err(error) if !tables.is_empty() => {
+                tracing::warn!(
+                    %error,
+                    tables = tables.len(),
+                    "composed cycle rejected with lookup tables; retrying with static keys"
+                );
+                build_composed_transactions(
+                    &sequence,
+                    self.wallet.pubkey(),
+                    blockhash,
+                    &self.wallet.keypair,
+                    &[],
+                )?
+            }
+            Err(error) => return Err(error),
+        };
         let mut encoded_transactions: Vec<String> = packed
             .iter()
             .map(encode_versioned)
@@ -1397,9 +1423,9 @@ impl Executor {
         probe: bool,
     ) -> Result<BundlePlan> {
         let legs = &opportunity.legs;
-        if legs.len() != 2 {
+        if !(2..=3).contains(&legs.len()) {
             return Err(ExecutionError::Unsupported(
-                "local execution currently supports exactly two legs".into(),
+                "local execution supports two or three legs".into(),
             ));
         }
         let start = parse_mint(&legs[0].mint_in, "start mint")?;
@@ -1408,53 +1434,61 @@ impl Executor {
                 "local execution starts at WSOL only".into(),
             ));
         }
-        let middle = parse_mint(&legs[0].mint_out, "intermediate mint")?;
-        if parse_mint(&legs[1].mint_in, "leg 1 input")? != middle
-            || parse_mint(&legs[1].mint_out, "leg 1 output")? != start
-        {
+        // Validate the mint chain: each leg's output is the next leg's input,
+        // and the final leg returns to WSOL.
+        let mut current_out = start;
+        for (index, leg) in legs.iter().enumerate() {
+            let mint_in = parse_mint(&leg.mint_in, format!("leg {index} input").as_str())?;
+            if mint_in != current_out {
+                return Err(ExecutionError::Unsupported(
+                    "local cycle mint chain is broken: leg input does not match previous output".into(),
+                ));
+            }
+            current_out = parse_mint(&leg.mint_out, format!("leg {index} output").as_str())?;
+        }
+        if current_out != start {
             return Err(ExecutionError::Unsupported(
-                "local cycle must be WSOL -> intermediate -> WSOL".into(),
+                "local cycle must return to WSOL".into(),
             ));
         }
         let start_key = beast_flash::pubkey(&start);
-        let middle_key = beast_flash::pubkey(&middle);
 
-        // The venue of each leg is decided by the pool account's owner, not by
-        // a label in the plan: an owner is a fact about the chain, while a
-        // label is a claim that can drift.
-        let pool_a = self
-            .local_pool(parse_mint(&legs[0].pool, "leg 0 pool")?)
-            .await?;
-        let pool_b = self
-            .local_pool(parse_mint(&legs[1].pool, "leg 1 pool")?)
-            .await?;
-        if pool_a.address() == pool_b.address() {
-            return Err(ExecutionError::Unsupported(
-                "local cycle needs two distinct pools".into(),
-            ));
+        // Load every pool for every leg, validating the mint chain along the way.
+        let mut pools: Vec<VenuePool> = Vec::with_capacity(legs.len());
+        for (index, leg) in legs.iter().enumerate() {
+            let pool = self.local_pool(parse_mint(&leg.pool, format!("leg {index} pool").as_str())?).await?;
+            if pools.iter().any(|p| p.address() == pool.address()) {
+                return Err(ExecutionError::Unsupported(
+                    "local cycle requires distinct pools".into(),
+                ));
+            }
+            pools.push(pool);
         }
 
-        let a_in = pool_a.mint_index(&start_key).ok_or_else(|| {
-            ExecutionError::Unsupported(format!(
-                "pool {} does not contain {start}",
-                pool_a.address()
-            ))
-        })?;
-        let a_out = 1 - a_in;
-        let b_in = pool_b.mint_index(&middle_key).ok_or_else(|| {
-            ExecutionError::Unsupported(format!(
-                "pool {} does not contain {middle}",
-                pool_b.address()
-            ))
-        })?;
-        let b_out = 1 - b_in;
-        if pool_a.mints()[a_out] != middle_key || pool_b.mints()[b_out] != start_key {
-            return Err(ExecutionError::Unsupported(
-                "local pools do not form the requested cycle".into(),
-            ));
+        // Validate each pool's side mints match the cycle's mint chain.
+        let mut side_reserves: Vec<(usize, usize)> = Vec::with_capacity(legs.len());
+        let mut prev_mint = start_key;
+        for (index, leg) in legs.iter().enumerate() {
+            let pool = &pools[index];
+            let in_side = pool.mint_index(&prev_mint).ok_or_else(|| {
+                ExecutionError::Unsupported(format!(
+                    "pool {} does not contain input mint {}",
+                    pool.address(),
+                    prev_mint
+                ))
+            })?;
+            let out_side = 1 - in_side;
+            let expected_out = parse_mint(&leg.mint_out, format!("leg {index} output").as_str())?;
+            if pool.mints()[out_side] != beast_flash::pubkey(&expected_out) {
+                return Err(ExecutionError::Unsupported(
+                    "pool mint chain does not match leg outputs".into(),
+                ));
+            }
+            side_reserves.push((in_side, out_side));
+            prev_mint = beast_flash::pubkey(&expected_out);
         }
 
-        for pool in [&pool_a, &pool_b] {
+        for pool in &pools {
             if !pool.is_classic_spl() {
                 return Err(ExecutionError::Unsupported(format!(
                     "pool {} uses a non-classic token program; local execution is not verified for it",
@@ -1463,126 +1497,105 @@ impl Executor {
             }
         }
         let token_program = spl_token::id();
-        let middle_program = token_program;
 
         let wallet = self.wallet.pubkey();
+        // Build all intermediate ATAs (one per leg output except the final WSOL).
+        let mut intermediate_atas: Vec<Pubkey> = Vec::new();
+        let mut intermediate_mints: Vec<Pubkey> = Vec::new();
+        for (index, leg) in legs.iter().enumerate().take(legs.len() - 1) {
+            let out_mint = parse_mint(&leg.mint_out, format!("leg {index} output").as_str())?;
+            let ata = cpmm::associated_token_account(&wallet, &beast_flash::pubkey(&out_mint), &token_program);
+            let mint_pk = beast_flash::pubkey(&out_mint);
+            let mint_pk = beast_flash::pubkey(&out_mint);
+            intermediate_atas.push(ata);
+            intermediate_mints.push(mint_pk);
+        }
         let wsol_ata = cpmm::associated_token_account(&wallet, &start_key, &token_program);
-        let middle_ata = cpmm::associated_token_account(&wallet, &middle_key, &middle_program);
 
-        // One batched read for every vault and both user accounts.
-        let mut keys: Vec<Address> = Vec::new();
-        for key in [
-            beast_flash::address(&pool_a.vaults()[a_in]),
-            beast_flash::address(&pool_a.vaults()[a_out]),
-            beast_flash::address(&pool_b.vaults()[b_in]),
-            beast_flash::address(&pool_b.vaults()[b_out]),
-            beast_flash::address(&wsol_ata),
-            beast_flash::address(&middle_ata),
-        ] {
-            if !keys.contains(&key) {
-                keys.push(key);
+        // Collect all vault keys and user ATA keys for one batched read.
+        // Deduplicate properly: `Vec::dedup` only removes *adjacent* repeats, so
+        // a key that appears in two non-adjacent pools would be requested twice
+        // and the batched response (one entry per unique key, in request order)
+        // would no longer line up with `all_keys`.
+        let mut vault_keys: Vec<Address> = Vec::new();
+        for pool in &pools {
+            for v in pool.vaults() {
+                let key = beast_flash::address(&v);
+                if !vault_keys.contains(&key) {
+                    vault_keys.push(key);
+                }
             }
         }
-        let accounts = self.rpc.get_multiple_accounts(&keys).await?;
+        let mut user_keys: Vec<Address> = vec![beast_flash::address(&wsol_ata)];
+        user_keys.extend(intermediate_atas.iter().map(|a| beast_flash::address(a)));
+        let mut all_keys = vault_keys.clone();
+        for key in user_keys {
+            if !all_keys.contains(&key) {
+                all_keys.push(key);
+            }
+        }
+
+        let accounts = self.rpc.get_multiple_accounts(&all_keys).await?;
         let account = |key: &Address| -> Option<&beast_rpc::Account> {
-            keys.iter()
+            all_keys.iter()
                 .position(|candidate| candidate == key)
                 .and_then(|index| accounts.get(index))
                 .and_then(|account| account.as_ref())
         };
 
-        let vault_amount = |pool: &VenuePool,
-                            index: usize,
-                            expected: &Pubkey,
-                            program: &Pubkey|
-         -> Result<u64> {
-            let address = beast_flash::address(&pool.vaults()[index]);
-            let account = account(&address).ok_or_else(|| {
-                ExecutionError::Unsupported(format!("vault {address} not found"))
+        // Read each pool's vault balances and compute effective reserves.
+        let mut reserves: Vec<(u64, u64)> = Vec::with_capacity(legs.len());
+        for (index, pool) in pools.iter().enumerate() {
+            let (in_side, out_side) = side_reserves[index];
+            let in_program = pool.token_program(in_side);
+            let out_program = pool.token_program(out_side);
+            let in_vault = beast_flash::address(&pool.vaults()[in_side]);
+            let out_vault = beast_flash::address(&pool.vaults()[out_side]);
+            let in_account = account(&in_vault).ok_or_else(|| {
+                ExecutionError::Unsupported(format!("vault {} not found", in_vault))
             })?;
-            if account.owner != beast_flash::address(program) {
+            let out_account = account(&out_vault).ok_or_else(|| {
+                ExecutionError::Unsupported(format!("vault {} not found", out_vault))
+            })?;
+            if in_account.owner != beast_flash::address(&in_program) {
                 return Err(ExecutionError::Unsupported(format!(
-                    "vault {address} is not owned by {program}"
+                    "vault {} is not owned by expected program",
+                    in_vault
                 )));
             }
-            let (mint, amount) = cpmm::token_account_mint_and_amount(&account.data)?;
-            if mint != *expected {
+            if out_account.owner != beast_flash::address(&out_program) {
                 return Err(ExecutionError::Unsupported(format!(
-                    "vault {address} holds {mint}, expected {expected}"
+                    "vault {} is not owned by expected program",
+                    out_vault
                 )));
             }
-            Ok(amount)
-        };
-        // The program quotes against vault balances minus anything the venue
-        // has already booked but not yet collected. Gross balances overstate
-        // the output and made the second leg revert with ExceededSlippage.
-        let reserve_a_in = pool_a
-            .effective_reserve(
-                a_in,
-                vault_amount(
-                    &pool_a,
-                    a_in,
-                    &pool_a.mints()[a_in],
-                    &pool_a.token_program(a_in),
-                )?,
-            )
-            .ok_or_else(|| {
+            let (in_mint, in_amount) = cpmm::token_account_mint_and_amount(&in_account.data)?;
+            let (out_mint, out_amount) = cpmm::token_account_mint_and_amount(&out_account.data)?;
+            if in_mint != pool.mints()[in_side] || out_mint != pool.mints()[out_side] {
+                return Err(ExecutionError::Unsupported(
+                    "vault mint does not match pool mint".into(),
+                ));
+            }
+            let reserve_in = pool.effective_reserve(in_side, in_amount).ok_or_else(|| {
                 ExecutionError::Unsupported(format!(
-                    "pool {} has no effective reserve on side {a_in}",
-                    pool_a.address()
+                    "pool {} has no effective reserve on input side",
+                    pool.address()
                 ))
             })?;
-        let reserve_a_out = pool_a
-            .effective_reserve(
-                a_out,
-                vault_amount(
-                    &pool_a,
-                    a_out,
-                    &pool_a.mints()[a_out],
-                    &pool_a.token_program(a_out),
-                )?,
-            )
-            .ok_or_else(|| {
+            let reserve_out = pool.effective_reserve(out_side, out_amount).ok_or_else(|| {
                 ExecutionError::Unsupported(format!(
-                    "pool {} has no effective reserve on side {a_out}",
-                    pool_a.address()
+                    "pool {} has no effective reserve on output side",
+                    pool.address()
                 ))
             })?;
-        let reserve_b_in = pool_b
-            .effective_reserve(
-                b_in,
-                vault_amount(
-                    &pool_b,
-                    b_in,
-                    &pool_b.mints()[b_in],
-                    &pool_b.token_program(b_in),
-                )?,
-            )
-            .ok_or_else(|| {
-                ExecutionError::Unsupported(format!(
-                    "pool {} has no effective reserve on side {b_in}",
-                    pool_b.address()
-                ))
-            })?;
-        let reserve_b_out = pool_b
-            .effective_reserve(
-                b_out,
-                vault_amount(
-                    &pool_b,
-                    b_out,
-                    &pool_b.mints()[b_out],
-                    &pool_b.token_program(b_out),
-                )?,
-            )
-            .ok_or_else(|| {
-                ExecutionError::Unsupported(format!(
-                    "pool {} has no effective reserve on side {b_out}",
-                    pool_b.address()
-                ))
-            })?;
+            reserves.push((reserve_in, reserve_out));
+        }
 
         let wsol_exists = account(&beast_flash::address(&wsol_ata)).is_some();
-        let middle_exists = account(&beast_flash::address(&middle_ata)).is_some();
+        let intermediate_exists: Vec<bool> = intermediate_atas
+            .iter()
+            .map(|ata| account(&beast_flash::address(ata)).is_some())
+            .collect();
         let lifecycle = self.flash_lifecycle(provider, reserve, wallet).await?;
         let lifecycle_rent = if lifecycle.account.is_some() {
             provider.temporary_rent_lamports()
@@ -1590,57 +1603,54 @@ impl Executor {
             0
         };
 
-        // Local cycles are exact-in: leg 1 must return exactly the quoted
-        // amount, which leg 2 then swaps in full. A haircut here would either
-        // strand the difference in the intermediate ATA or revert on any
-        // adverse move. Green-or-revert is the honest behaviour.
-        let quote_a = pool_a.quote(a_in, amount, reserve_a_in, reserve_a_out)?;
-        // Never reject on zero output here: the on-chain simulation is the
-        // final gate. A zero-output cycle will simply revert and cost only the
-        // base fee.
-        // A leg whose minimum is the exact quote reverts on any adverse move,
-        // and a pool that turns over a fraction of its reserves per second
-        // moves more than a lamport between the state read and the simulation.
-        // Leg 1 therefore has to deliver at least `leg1_floor`, and leg 2
-        // spends exactly that floor. The surplus, if any, stays in the
-        // intermediate account, which the postamble closes back to the wallet,
-        // so the tolerance costs a few basis points rather than the whole
-        // transaction and never leaves value behind.
-        let leg1_floor = quote_a
-            .saturating_sub(quote_a.saturating_mul(u64::from(self.config.flash_slippage_bps)) / 10_000)
-            .max(1);
-        // Removed the decay_floor check: a cycle that looks marginally
-        // unprofitable locally can still land profitably on-chain after price
-        // moves. The on-chain simulation is the final gate — if it reverts,
-        // nothing is spent beyond the base fee.
-        if legs[0].min_out > 0 {
-            let _ = legs[0].min_out;
-            let _ = self.config.flash_slippage_bps;
+        // Quote each leg sequentially: leg i's output becomes leg i+1's input.
+        // Enforce slippage on all but the final leg; the final leg's min-out is
+        // set to break-even + costs so the cycle is green-or-revert.
+        let mut leg_amounts: Vec<u64> = Vec::with_capacity(legs.len());
+        let mut leg_floors: Vec<u64> = Vec::with_capacity(legs.len());
+        let mut current_amount = amount;
+        for (index, pool) in pools.iter().enumerate() {
+            let (in_side, out_side) = side_reserves[index];
+            let (reserve_in, reserve_out) = reserves[index];
+            let quote = pool.quote(in_side, current_amount, reserve_in, reserve_out)?;
+            if quote == 0 {
+                return Err(ExecutionError::Unprofitable(format!(
+                    "leg {index} quotes zero output"
+                )));
+            }
+            if index == legs.len() - 1 {
+                // Final leg: enforce break-even + profit + costs as min-out.
+                leg_amounts.push(quote);
+                leg_floors.push(quote);
+            } else {
+                // Intermediate legs: quote with slippage haircut as the floor.
+                let floor = quote
+                    .saturating_sub(quote.saturating_mul(u64::from(self.config.flash_slippage_bps)) / 10_000)
+                    .max(1);
+                leg_amounts.push(quote);
+                leg_floors.push(floor);
+                current_amount = floor; // next leg spends at most the floor
+            }
         }
-        let quote_b = pool_b.quote(b_in, leg1_floor, reserve_b_in, reserve_b_out)?;
+        let final_min_out = leg_amounts.last().copied().unwrap_or(0);
 
         let guard_applicable = self.config.guard_enabled();
         let transaction_count = if guard_applicable { 3u64 } else { 2u64 };
-        let committed_rent = if middle_exists {
-            0
-        } else {
-            self.config.ata_rent_lamports
-        };
-        let temporary_rent = if wsol_exists {
-            0
-        } else {
-            self.config.ata_rent_lamports
-        };
-        // Only the base fees are spent. The intermediate ATA's rent is created
-        // and closed inside the same transaction, so it is a float requirement
-        // rather than a cost — charging it as a cost hides real cycles by about
-        // 0.002 SOL, which is most of a small cycle's profit.
+        let committed_rent: u64 = intermediate_exists
+            .iter()
+            .filter(|e| !**e)
+            .map(|_| self.config.ata_rent_lamports)
+            .sum();
+        let temporary_rent = if wsol_exists { 0 } else { self.config.ata_rent_lamports };
+        // Only the base fees are spent. Intermediate ATA rents are created and
+        // closed inside the same transaction — they are float requirements,
+        // not costs.
         let fees_lamports = self
             .config
             .transaction_fee_lamports
             .saturating_mul(transaction_count);
         let (final_min_out, prefund_lamports, tip_lamports) = if probe {
-            let final_min_out = quote_b.saturating_sub(quote_b / 100).max(1);
+            let final_min_out = final_min_out.saturating_sub(final_min_out / 100).max(1);
             let shortfall = principal_plus_fee.saturating_sub(final_min_out);
             let buffer = amount / 100 + 50_000;
             let prefund = shortfall
@@ -1652,17 +1662,10 @@ impl Executor {
                 beast_core::economics::MIN_JITO_TIP_LAMPORTS,
             )
         } else {
-            // Build every cycle regardless of the local margin estimate — prices
-            // move between the scan read and the build, so a cycle that looks
-            // barely unprofitable locally can land profitably on-chain, and
-            // vice versa. The on-chain simulation is the final gate: if it
-            // reverts, nothing is spent beyond the base fee; if it lands, the
-            // profit hits the wallet.
-            //
             // The enforced minimum is break-even plus the configured minimum
             // profit and the lamports that leave the wallet (base fee and tip).
-            // A looser floor lets a bundle land at a loss, which is the one
-            // outcome the design forbids: green or revert, never red.
+            // The on-chain simulation is the final gate: if it reverts, nothing
+            // is spent beyond the base fee.
             let min_profit = u128::from(self.config.min_profit_lamports);
             let overhead = u128::from(fees_lamports) + u128::from(MIN_JITO_TIP_LAMPORTS);
             let floor = u128::from(principal_plus_fee) + min_profit + overhead;
@@ -1695,6 +1698,7 @@ impl Executor {
         preamble.push(
             solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
         );
+        // Create WSOL ATA and every intermediate ATA idempotently.
         preamble.push(
             spl_associated_token_account::instruction::create_associated_token_account_idempotent(
                 &wallet,
@@ -1703,14 +1707,16 @@ impl Executor {
                 &token_program,
             ),
         );
-        preamble.push(
-            spl_associated_token_account::instruction::create_associated_token_account_idempotent(
-                &wallet,
-                &wallet,
-                &middle_key,
-                &middle_program,
-            ),
-        );
+        for ata in &intermediate_atas {
+            preamble.push(
+                spl_associated_token_account::instruction::create_associated_token_account_idempotent(
+                    &wallet,
+                    &wallet,
+                    ata,
+                    &token_program,
+                ),
+            );
+        }
         if prefund_lamports > 0 {
             preamble.push(system_instruction::transfer(
                 &wallet,
@@ -1754,42 +1760,52 @@ impl Executor {
                     ExecutionError::Transaction(format!("close WSOL account: {error}"))
                 })?,
         );
-        // The intermediate account is empty once leg 2 has spent it back into
-        // WSOL, so closing it returns its rent instead of stranding it.
-        if !middle_exists {
-            postamble.push(
-                spl_token::instruction::close_account(
-                    &token_program,
-                    &middle_ata,
-                    &wallet,
-                    &wallet,
-                    &[],
-                )
-                .map_err(|error| {
-                    ExecutionError::Transaction(format!("close intermediate account: {error}"))
-                })?,
-            );
+        // Close each intermediate ATA that was created in this cycle.
+        for (index, ata) in intermediate_atas.iter().enumerate() {
+            if !intermediate_exists[index] {
+                postamble.push(
+                    spl_token::instruction::close_account(
+                        &token_program,
+                        ata,
+                        &wallet,
+                        &wallet,
+                        &[],
+                    )
+                    .map_err(|error| {
+                        ExecutionError::Transaction(format!(
+                            "close intermediate account {}: {error}",
+                            ata
+                        ))
+                    })?,
+                );
+            }
         }
 
-        let swap_a =
-            pool_a.swap_instruction(wallet, start_key, middle_key, amount, leg1_floor)?;
-        let swap_b = pool_b.swap_instruction(
-            wallet,
-            middle_key,
-            start_key,
-            leg1_floor,
-            final_min_out,
-        )?;
-        let cycle_legs = vec![
-            compose::CycleLeg {
-                instructions: pool_a.as_swap_instructions(swap_a)?,
-                is_final: false,
-            },
-            compose::CycleLeg {
-                instructions: pool_b.as_swap_instructions(swap_b)?,
-                is_final: true,
-            },
-        ];
+        // Build swap instructions for each leg.
+        let mut cycle_legs: Vec<compose::CycleLeg> = Vec::with_capacity(legs.len());
+        let mut prev_mint = start_key;
+        for (index, (pool, leg)) in pools.iter().zip(legs.iter()).enumerate() {
+            let (in_side, out_side) = side_reserves[index];
+            let input_mint = pool.mints()[in_side];
+            let output_mint = pool.mints()[out_side];
+            let amount_in = if index == 0 {
+                amount
+            } else {
+                leg_floors[index - 1]
+            };
+            let min_out = if index == legs.len() - 1 {
+                final_min_out
+            } else {
+                leg_floors[index]
+            };
+            let swap = pool.swap_instruction(wallet, input_mint, output_mint, amount_in, min_out)?;
+            let is_final = index == legs.len() - 1;
+            cycle_legs.push(compose::CycleLeg {
+                instructions: pool.as_swap_instructions(swap)?,
+                is_final,
+            });
+            prev_mint = output_mint;
+        }
         let mut composed = compose::compose_cycle_with(
             &cycle_legs,
             compose::ComposeOptions {
@@ -1804,26 +1820,42 @@ impl Executor {
         provider.finalize(&mut composed.instructions, &lifecycle)?;
         self.attach_flash_lookup_table(&mut composed);
 
+        let venue_labels: Vec<String> = pools
+            .iter()
+            .map(|p| p.label().to_string())
+            .collect();
         tracing::info!(
-            venue_in = pool_a.label(),
-            venue_out = pool_b.label(),
-            pool_in = %pool_a.address(),
-            pool_out = %pool_b.address(),
+            venues = ?venue_labels,
+            pools = ?pools.iter().map(|p| p.address().to_string()).collect::<Vec<_>>(),
             amount,
-            quote_a,
-            leg1_floor,
-            quote_b,
+            legs = legs.len(),
             final_min_out,
             prefund = prefund_lamports,
             probe,
             "prepared local flash cycle"
         );
 
+        let route_mints: Vec<solana_sdk::pubkey::Pubkey> = legs
+            .iter()
+            .map(|leg| leg.mint_in.parse::<solana_sdk::pubkey::Pubkey>())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ExecutionError::Config(format!("mint parse error: {e}")))?;
+        let route_mints: Vec<Address> = route_mints
+            .into_iter()
+            .map(|p| beast_flash::address(&p))
+            .collect();
+        // Final leg output mint is WSOL (start).
+        let all_mints: Vec<Address> = route_mints
+            .iter()
+            .cloned()
+            .chain(std::iter::once(beast_flash::address(&start_key)))
+            .collect();
+
         self.finish_flash_plan(
             opportunity,
             provider,
             reserve,
-            mints_from_legs(&opportunity.legs)?,
+            all_mints,
             amount,
             fee,
             principal_plus_fee,
@@ -2802,3 +2834,5 @@ mod tests {
         assert_eq!(wallet.address().to_string(), wallet.pubkey_string());
     }
 }
+
+

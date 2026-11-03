@@ -92,22 +92,32 @@ pub const DEFAULT_PAIR_MINTS: &[&str] = &[
 ];
 
 /// One observed cycle, profitable or not. Kept for the UI and the store.
+///
+/// A two-leg cycle (`WSOL -> X -> WSOL`) fills `pool_in` and `pool_out`.
+/// A three-leg triangular cycle (`WSOL -> A -> B -> WSOL`) additionally fills
+/// `pool_mid`, `venue_mid`, `middle_mint2` and `leg2_out`; `pool_in` is leg 1,
+/// `pool_mid` is leg 2, and `pool_out` is leg 3.
 #[derive(Debug, Clone)]
 pub struct CycleLog {
     pub pool_in: String,
+    pub pool_mid: Option<String>,
     pub pool_out: String,
     /// The mint the cycle passes through, taken from the pools themselves.
     pub middle_mint: String,
+    /// Second intermediate mint for triangular cycles (`WSOL -> A -> B -> WSOL`).
+    pub middle_mint2: Option<String>,
     pub amount: u64,
     pub leg1_out: u64,
+    /// Output of leg 2 for triangular cycles.
+    pub leg2_out: Option<u64>,
     pub final_out: u64,
     pub profit: i128,
     pub fee_bps_in: u16,
+    pub fee_bps_mid: Option<u16>,
     pub fee_bps_out: u16,
-    /// The venue that builds each leg, as a `LegPlan::venue` label. A cycle may
-    /// mix venues; carrying both labels is what lets the executor rebuild
-    /// exactly the pools the scan priced.
+    /// The venue that builds each leg, as a `LegPlan::venue` label.
     pub venue_in: String,
+    pub venue_mid: Option<String>,
     pub venue_out: String,
 }
 
@@ -127,15 +137,20 @@ mod tests {
     fn cycle(profit: i128) -> CycleLog {
         CycleLog {
             pool_in: "in".into(),
+            pool_mid: None,
             pool_out: "out".into(),
             middle_mint: "middle".into(),
+            middle_mint2: None,
             amount: 1,
             leg1_out: 1,
+            leg2_out: None,
             final_out: 1,
             profit,
             fee_bps_in: 0,
+            fee_bps_mid: None,
             fee_bps_out: 0,
             venue_in: "test".into(),
+            venue_mid: None,
             venue_out: "test".into(),
         }
     }
@@ -454,9 +469,28 @@ impl Clone for LitePool {
 
 /// The gross result of a two-leg cycle at the marginal price, at the probe
 /// size. Positive means the two pools disagree; it says nothing about fees.
+///
+/// Concentrated-liquidity pools (Whirlpool, CLMM) are skipped here because
+/// their marginal price (sqrt price) does not account for tick liquidity.
+/// A pool can show a huge spread at the marginal price but have zero
+/// executable liquidity in the relevant tick range, so `spot_profit` would
+/// report a fake edge. CPMM and AMM v4 use constant-product pricing where the
+/// marginal price equals the exact price, so they are safe to screen here.
 fn spot_profit(pool_in: &LitePool, pool_out: &LitePool) -> i128 {
     let wsol_key = beast_flash::pubkey(&wsol());
     let unpriceable = i128::MIN / 4;
+    // Concentrated-liquidity pools cannot be reliably screened at marginal
+    // price: their sqrt price ignores tick depth, producing fake edges that
+    // fail exact quoting. Skip them entirely.
+    if matches!(
+        pool_in.venue,
+        VenuePool::Whirlpool { .. } | VenuePool::Clmm { .. }
+    ) || matches!(
+        pool_out.venue,
+        VenuePool::Whirlpool { .. } | VenuePool::Clmm { .. }
+    ) {
+        return unpriceable;
+    }
     let Some(a_in) = pool_in.venue.mint_index(&wsol_key) else {
         return unpriceable;
     };
@@ -1175,17 +1209,306 @@ fn evaluate_cycle(
     let profit = (final_out as i128) - principal_plus_fee - (costs as i128);
     Some(CycleLog {
         pool_in: pool_in.venue.address().to_string(),
+        pool_mid: None,
         pool_out: pool_out.venue.address().to_string(),
         middle_mint: pool_in.venue.mints()[a_out].to_string(),
+        middle_mint2: None,
         amount,
         leg1_out,
+        leg2_out: None,
         final_out,
         profit,
         fee_bps_in: pool_in.fee_bps(),
+        fee_bps_mid: None,
         fee_bps_out: pool_out.fee_bps(),
         venue_in: pool_in.venue.leg_label().to_string(),
+        venue_mid: None,
         venue_out: pool_out.venue.leg_label().to_string(),
     })
+}
+
+/// Both mint orders for any two mints, decoded with the given constructor.
+///
+/// Generalizes [`program_accounts_for_pair`] to pairs where neither mint is
+/// WSOL, which triangular cycles need (for example USDT -> USDC cross-pool).
+async fn program_accounts_for_mints(
+    rpc: &RpcClient,
+    program: Address,
+    data_size: Option<usize>,
+    mint_offsets: (usize, usize),
+    mint_a: Address,
+    mint_b: Address,
+) -> Result<Vec<(Address, Vec<u8>)>> {
+    let mut accounts = Vec::new();
+    for (first, second) in [(mint_a, mint_b), (mint_b, mint_a)] {
+        let mut filters = Vec::new();
+        if let Some(data_size) = data_size {
+            filters.push(serde_json::json!({ "dataSize": data_size }));
+        }
+        filters.push(serde_json::json!({ "memcmp": { "offset": mint_offsets.0, "bytes": first.to_string() } }));
+        filters.push(serde_json::json!({ "memcmp": { "offset": mint_offsets.1, "bytes": second.to_string() } }));
+        let entries = rpc.get_program_accounts(program, filters, None).await?;
+        accounts.extend(
+            entries
+                .into_iter()
+                .map(|(key, account)| (key, account.data)),
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    accounts.retain(|(key, _)| seen.insert(*key));
+    Ok(accounts)
+}
+
+/// Every pool for one arbitrary mint pair across all locally-built venues.
+async fn discover_cross_pools(
+    rpc: &RpcClient,
+    mint_a: Address,
+    mint_b: Address,
+) -> Result<Vec<PoolShape>> {
+    let (cpmm, amm_v4, whirlpool, clmm) = tokio::join!(
+        fetch_cross_pools(rpc, cpmm::CPMM_PROGRAM_ID, cpmm::CPMM_POOL_LEN, (168, 200), mint_a, mint_b),
+        fetch_cross_pools(rpc, amm_v4::AMM_V4_PROGRAM_ID, amm_v4::AMM_V4_POOL_LEN, (amm_v4::BASE_MINT_OFFSET, amm_v4::QUOTE_MINT_OFFSET), mint_a, mint_b),
+        fetch_cross_pools(rpc, beast_exec::whirlpool::WHIRLPOOL_PROGRAM_ID, beast_exec::whirlpool::WHIRLPOOL_LEN, (beast_exec::whirlpool::MINT_A_OFFSET, beast_exec::whirlpool::MINT_B_OFFSET), mint_a, mint_b),
+        fetch_cross_pools(rpc, clmm::CLMM_PROGRAM_ID, clmm::POOL_LEN, (clmm::MINT_0_OFFSET, clmm::MINT_1_OFFSET), mint_a, mint_b),
+    );
+    let mut shapes = Vec::new();
+    let mut errors = Vec::new();
+    for result in [cpmm, amm_v4, whirlpool, clmm] {
+        match result {
+            Ok(pools) => shapes.extend(pools),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if shapes.is_empty() {
+        if let Some(error) = errors.into_iter().next() {
+            return Err(anyhow::anyhow!("{error}"));
+        }
+    }
+    Ok(shapes)
+}
+
+/// One cross-venue pool fetch for a specific program and mint pair.
+/// Decodes each account once with the venue-specific decoder.
+async fn fetch_cross_pools(
+    rpc: &RpcClient,
+    program: &str,
+    data_size: usize,
+    mint_offsets: (usize, usize),
+    mint_a: Address,
+    mint_b: Address,
+) -> Result<Vec<PoolShape>> {
+    let program_address = Address::from_str(program).map_err(|e| anyhow::anyhow!("program {program}: {e}"))?;
+    let accounts = program_accounts_for_mints(rpc, program_address, Some(data_size), mint_offsets, mint_a, mint_b).await?;
+
+    let mut shapes = Vec::new();
+    for (key, data) in &accounts {
+        let key = beast_flash::pubkey(key);
+        // Try each venue decoder; an account belongs to exactly one program.
+        if let Ok(pool) = cpmm::CpmmPool::decode(key, data) {
+            if pool.ensure_swappable().is_ok() && pool.authority().is_ok() {
+                // Read the config trade fee rate later; use 0 as placeholder.
+                shapes.push(PoolShape::Cpmm { pool, trade_fee_rate: 0 });
+                continue;
+            }
+        }
+        if let Ok(pool) = amm_v4::AmmV4Pool::decode(key, data) {
+            if pool.authority().is_ok() && pool.fee_denominator != 0 {
+                shapes.push(PoolShape::AmmV4(pool));
+                continue;
+            }
+        }
+        if let Ok(pool) = beast_exec::whirlpool::WhirlpoolPool::decode(key, data) {
+            if pool.ensure_swappable().is_ok() {
+                shapes.push(PoolShape::Whirlpool(pool));
+                continue;
+            }
+        }
+        if let Ok(pool) = clmm::ClmmPool::decode(key, data) {
+            if pool.ensure_swappable().is_ok() {
+                shapes.push(PoolShape::Clmm { pool, config: clmm::AmmConfig::default() });
+                continue;
+            }
+        }
+    }
+    Ok(shapes)
+}
+
+/// Marginal-price screen for a triangular cycle: `pool1 (WSOL->A) -> pool2 (A->B) -> pool3 (B->WSOL)`.
+///
+/// Returns the gross profit at the probe size if all three legs are profitable
+/// at the marginal price; `None` otherwise. This is an upper bound on the exact
+/// quote, so it can only pass pairs it should not reject.
+fn spot_profit_triangle(
+    pool1: &LitePool,
+    pool2: &LitePool,
+    pool3: &LitePool,
+) -> i128 {
+    let wsol_key = beast_flash::pubkey(&wsol());
+    let unpriceable = i128::MIN / 4;
+
+    // Concentrated-liquidity pools cannot be reliably screened at marginal
+    // price: their sqrt price ignores tick depth. Skip them entirely.
+    if [pool1, pool2, pool3]
+        .iter()
+        .any(|p| matches!(p.venue, VenuePool::Whirlpool { .. } | VenuePool::Clmm { .. }))
+    {
+        return unpriceable;
+    }
+
+    // Leg 1: WSOL -> A
+    let a_in = match pool1.venue.mint_index(&wsol_key) {
+        Some(i) => i,
+        None => return unpriceable,
+    };
+    let a_out = 1 - a_in;
+    let Some(leg1) = pool1.spot_out(a_in, SPREAD_PROBE_LAMPORTS) else {
+        return unpriceable;
+    };
+    if leg1 == 0 {
+        return unpriceable;
+    }
+
+    // Leg 2: A -> B
+    let middle_a = pool1.venue.mints()[a_out];
+    let a_idx = match pool2.venue.mint_index(&middle_a) {
+        Some(i) => i,
+        None => return unpriceable,
+    };
+    let b_idx = 1 - a_idx;
+    let Some(leg2) = pool2.spot_out(a_idx, leg1) else {
+        return unpriceable;
+    };
+    if leg2 == 0 {
+        return unpriceable;
+    }
+
+    // Leg 3: B -> WSOL
+    let b_out3 = match pool3.venue.mint_index(&wsol_key) {
+        Some(i) => i,
+        None => return unpriceable,
+    };
+    let b_in3 = 1 - b_out3;
+    let Some(final_out) = pool3.spot_out(b_in3, leg2) else {
+        return unpriceable;
+    };
+
+    i128::from(final_out) - i128::from(SPREAD_PROBE_LAMPORTS)
+}
+
+/// Exact pricing of a three-leg triangular cycle.
+fn evaluate_triangle(
+    pool1: &PoolView,
+    pool2: &PoolView,
+    pool3: &PoolView,
+    amount: u64,
+    flash_fee: u64,
+    costs: u64,
+) -> Option<CycleLog> {
+    let wsol = beast_flash::pubkey(&wsol());
+
+    // Leg 1: WSOL -> A
+    let a_in = pool1.venue.mint_index(&wsol)?;
+    let a_out = 1 - a_in;
+    let middle_a = pool1.venue.mints()[a_out];
+    let a_reserve_in = pool1.effective(a_in)?;
+    let a_reserve_out = pool1.effective(a_out)?;
+    if (amount as u128) * 10 > (a_reserve_in as u128) * 9 {
+        return None;
+    }
+    let leg1_out = pool1.venue.quote(a_in, amount, a_reserve_in, a_reserve_out).ok()?;
+    if leg1_out == 0 {
+        return None;
+    }
+    if leg1_out as u128 >= a_reserve_out as u128 {
+        return None;
+    }
+
+    // Leg 2: A -> B
+    let a_idx = pool2.venue.mint_index(&middle_a)?;
+    let b_idx = 1 - a_idx;
+    let middle_b = pool2.venue.mints()[b_idx];
+    let b_reserve_in = pool2.effective(a_idx)?;
+    let b_reserve_out = pool2.effective(b_idx)?;
+    if (leg1_out as u128) * 10 > (b_reserve_in as u128) * 9 {
+        return None;
+    }
+    let leg2_out = pool2.venue.quote(a_idx, leg1_out, b_reserve_in, b_reserve_out).ok()?;
+    if leg2_out == 0 {
+        return None;
+    }
+    if leg2_out as u128 >= b_reserve_out as u128 {
+        return None;
+    }
+
+    // Leg 3: B -> WSOL
+    let b_idx3 = pool3.venue.mint_index(&wsol)?;
+    let b_in3 = 1 - b_idx3;
+    let c_reserve_in = pool3.effective(b_in3)?;
+    let c_reserve_out = pool3.effective(b_idx3)?;
+    if (leg2_out as u128) >= (c_reserve_in as u128) {
+        return None;
+    }
+    let final_out = pool3.venue.quote(b_in3, leg2_out, c_reserve_in, c_reserve_out).ok()?;
+    if final_out == 0 {
+        return None;
+    }
+    if final_out as u128 >= c_reserve_out as u128 {
+        return None;
+    }
+
+    let principal_plus_fee = (amount as i128) + (flash_fee as i128);
+    let profit = (final_out as i128) - principal_plus_fee - (costs as i128);
+
+    Some(CycleLog {
+        pool_in: pool1.venue.address().to_string(),
+        pool_mid: Some(pool2.venue.address().to_string()),
+        pool_out: pool3.venue.address().to_string(),
+        middle_mint: middle_a.to_string(),
+        middle_mint2: Some(middle_b.to_string()),
+        amount,
+        leg1_out,
+        leg2_out: Some(leg2_out),
+        final_out,
+        profit,
+        fee_bps_in: pool1.fee_bps(),
+        fee_bps_mid: Some(pool2.fee_bps()),
+        fee_bps_out: pool3.fee_bps(),
+        venue_in: pool1.venue.leg_label().to_string(),
+        venue_mid: Some(pool2.venue.leg_label().to_string()),
+        venue_out: pool3.venue.leg_label().to_string(),
+    })
+}
+
+/// Find the borrow size that maximises a triangular cycle's profit.
+///
+/// Same geometric sweep + ternary + local scan as [`optimize_cycle`], but over
+/// three legs instead of two.
+fn optimize_triangle(
+    pool1: &PoolView,
+    pool2: &PoolView,
+    pool3: &PoolView,
+    upper: u64,
+    fee_for: impl Fn(u64) -> u64,
+    costs: u64,
+) -> Option<CycleLog> {
+    let upper = usable_upper_triangle(pool1, upper)?;
+    let best = beast_exec::sizing::maximize_profit(upper, |amount| {
+        match evaluate_triangle(pool1, pool2, pool3, amount, fee_for(amount), costs) {
+            Some(cycle) => cycle.profit,
+            None => i128::MIN / 4,
+        }
+    })?;
+    evaluate_triangle(pool1, pool2, pool3, best.amount, fee_for(best.amount), costs)
+}
+
+/// Largest input the first leg of a triangle can take.
+fn usable_upper_triangle(pool1: &PoolView, liquidity: u64) -> Option<u64> {
+    let wsol = beast_flash::pubkey(&wsol());
+    let side = pool1.venue.mint_index(&wsol)?;
+    let reserve = pool1.effective(side)?;
+    let depth = reserve.saturating_mul(9) / 10;
+    let upper = liquidity.min(depth);
+    (upper > 0).then_some(upper)
 }
 
 /// Find the borrow size that maximises this ordered pair's profit.
@@ -1243,24 +1566,48 @@ fn opportunity_for(
     slot: u64,
     mode: Mode,
 ) -> Opportunity {
-    let middle = Address::from_str(&cycle.middle_mint).unwrap_or_else(|_| wsol());
-    let mints = [wsol(), middle, wsol()];
-    let legs: Vec<LegPlan> = [&cycle.pool_in, &cycle.pool_out]
+    let is_triangle = cycle.pool_mid.is_some();
+    let mints: Vec<Address> = if is_triangle {
+        vec![
+            wsol(),
+            Address::from_str(&cycle.middle_mint).unwrap_or_else(|_| wsol()),
+            Address::from_str(&cycle.middle_mint2.as_deref().unwrap_or("")).unwrap_or_else(|_| wsol()),
+            wsol(),
+        ]
+    } else {
+        let middle = Address::from_str(&cycle.middle_mint).unwrap_or_else(|_| wsol());
+        vec![wsol(), middle, wsol()]
+    };
+    let pools: Vec<&String> = if is_triangle {
+        vec![&cycle.pool_in, &cycle.pool_mid.as_ref().unwrap(), &cycle.pool_out]
+    } else {
+        vec![&cycle.pool_in, &cycle.pool_out]
+    };
+    let venues: Vec<&str> = if is_triangle {
+        vec![
+            &cycle.venue_in,
+            cycle.venue_mid.as_deref().unwrap_or(""),
+            &cycle.venue_out,
+        ]
+    } else {
+        vec![&cycle.venue_in, &cycle.venue_out]
+    };
+    let leg1_out = cycle.leg1_out;
+    let leg2_out = cycle.leg2_out.unwrap_or(0);
+    let legs: Vec<LegPlan> = pools
         .iter()
         .enumerate()
         .map(|(index, pool)| LegPlan {
-            venue: if index == 0 {
-                cycle.venue_in.clone()
-            } else {
-                cycle.venue_out.clone()
-            },
+            venue: venues[index].to_string(),
             pool: (*pool).clone(),
             mint_in: mints[index].to_string(),
             mint_out: mints[index + 1].to_string(),
             amount_in: if index == 0 {
                 cycle.amount
+            } else if index == 1 {
+                leg1_out
             } else {
-                cycle.leg1_out
+                leg2_out
             },
             min_out: 0,
             price_impact_bps: 0,
@@ -1791,6 +2138,10 @@ async fn scan_once(
         .collect();
 
     let cleared = std::sync::atomic::AtomicUsize::new(0);
+    let probe_passed = std::sync::atomic::AtomicUsize::new(0);
+    let probe_negative = std::sync::atomic::AtomicUsize::new(0);
+    let probe_failed = std::sync::atomic::AtomicUsize::new(0);
+    let probe_best_neg = std::sync::atomic::AtomicI64::new(i64::MIN);
     let priced: Vec<CycleLog> = {
         use rayon::prelude::*;
         jobs.par_iter()
@@ -1807,12 +2158,32 @@ async fn scan_once(
                     SPREAD_PROBE_LAMPORTS,
                     fee_for(SPREAD_PROBE_LAMPORTS),
                     0,
-                )?;
-                if probe.profit <= 0 {
-                    return None;
+                );
+                match probe {
+                    Some(cycle) if cycle.profit > 0 => {
+                        probe_passed.fetch_add(1, Ordering::Relaxed);
+                        cleared.fetch_add(1, Ordering::Relaxed);
+                        optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
+                    }
+                    Some(cycle) => {
+                        // Probe passed but profit <= 0 at costs=0 - edge is negative
+                        probe_negative.fetch_add(1, Ordering::Relaxed);
+                        let mut best = probe_best_neg.load(Ordering::Relaxed);
+                        while cycle.profit > best as i128
+                            && probe_best_neg
+                                .compare_exchange_weak(best, cycle.profit as i64, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_err()
+                        {
+                            best = probe_best_neg.load(Ordering::Relaxed);
+                        }
+                        None
+                    }
+                    None => {
+                        // Probe failed - pool couldn't be priced (reserve checks, etc.)
+                        probe_failed.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
                 }
-                cleared.fetch_add(1, Ordering::Relaxed);
-                optimize_cycle(pool_in, pool_out, reserve.available, fee_for, costs)
             })
             .collect()
     };
@@ -1824,6 +2195,204 @@ async fn scan_once(
     let priced_count = priced.len();
     state.cycles_seen += priced_count;
     cycles.extend(priced);
+    let pp = probe_passed.load(Ordering::Relaxed);
+    let pn = probe_negative.load(Ordering::Relaxed);
+    let pf = probe_failed.load(Ordering::Relaxed);
+    let bn = probe_best_neg.load(Ordering::Relaxed);
+    state.note(format!(
+        "probe screen · passed={pp} negative={pn} failed={pf} best_neg={bn} of {} ordered pairs",
+        jobs.len()
+    ));
+
+    // --- Triangular local-venue scan: WSOL -> A -> B -> WSOL ---
+    // Discovers cross-venue pools between non-WSOL mints (e.g. USDT-USDC) and
+    // prices three-leg cycles across them. This is where real edges hide when
+    // two-pool round trips are too tight.
+    let tri_started = Instant::now();
+    let wsol_key = beast_flash::pubkey(&wsol());
+    let mut tri_jobs: Vec<(Arc<LitePool>, Arc<LitePool>, Arc<LitePool>)> = Vec::new();
+    let non_wsol = wanted.len();
+    for i in 0..non_wsol {
+        for j in 0..non_wsol {
+            if i == j {
+                continue;
+            }
+            let (mint_a_str, mint_a_addr) = &wanted[i];
+            let (mint_b_str, mint_b_addr) = &wanted[j];
+            let Some(a_pools) = &fetched[i] else { continue };
+            if a_pools.is_empty() {
+                continue;
+            }
+            let Some(b_pools) = &fetched[j] else { continue };
+            if b_pools.is_empty() {
+                continue;
+            }
+            // Discover A-B cross-venue pools (neither mint is WSOL).
+            match discover_cross_pools(rpc, *mint_a_addr, *mint_b_addr).await {
+                Ok(cross_pools) => {
+                    if cross_pools.is_empty() {
+                        continue;
+                    }
+                    // Read cross-pool vault balances so we can build LitePools.
+                    let cross_vaults: Vec<Address> = cross_pools
+                        .iter()
+                        .flat_map(|shape| shape.vaults().into_iter())
+                        .collect();
+                    let cross_balances = if cross_vaults.is_empty() {
+                        Vec::new()
+                    } else {
+                        rpc.get_multiple_accounts(&cross_vaults).await.unwrap_or_default()
+                    };
+                    for (shape_idx, pool2_shape) in cross_pools.iter().enumerate() {
+                        let vault_keys = pool2_shape.vaults();
+                        let bal0 = cross_balances
+                            .get(shape_idx * 2)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| a.data.get(64..72))
+                            .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                            .unwrap_or(0);
+                        let bal1 = cross_balances
+                            .get(shape_idx * 2 + 1)
+                            .and_then(|a| a.as_ref())
+                            .and_then(|a| a.data.get(64..72))
+                            .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                            .unwrap_or(0);
+                        // Convert PoolShape to VenuePool then LitePool.
+                        let venue2 = match pool2_shape {
+                            PoolShape::Cpmm { pool, trade_fee_rate } => {
+                                VenuePool::Cpmm { pool: pool.clone(), trade_fee_rate: *trade_fee_rate }
+                            }
+                            PoolShape::AmmV4(pool) => VenuePool::AmmV4(pool.clone()),
+                            PoolShape::Whirlpool(pool) => VenuePool::Whirlpool {
+                                pool: pool.clone(),
+                                arrays: [Vec::new(), Vec::new()],
+                            },
+                            PoolShape::Clmm { pool, config } => VenuePool::Clmm {
+                                pool: pool.clone(),
+                                config: *config,
+                                arrays: [Vec::new(), Vec::new()],
+                            },
+                        };
+                        let pool2_lite = Arc::new(LitePool {
+                            venue: venue2,
+                            balances: [bal0, bal1],
+                        });
+
+                        for pool1_lite in a_pools {
+                            // Verify pool1: WSOL -> A
+                            let a_in1 = match pool1_lite.venue.mint_index(&wsol_key) {
+                                Some(idx) => idx,
+                                None => continue,
+                            };
+                            let a_out1 = 1 - a_in1;
+                            if pool1_lite.venue.mints()[a_out1] != beast_flash::pubkey(mint_a_addr) {
+                                continue;
+                            }
+                            // Verify pool2: A -> B
+                            let a_idx2 = match pool2_lite
+                                .venue
+                                .mint_index(&beast_flash::pubkey(mint_a_addr))
+                            {
+                                Some(idx) => idx,
+                                None => continue,
+                            };
+                            let b_idx2 = 1 - a_idx2;
+                            if pool2_lite.venue.mints()[b_idx2] != beast_flash::pubkey(mint_b_addr) {
+                                continue;
+                            }
+                            for pool3_lite in b_pools {
+                                // Verify pool3: B -> WSOL
+                                let b_out3 = match pool3_lite.venue.mint_index(&wsol_key) {
+                                    Some(idx) => idx,
+                                    None => continue,
+                                };
+                                let b_in3 = 1 - b_out3;
+                                if pool3_lite.venue.mints()[b_in3] != beast_flash::pubkey(mint_b_addr) {
+                                    continue;
+                                }
+                                tri_jobs.push((pool1_lite.clone(), pool2_lite.clone(), pool3_lite.clone()));
+                            }
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    // Marginal-price screen for triangles, then size the survivors.
+    let mut tri_ranked: Vec<(i128, Arc<LitePool>, Arc<LitePool>, Arc<LitePool>)> = Vec::new();
+    for (pool1, pool2, pool3) in &tri_jobs {
+        let spread = spot_profit_triangle(pool1, pool2, pool3);
+        if spread <= 0 {
+            continue;
+        }
+        let cap1 = pool1.wsol_capacity(&wsol_key);
+        let cap2 = pool2.wsol_capacity(&wsol_key);
+        let cap3 = pool3.wsol_capacity(&wsol_key);
+        let capacity = cap1.min(cap2).min(cap3);
+        let bound = spread.saturating_mul(i128::from(capacity)) / i128::from(SPREAD_PROBE_LAMPORTS);
+        tri_ranked.push((bound, pool1.clone(), pool2.clone(), pool3.clone()));
+    }
+    tri_ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    tri_ranked.truncate(MAX_SIZED_PAIRS);
+    let tri_sized_count = tri_ranked.len();
+
+    // Hydrate tick arrays for surviving triangle pools.
+    let mut tri_wanted_venues: Vec<VenuePool> = Vec::new();
+    for (_, p1, p2, p3) in &tri_ranked {
+        for pool in [p1, p2, p3] {
+            if !tri_wanted_venues.iter().any(|v| v.address() == pool.venue.address()) {
+                tri_wanted_venues.push(pool.venue.clone());
+            }
+        }
+    }
+    let (tri_whirlpool_arrays, tri_clmm_arrays) =
+        hydrate_arrays(rpc, &tri_wanted_venues, cache, options.array_ttl).await;
+    let tri_jobs: Vec<(Arc<PoolView>, Arc<PoolView>, Arc<PoolView>)> = tri_ranked
+        .into_iter()
+        .filter_map(|(_, p1, p2, p3)| {
+            let p1 = Arc::new(p1.as_ref().clone().hydrate(&tri_whirlpool_arrays, &tri_clmm_arrays)?);
+            let p2 = Arc::new(p2.as_ref().clone().hydrate(&tri_whirlpool_arrays, &tri_clmm_arrays)?);
+            let p3 = Arc::new(p3.as_ref().clone().hydrate(&tri_whirlpool_arrays, &tri_clmm_arrays)?);
+            Some((p1, p2, p3))
+        })
+        .collect();
+
+    let tri_priced: Vec<CycleLog> = {
+        use rayon::prelude::*;
+        tri_jobs
+            .par_iter()
+            .filter_map(|(pool1, pool2, pool3)| {
+                let fee_for = |amount: u64| provider.flash_fee(reserve, amount).unwrap_or(0);
+                let probe = evaluate_triangle(
+                    pool1,
+                    pool2,
+                    pool3,
+                    SPREAD_PROBE_LAMPORTS,
+                    fee_for(SPREAD_PROBE_LAMPORTS),
+                    0,
+                )?;
+                if probe.profit <= 0 {
+                    return None;
+                }
+                optimize_triangle(pool1, pool2, pool3, reserve.available, fee_for, costs)
+            })
+            .collect()
+    };
+    let tri_ms = tri_started.elapsed().as_millis();
+    let tri_count = tri_priced.len();
+    state.cycles_seen += tri_count;
+    cycles.extend(tri_priced);
+    state.note(format!(
+        "triangle screen · {} jobs · {} ranked · {} sized · {} profitable · {} ms",
+        tri_jobs.len(),
+        tri_sized_count,
+        tri_sized_count,
+        tri_count,
+        tri_ms
+    ));
+
     // Fetch and pricing fail for different reasons and have different fixes: a
     // slow fetch is an RPC problem, a slow price is a quote-complexity problem.
     if price_ms.max(fetch_ms) > 1_000 {
@@ -1843,15 +2412,20 @@ async fn scan_once(
     for junction in junctions {
         cycles.push(CycleLog {
             pool_in: junction.pool_in,
+            pool_mid: None,
             pool_out: junction.pool_out,
             middle_mint: junction.middle_mint,
+            middle_mint2: None,
             amount: junction.amount,
             leg1_out: junction.leg1_out,
+            leg2_out: None,
             final_out: junction.final_out,
             profit: junction.profit,
             fee_bps_in: 0,
+            fee_bps_mid: None,
             fee_bps_out: 0,
             venue_in: "jupiter".into(),
+            venue_mid: None,
             venue_out: "jupiter".into(),
         });
     }
@@ -1954,6 +2528,12 @@ async fn run_text(
                 // The venue pair is included because a cross-venue cycle and a
                 // Jupiter triangle are different claims about the same number.
                 for (rank, cycle) in state.closest.iter().enumerate() {
+                    let is_tri = cycle.pool_mid.is_some();
+                    let path = if is_tri {
+                        format!("{} -> {} -> {} -> {}", cycle.venue_in, cycle.pool_in, cycle.pool_mid.as_deref().unwrap_or("?"), cycle.pool_out)
+                    } else {
+                        format!("{} -> {} -> {}", cycle.venue_in, cycle.pool_in, cycle.pool_out)
+                    };
                     println!(
                         "    #{rank} {} {} -> {} {} amount {} profit {} lamports",
                         cycle.venue_in,
@@ -2096,7 +2676,7 @@ async fn execute_best(
     // Opportunities last seconds or less, so try a few fast rebuilds. A plan
     // is eligible for submission only after a successful simulation; a failed
     // simulation is a hard stop, never a reason to send a transaction anyway.
-    const BUILD_ATTEMPTS: usize = 3;
+    const BUILD_ATTEMPTS: usize = 1;
     let mut built: Option<(beast_exec::BundlePlan, beast_rpc::SimulationResult)> = None;
     let mut last_error = String::new();
     let mut last_logs: Vec<String> = Vec::new();
@@ -2113,7 +2693,7 @@ async fn execute_best(
                     break;
                 }
                 if attempt < BUILD_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(2_000)).await;
                 }
                 continue;
             }
@@ -2131,7 +2711,7 @@ async fn execute_best(
                     .unwrap_or_else(|| "simulation rejected".into());
                 last_logs = simulation.logs.clone();
                 if attempt < BUILD_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(2_000)).await;
                 }
                 continue;
             }
@@ -2139,7 +2719,7 @@ async fn execute_best(
                 last_error = error.to_string();
                 last_logs.clear();
                 if attempt < BUILD_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(2_000)).await;
                 }
                 continue;
             }

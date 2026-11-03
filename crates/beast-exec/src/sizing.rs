@@ -293,6 +293,143 @@ mod tests {
     }
 }
 
+/// Asynchronous form of [`solve_size`] for providers whose quote is fetched
+/// remotely rather than computed locally.
+///
+/// The algorithm and bounds are the same as their synchronous counterparts;
+/// this function simply awaits the concrete quote function. It is kept in the
+/// same module so the intended behavior cannot drift between local and remote
+/// evaluators.
+pub async fn solve_size_async<F, Fut>(
+    upper: u64,
+    mut profit: F,
+    objective: SizeObjective,
+    min_profit: i128,
+) -> Option<OptimalSize>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = i128>,
+{
+    if upper == 0 {
+        return None;
+    }
+    let peak = maximize_profit_async(upper, |amount| profit(amount)).await?;
+    match objective {
+        SizeObjective::MaxProfit => Some(peak),
+        SizeObjective::MaxBorrowable => {
+            if peak.profit < min_profit {
+                return None;
+            }
+            let cap = upper.max(peak.amount);
+            let mut best_amount = peak.amount;
+            let mut best_profit = peak.profit;
+            let mut lo = peak.amount;
+            let mut hi = cap;
+
+            while lo < hi {
+                let mid = lo.saturating_add(hi.saturating_sub(lo).saturating_add(1) / 2);
+                let value = profit(mid).await;
+                if value >= min_profit {
+                    if mid > best_amount {
+                        best_amount = mid;
+                        best_profit = value;
+                    }
+                    lo = mid;
+                } else {
+                    hi = mid.saturating_sub(1);
+                }
+            }
+
+            let window = best_amount.saturating_div(100_000).max(4);
+            let lo_window = best_amount.saturating_sub(window);
+            let hi_window = best_amount.saturating_add(window).min(cap);
+            for amount in lo_window..=hi_window {
+                let value = profit(amount).await;
+                if value >= min_profit && amount > best_amount {
+                    best_amount = amount;
+                    best_profit = value;
+                }
+            }
+            Some(OptimalSize {
+                amount: best_amount,
+                profit: best_profit,
+            })
+        }
+    }
+}
+
+/// Async form of [`maximize_profit`].
+async fn maximize_profit_async<F, Fut>(upper: u64, mut profit: F) -> Option<OptimalSize>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = i128>,
+{
+    const SWEEP: u32 = 48;
+    let mut samples: Vec<(u64, i128)> = Vec::with_capacity(SWEEP as usize + 1);
+    for index in 0..=SWEEP {
+        let fraction = f64::from(index) / f64::from(SWEEP);
+        let amount = if index == 0 {
+            1
+        } else {
+            let value = (upper as f64).powf(fraction);
+            value.round().clamp(1.0, upper as f64) as u64
+        };
+        samples.push((amount, profit(amount).await));
+    }
+
+    let mut best_index = 0usize;
+    let mut best_profit = samples[0].1;
+    for (index, (_, value)) in samples.iter().enumerate().skip(1) {
+        if *value > best_profit {
+            best_index = index;
+            best_profit = *value;
+        }
+    }
+
+    let mut best_amount = samples[best_index].0;
+    let mut best_profit = samples[best_index].1;
+    let lo = if best_index == 0 {
+        1
+    } else {
+        samples[best_index - 1].0
+    };
+    let hi = samples.get(best_index + 1).map(|(amount, _)| *amount).unwrap_or(upper);
+
+    let mut lo = lo;
+    let mut hi = hi;
+    while hi.saturating_sub(lo) > 3 {
+        let third = (hi - lo) / 3;
+        let m1 = lo + third;
+        let m2 = hi - third;
+        let p1 = profit(m1).await;
+        let p2 = profit(m2).await;
+        if p1 > best_profit {
+            best_amount = m1;
+            best_profit = p1;
+        }
+        if p2 > best_profit {
+            best_amount = m2;
+            best_profit = p2;
+        }
+        if p1 < p2 {
+            lo = m1 + 1;
+        } else {
+            hi = m2.saturating_sub(1);
+        }
+    }
+    for amount in lo..=hi.max(lo) {
+        let value = profit(amount).await;
+        if value > best_profit {
+            best_amount = amount;
+            best_profit = value;
+        }
+    }
+    Some(OptimalSize {
+        amount: best_amount,
+        profit: best_profit,
+    })
+}
+
 /// Select the trade size objective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeObjective {

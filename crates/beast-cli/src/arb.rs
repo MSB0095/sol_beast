@@ -1938,31 +1938,55 @@ async fn scan_once(
             .collect();
         for (index, a) in mints.iter().enumerate() {
             for b in mints.iter().skip(index + 1) {
-                for amount in &options.amount_ladder {
-                    if *amount as u128 > reserve.available as u128 {
-                        continue;
-                    }
-                    let fee = provider.flash_fee(reserve, *amount).unwrap_or(0);
-                    match price_triangle(jupiter.as_ref(), wsol(), *a, *b, *amount, fee, costs)
-                        .await
-                    {
-                        Some(junction) => {
-                            pairs += 1;
-                            junctions.push(junction);
-                        }
-                        None => {
-                            // An unpriceable triangle is invisible, so the reason
-                            // is recorded: a rate-limited endpoint and an
-                            // unroutable mint need different responses.
-                            unpriced += 1;
-                            if unpriced <= 3 {
-                                state.note(format!(
-                                    "triangle {}/{} at {} unpriceable",
-                                    &a.to_string()[..6],
-                                    &b.to_string()[..6],
-                                    amount
-                                ));
+                let upper = reserve.available;
+                let selected = beast_exec::sizing::solve_size_async(
+                    upper,
+                    |amount| {
+                        let provider = provider.clone();
+                        let jupiter = jupiter.as_ref();
+                        async move {
+                            let fee = provider.flash_fee(reserve, amount).unwrap_or(0);
+                            match price_triangle(jupiter, wsol(), *a, *b, amount, fee, costs).await
+                            {
+                                Some(cycle) => cycle.profit,
+                                None => i128::MIN / 4,
                             }
+                        }
+                    },
+                    beast_exec::sizing::SizeObjective::MaxBorrowable,
+                    i128::from(options.min_profit_lamports),
+                )
+                .await;
+                match selected {
+                    Some(size) => {
+                        let fee = provider.flash_fee(reserve, size.amount).unwrap_or(0);
+                        match price_triangle(jupiter.as_ref(), wsol(), *a, *b, size.amount, fee, costs)
+                            .await
+                        {
+                            Some(junction) => {
+                                pairs += 1;
+                                junctions.push(junction);
+                            }
+                            None => {
+                                unpriced += 1;
+                                if unpriced <= 3 {
+                                    state.note(format!(
+                                        "triangle {}/{} unpriceable at selected size",
+                                        &a.to_string()[..6],
+                                        &b.to_string()[..6]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        unpriced += 1;
+                        if unpriced <= 3 {
+                            state.note(format!(
+                                "triangle {}/{} no clearing size",
+                                &a.to_string()[..6],
+                                &b.to_string()[..6]
+                            ));
                         }
                     }
                 }

@@ -1301,29 +1301,76 @@ async fn fetch_cross_pools(
     let accounts = program_accounts_for_mints(rpc, program_address, Some(data_size), mint_offsets, mint_a, mint_b).await?;
 
     let mut shapes = Vec::new();
+    // A CPMM pool's swap fee is stored in its `AmmConfig` account, not in the
+    // pool. Decode each candidate once, batch-read the configs, and keep only
+    // candidates whose fee was actually observed. An unreadable fee is not a
+    // zero fee; silently pricing it as free overstates the edge and is unsafe.
+    let mut cpmm_candidates = Vec::new();
     for (key, data) in &accounts {
-        let key = beast_flash::pubkey(key);
-        // Try each venue decoder; an account belongs to exactly one program.
-        if let Ok(pool) = cpmm::CpmmPool::decode(key, data) {
+        let address = beast_flash::pubkey(key);
+        if let Ok(pool) = cpmm::CpmmPool::decode(address, data) {
             if pool.ensure_swappable().is_ok() && pool.authority().is_ok() {
-                // Read the config trade fee rate later; use 0 as placeholder.
-                shapes.push(PoolShape::Cpmm { pool, trade_fee_rate: 0 });
-                continue;
+                cpmm_candidates.push(pool);
             }
         }
-        if let Ok(pool) = amm_v4::AmmV4Pool::decode(key, data) {
+    }
+
+    let mut config_keys: Vec<Address> = Vec::new();
+    for pool in &cpmm_candidates {
+        let config = beast_flash::address(&pool.amm_config);
+        if !config_keys.contains(&config) {
+            config_keys.push(config);
+        }
+    }
+    let configs = if config_keys.is_empty() {
+        Vec::new()
+    } else {
+        rpc.get_multiple_accounts(&config_keys).await?
+    };
+    let mut fees = Vec::new();
+    for (index, config) in configs.iter().enumerate() {
+        let Some(config) = config.as_ref() else {
+            continue;
+        };
+        if let Ok(rate) = cpmm::decode_trade_fee_rate(&config.data) {
+            fees.push((config_keys[index], rate));
+        }
+    }
+
+    let mut cpmm_by_address: Vec<(Address, PoolShape)> = cpmm_candidates
+        .into_iter()
+        .filter_map(|pool| {
+            let config = beast_flash::address(&pool.amm_config);
+            let fee = fees.iter().find(|(key, _)| *key == config)?.1;
+            Some((
+                beast_flash::address(&pool.address),
+                PoolShape::Cpmm {
+                    pool,
+                    trade_fee_rate: fee,
+                },
+            ))
+        })
+        .collect();
+
+    for (key, data) in &accounts {
+        if let Some(index) = cpmm_by_address.iter().position(|(candidate, _)| candidate == key) {
+            shapes.push(cpmm_by_address.remove(index).1);
+            continue;
+        }
+        let address = beast_flash::pubkey(key);
+        if let Ok(pool) = amm_v4::AmmV4Pool::decode(address, data) {
             if pool.authority().is_ok() && pool.fee_denominator != 0 {
                 shapes.push(PoolShape::AmmV4(pool));
                 continue;
             }
         }
-        if let Ok(pool) = beast_exec::whirlpool::WhirlpoolPool::decode(key, data) {
+        if let Ok(pool) = beast_exec::whirlpool::WhirlpoolPool::decode(address, data) {
             if pool.ensure_swappable().is_ok() {
                 shapes.push(PoolShape::Whirlpool(pool));
                 continue;
             }
         }
-        if let Ok(pool) = clmm::ClmmPool::decode(key, data) {
+        if let Ok(pool) = clmm::ClmmPool::decode(address, data) {
             if pool.ensure_swappable().is_ok() {
                 shapes.push(PoolShape::Clmm { pool, config: clmm::AmmConfig::default() });
                 continue;
@@ -2577,7 +2624,7 @@ async fn run_text(
                             &reserve,
                             executor.clone(),
                             &store,
-                            cycle,
+                            cycles,
                             options.mode,
                             options.text,
                             &mut state,
@@ -2621,9 +2668,50 @@ async fn run_text(
 /// state. Nothing is submitted that simulation rejected, because a rejected
 /// bundle has already paid its base fee for nothing. Submission is gated on the
 /// executor's own `real` flag rather than on a copy of the CLI flag, so a mode
-/// the executor does not believe in cannot spend money.
+/// Attempt a small ranked set of scanner candidates, rebuilt and repriced by
+/// the executor. Scanner profitability is only a hint; the live decision is
+/// made from the transaction the executor itself constructs.
 #[allow(clippy::too_many_arguments)]
 async fn execute_best(
+    config: &BeastConfig,
+    rpc: &RpcClient,
+    provider: &dyn FlashProvider,
+    reserve: &FlashReserve,
+    executor: Arc<Executor>,
+    store: &Store,
+    cycles: &[CycleLog],
+    mode: Mode,
+    manual_approval: bool,
+    state: &mut ArbState,
+) {
+    const MAX_VERIFIED_CANDIDATES: usize = 4;
+    for cycle in cycles.iter().take(MAX_VERIFIED_CANDIDATES) {
+        if attempt_candidate(
+            config,
+            rpc,
+            provider,
+            reserve,
+            executor.clone(),
+            store,
+            cycle,
+            mode,
+            manual_approval,
+            state,
+        )
+        .await
+        {
+            return;
+        }
+    }
+    state.note("all executor-verified candidates failed; nothing submitted".to_string());
+}
+
+/// Verify one candidate against live pool state and the executor quote.
+///
+/// Returns true only after both simulations are clean and the candidate has
+/// reached the live submit gate. False means it must not be retried here.
+#[allow(clippy::too_many_arguments)]
+async fn attempt_candidate(
     config: &BeastConfig,
     rpc: &RpcClient,
     provider: &dyn FlashProvider,
@@ -2634,7 +2722,7 @@ async fn execute_best(
     mode: Mode,
     manual_approval: bool,
     state: &mut ArbState,
-) {
+) -> bool {
     let attempt_id = format!("arb-{}", uuid::Uuid::new_v4());
     let slot = rpc.get_slot().await.unwrap_or(0);
     // Read the balance immediately before building: the plan's rent and fee
@@ -2698,6 +2786,33 @@ async fn execute_best(
                 continue;
             }
         };
+        // Gate on the executor's own quote, not the scanner's estimate. The
+        // scanner prices pools from a cached snapshot and can disagree with the
+        // live reserves the transaction is actually built against by far more
+        // than the edge; submitting on that estimate is how a modelled profit
+        // becomes a reverted bundle. `quoted_out_expected` is what the built
+        // legs deliver, so it is the only number worth acting on.
+        let expected_out = candidate.quoted_out_expected;
+        let repayment = candidate
+            .flash
+            .as_ref()
+            .map(|flash| flash.repayment)
+            .unwrap_or(candidate.amount_in)
+            .saturating_add(candidate.fees_lamports)
+            .saturating_add(candidate.tip_lamports);
+        if expected_out <= repayment {
+            last_error = format!(
+                "executor quote {expected_out} does not cover repayment+costs {repayment} \
+                 (scanner estimated {} lamports)",
+                cycle.profit
+            );
+            last_logs.clear();
+            break;
+        }
+        let live_profit = expected_out - repayment;
+        state.note(format!(
+            "executor quote {expected_out} vs repayment+costs {repayment} => live {live_profit} lamports"
+        ));
         match executor.simulate_cycle(&candidate).await {
             Ok(simulation) if simulation.err.is_none() => {
                 built = Some((candidate, simulation));
@@ -2744,7 +2859,7 @@ async fn execute_best(
             state.note(format!(
                 "{attempt_id} abandoned after {BUILD_ATTEMPTS} builds: {last_error}"
             ));
-            return;
+            return false;
         }
     };
     // RPC simulation proves the composed transaction against the current
@@ -2771,7 +2886,7 @@ async fn execute_best(
                 },
             );
             state.note(format!("{attempt_id} abandoned: {message}"));
-            return;
+            return false;
         }
     }
 
@@ -2794,6 +2909,7 @@ async fn execute_best(
         start_balance,
     )
     .await;
+    true
 }
 
 fn compact_simulation_summary(value: &serde_json::Value) -> String {
@@ -3135,7 +3251,7 @@ async fn run_tui(
                             &reserve,
                             executor.clone(),
                             store.as_ref(),
-                            &found[0],
+                            &found,
                             options.mode,
                             false,
                             &mut working,

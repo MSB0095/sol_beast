@@ -304,6 +304,12 @@ pub struct BundlePlan {
     pub route_mints: Vec<Address>,
     pub amount_in: u64,
     pub quoted_out_min: u64,
+    /// Expected cycle output the plan was built from, before the on-chain
+    /// minimum or any cost is applied. This is the executor's own verified
+    /// quote, so a caller can judge profitability against the pricing that
+    /// actually built the transaction rather than against a scanner estimate.
+    #[serde(default)]
+    pub quoted_out_expected: u64,
     pub expected_start_lamports: u64,
     pub min_profit_lamports: u64,
     pub tip_lamports: u64,
@@ -521,6 +527,7 @@ impl Executor {
             route_mints: mints,
             amount_in,
             quoted_out_min: leg_amount,
+            quoted_out_expected: leg_amount,
             expected_start_lamports: start_balance,
             min_profit_lamports: self.config.min_profit_lamports,
             tip_lamports,
@@ -717,6 +724,7 @@ impl Executor {
             route_mints: mints,
             amount_in,
             quoted_out_min: leg_amount,
+            quoted_out_expected: leg_amount,
             expected_start_lamports: start_balance,
             min_profit_lamports: self.config.min_profit_lamports,
             tip_lamports,
@@ -1146,6 +1154,9 @@ impl Executor {
             principal_plus_fee,
             required_out,
             final_min,
+            // Jupiter legs are priced by Jupiter itself, so the enforced
+            // minimum is also the expected output here.
+            final_min,
             start_balance,
             fees_lamports,
             tip_lamports,
@@ -1250,6 +1261,7 @@ impl Executor {
         principal_plus_fee: u64,
         required_out: u64,
         quoted_out_min: u64,
+        quoted_out_expected: u64,
         start_balance: u64,
         fees_lamports: u64,
         tip_lamports: u64,
@@ -1316,6 +1328,9 @@ impl Executor {
             .iter()
             .map(encode_versioned)
             .collect::<Result<Vec<_>>>()?;
+        if let Some(first) = encoded_transactions.first() {
+            std::fs::write("/tmp/opencode/last_tx.b64", first).ok();
+        }
         let mut signatures: Vec<String> = packed
             .iter()
             .map(|transaction| transaction.signatures[0].to_string())
@@ -1372,6 +1387,7 @@ impl Executor {
             route_mints: mints,
             amount_in: amount,
             quoted_out_min,
+            quoted_out_expected,
             expected_start_lamports: start_balance,
             min_profit_lamports: self.config.min_profit_lamports,
             tip_lamports,
@@ -1603,9 +1619,12 @@ impl Executor {
             0
         };
 
-        // Quote each leg sequentially: leg i's output becomes leg i+1's input.
-        // Enforce slippage on all but the final leg; the final leg's min-out is
-        // set to break-even + costs so the cycle is green-or-revert.
+        // Quote each leg sequentially: leg i's *expected* output becomes leg
+        // i+1's input, while leg i's on-chain minimum is a slippage-haircut of
+        // that output. Chaining the haircut instead of the expected output
+        // spends less on every later leg, which systematically under-funds the
+        // repayment and makes the final swap miss its floor even when every
+        // pool behaves exactly as quoted.
         let mut leg_amounts: Vec<u64> = Vec::with_capacity(legs.len());
         let mut leg_floors: Vec<u64> = Vec::with_capacity(legs.len());
         let mut current_amount = amount;
@@ -1618,20 +1637,18 @@ impl Executor {
                     "leg {index} quotes zero output"
                 )));
             }
-            if index == legs.len() - 1 {
-                // Final leg: enforce break-even + profit + costs as min-out.
-                leg_amounts.push(quote);
-                leg_floors.push(quote);
-            } else {
-                // Intermediate legs: quote with slippage haircut as the floor.
-                let floor = quote
-                    .saturating_sub(quote.saturating_mul(u64::from(self.config.flash_slippage_bps)) / 10_000)
-                    .max(1);
-                leg_amounts.push(quote);
-                leg_floors.push(floor);
-                current_amount = floor; // next leg spends at most the floor
-            }
+            let floor = quote
+                .saturating_sub(
+                    quote.saturating_mul(u64::from(self.config.flash_slippage_bps)) / 10_000,
+                )
+                .max(1);
+            leg_amounts.push(quote);
+            leg_floors.push(floor);
+            // The next leg swaps what this one is expected to deliver.
+            current_amount = quote;
         }
+        // The executor's own expectation for the cycle's final output.
+        let quoted_expected = leg_amounts.last().copied().unwrap_or(0);
         let final_min_out = leg_amounts.last().copied().unwrap_or(0);
 
         let guard_applicable = self.config.guard_enabled();
@@ -1668,10 +1685,38 @@ impl Executor {
             // is spent beyond the base fee.
             let min_profit = u128::from(self.config.min_profit_lamports);
             let overhead = u128::from(fees_lamports) + u128::from(MIN_JITO_TIP_LAMPORTS);
-            let floor = u128::from(principal_plus_fee) + min_profit + overhead;
-            let final_min_out = u64::try_from(floor).map_err(|_| {
-                ExecutionError::Guard("break-even floor does not fit in u64".into())
-            })?;
+            // The floor is break-even plus profit, expressed against the
+            // slippage-haircut quote rather than the exact one. The live pool
+            // re-prices against fresh reserves and books protocol fees that
+            // move the curve a few basis points between the read and the swap,
+            // so an exact-quote floor reverts on noise. The haircut keeps the
+            // guard honest: anything below break-even plus min profit still
+            // fails the swap, and a cycle that lands below the modelled profit
+            // is a green outcome, never a loss.
+            let required = u64::try_from(u128::from(principal_plus_fee) + min_profit + overhead)
+                .map_err(|_| ExecutionError::Guard("break-even floor does not fit in u64".into()))?
+                .max(1);
+            let tolerance = required
+                .saturating_mul(u64::from(self.config.flash_slippage_bps))
+                / 10_000;
+            // Never fall below break-even itself (principal + fee + fees + tip),
+            // even when the configured tolerance is wide.
+            let hard_floor = u64::try_from(
+                u128::from(principal_plus_fee) + u128::from(fees_lamports) + overhead,
+            )
+            .map_err(|_| ExecutionError::Guard("break-even floor does not fit in u64".into()))?;
+            // The floor can never exceed what the final pool is modelled to
+            // deliver: such a cycle is red by construction and the on-chain
+            // simulation would reject it, so failing here is the honest answer.
+            let final_min_out = required
+                .saturating_sub(tolerance)
+                .max(hard_floor)
+                .min(quoted_expected);
+            if final_min_out < hard_floor {
+                return Err(ExecutionError::Unprofitable(format!(
+                    "final leg quotes {final_min_out}, below break-even {hard_floor}"
+                )));
+            }
             let tip_lamports = MIN_JITO_TIP_LAMPORTS;
             (final_min_out, 0, tip_lamports)
         };
@@ -1707,12 +1752,15 @@ impl Executor {
                 &token_program,
             ),
         );
-        for ata in &intermediate_atas {
+        // Each create takes (payer, owner, MINT, token program). Passing the
+        // derived account here instead of the mint made the ATA program fail
+        // with `IncorrectProgramId` on every intermediate account.
+        for mint in &intermediate_mints {
             preamble.push(
                 spl_associated_token_account::instruction::create_associated_token_account_idempotent(
                     &wallet,
                     &wallet,
-                    ata,
+                    mint,
                     &token_program,
                 ),
             );
@@ -1791,9 +1839,15 @@ impl Executor {
             let amount_in = if index == 0 {
                 amount
             } else {
-                leg_floors[index - 1]
+                // Spend the previous leg's *expected* output. The previous
+                // swap's own minimum guarantees at least its haircut floor, so
+                // this amount is covered unless a pool moves adversely, in
+                // which case that leg reverts first.
+                leg_amounts[index - 1]
             };
             let min_out = if index == legs.len() - 1 {
+                // The final leg enforces break-even plus profit; it is the
+                // green-or-revert gate for the whole cycle.
                 final_min_out
             } else {
                 leg_floors[index]
@@ -1861,6 +1915,9 @@ impl Executor {
             principal_plus_fee,
             final_min_out,
             final_min_out,
+            // The executor's own quote for the cycle, before the guard floor:
+            // this is what the built transaction is expected to return.
+            quoted_expected,
             start_balance,
             fees_lamports,
             tip_lamports,
@@ -2184,17 +2241,49 @@ fn build_composed_transactions(
         ));
     }
 
-    // Greedy fill: an instruction joins the current transaction while the
-    // assembled message still fits, and opens the next one when it does not.
-    let mut groups: Vec<Vec<Instruction>> = vec![Vec::new()];
-    for instruction in &composed.instructions {
-        let index = groups.len() - 1;
-        groups[index].push(instruction.clone());
-        if !group_fits(&groups[index], wallet, blockhash, tables) && groups[index].len() > 1 {
-            groups[index].pop();
-            groups.push(vec![instruction.clone()]);
+    // A flash cycle is atomic: the borrow, every swap, and the repayment must
+    // all live in the same transaction (the provider locates the payback by
+    // scanning the instructions of the invoking transaction). Splitting the
+    // sequence across transactions silently drops the repayment, so packing is
+    // limited to the swaps sitting between them. Non-flash sequences may still
+    // span several transactions.
+    let flash_split = flash_region(&composed.instructions);
+    let groups: Vec<Vec<Instruction>> = match flash_split {
+        Some((first, last)) => {
+            let whole = vec![composed.instructions.clone()];
+            if group_fits(&composed.instructions, wallet, blockhash, tables) {
+                whole
+            } else {
+                let probe = compose::ComposedCycle {
+                    instructions: composed.instructions.clone(),
+                    signatures_required: 1,
+                    lookup_tables: tables.iter().map(|t| t.key.to_string()).collect(),
+                    estimated_bytes: 0,
+                };
+                let detail = match compose::assemble_v0(&probe, wallet, blockhash, tables) {
+                    Ok(tx) => format!("message {} bytes (limit {})", tx.message.serialize().len() + 65, compose::MAX_TRANSACTION_BYTES),
+                    Err(error) => format!("assembly failed: {error}"),
+                };
+                return Err(ExecutionError::Unsupported(format!(
+                    "flash cycle does not fit one transaction ({detail}): the borrow (instruction {first}) \
+                     and repayment (instruction {last}) cannot be separated"
+                )));
+            }
         }
-    }
+        None => {
+            let mut groups: Vec<Vec<Instruction>> = vec![Vec::new()];
+            for instruction in &composed.instructions {
+                let index = groups.len() - 1;
+                groups[index].push(instruction.clone());
+                if !group_fits(&groups[index], wallet, blockhash, tables) && groups[index].len() > 1
+                {
+                    groups[index].pop();
+                    groups.push(vec![instruction.clone()]);
+                }
+            }
+            groups
+        }
+    };
     if groups.len() > MAX_BUNDLE_TRANSACTIONS {
         return Err(ExecutionError::Unsupported(format!(
             "composed cycle needs {} transactions, above the {}-transaction bundle limit; \
@@ -2222,6 +2311,37 @@ fn build_composed_transactions(
         "packed composed cycle"
     );
     Ok(transactions)
+}
+
+/// Program IDs of the flash-loan providers this executor can fund a cycle with.
+fn flash_program_ids() -> Vec<Pubkey> {
+    [
+        beast_flash::JUPITER_FLASHLOAN_PROGRAM_ID,
+        beast_flash::KAMINO_KLEND_PROGRAM_ID,
+        beast_flash::SOLEND_PROGRAM_ID,
+    ]
+    .iter()
+    .filter_map(|id| Pubkey::from_str(id).ok())
+    .collect()
+}
+
+/// Locate the flash-loan borrow and repayment instructions in a composed cycle.
+///
+/// A provider emits exactly two instructions from its own program: the borrow
+/// and the matching repayment. Everything between them is the swap body, and
+/// all three must stay in one transaction because the provider locates the
+/// payback by scanning the instructions of the invoking transaction. Returns
+/// `None` when the cycle is not flash-funded.
+fn flash_region(instructions: &[Instruction]) -> Option<(usize, usize)> {
+    let programs = flash_program_ids();
+    let mut positions = instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| programs.contains(&instruction.program_id))
+        .map(|(index, _)| index);
+    let first = positions.next()?;
+    let last = positions.last().unwrap_or(first);
+    (last > first).then_some((first, last))
 }
 
 /// Would these instructions assemble into one legal transaction?

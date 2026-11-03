@@ -775,6 +775,175 @@ pub async fn flash_alt(
     Ok(())
 }
 
+/// Read `flash.lookup_table` from the configured file.
+///
+/// Used by `flash-alt-extend` so the operator does not have to retype the
+/// table address that `config.toml` already records.
+pub fn lookup_table_from_config(path: Option<&Path>) -> Result<String> {
+    let loaded = load(path, false)?;
+    let table = loaded.config.flash.lookup_table.trim();
+    if table.is_empty() {
+        anyhow::bail!("flash.lookup_table is empty in the config; pass --table instead");
+    }
+    Ok(table.to_string())
+}
+
+/// `beast flash-alt-extend` — append accounts to an existing lookup table.
+///
+/// The table created by `flash-alt` carries only the flash provider's stable
+/// accounts, which is not enough on its own to fit a full flash cycle plus its
+/// repayment into one 1232-byte transaction: the swap accounts stay static and
+/// the message overflows. Extending the same table with the pools and vaults a
+/// cycle reuses every pass turns those keys into one index byte each. Reusing
+/// the deployed table also avoids paying rent twice, since a table may hold up
+/// to 256 addresses.
+///
+/// Only accounts that are not already present are appended, and signers,
+/// program ids and the wallet are refused. Simulation is the default; sending
+/// requires `--real --confirm` **and** `runtime.real = true`.
+pub async fn flash_alt_extend(
+    path: Option<&Path>,
+    table: &str,
+    accounts: &[String],
+    real: bool,
+    confirm: bool,
+    json_output: bool,
+) -> Result<()> {
+    if confirm && !real {
+        bail!("--confirm requires --real");
+    }
+    if accounts.is_empty() {
+        bail!("pass at least one account to append: --account <pubkey>");
+    }
+    let loaded = load(path, real)?;
+    let config = &loaded.config;
+    if real && !config.runtime.real {
+        bail!("--real requires runtime.real=true in config");
+    }
+    let wallet = load_wallet(config, &loaded.secrets)?
+        .ok_or_else(|| anyhow::anyhow!("wallet keypair required to extend a lookup table"))?;
+    let table_key = Pubkey::from_str(table).with_context(|| format!("lookup table {table:?}"))?;
+    let rpc = Arc::new(rpc(config)?);
+    let account = rpc
+        .get_account_info(beast_flash::address(&table_key))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("lookup table {table_key} not found on chain"))?;
+    let program = solana_sdk::address_lookup_table::program::id();
+    if account.account.owner != beast_flash::address(&program) {
+        bail!(
+            "account {table_key} is owned by {}, not the address lookup table program",
+            account.account.owner
+        );
+    }
+    let state = LookupTableState::deserialize(&account.account.data)
+        .map_err(|error| anyhow::anyhow!("decode lookup table {table_key}: {error:?}"))?;
+    let authority = state
+        .meta
+        .authority
+        .ok_or_else(|| anyhow::anyhow!("lookup table {table_key} has no authority"))?;
+    if authority != wallet.pubkey() {
+        bail!("lookup table {table_key} is controlled by {authority}, not {}", wallet.pubkey());
+    }
+
+    let forbidden = [
+        beast_flash::address(&wallet.pubkey()),
+        beast_flash::address(&solana_sdk::system_program::ID),
+        beast_flash::address(&solana_sdk::compute_budget::ID),
+        beast_flash::address(&program),
+    ];
+    let mut additions: Vec<Pubkey> = Vec::new();
+    for raw in accounts {
+        let key = Pubkey::from_str(raw).with_context(|| format!("account {raw:?}"))?;
+        let address = beast_flash::address(&key);
+        if forbidden.contains(&address) {
+            bail!("{key} cannot be stored in a lookup table");
+        }
+        if state.addresses.contains(&key) || additions.contains(&key) {
+            continue;
+        }
+        additions.push(key);
+    }
+    let existing = state.addresses.len();
+    if additions.is_empty() {
+        println!("table {table_key} already holds every requested account ({existing} addresses)");
+        return Ok(());
+    }
+    /// One extend instruction appends at most this many addresses.
+    const MAX_PER_EXTEND: usize = 20;
+    let total = existing.saturating_add(additions.len());
+    if total > 256 {
+        bail!(
+            "table {table_key} would hold {total} addresses; the protocol allows 256"
+        );
+    }
+
+    let chunks: Vec<&[Pubkey]> = additions.chunks(MAX_PER_EXTEND).collect();
+    let mut instructions = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        instructions.push(alt_instruction::extend_lookup_table(
+            table_key,
+            wallet.pubkey(),
+            Some(wallet.pubkey()),
+            chunk.to_vec(),
+        ));
+    }
+    let (blockhash, _) = rpc.get_latest_blockhash().await?;
+    let blockhash: solana_sdk::hash::Hash = blockhash
+        .parse()
+        .map_err(|error| anyhow::anyhow!("latest blockhash: {error}"))?;
+    let transaction = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&wallet.pubkey()),
+        &[wallet.keypair()],
+        blockhash,
+    );
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(bincode::serialize(&transaction).context("serialize lookup-table extend")?);
+    let simulation = rpc.simulate_transaction(&encoded).await?;
+    let simulation_error = simulation.err.clone();
+    let mut signature: Option<String> = None;
+    if simulation_error.is_none() && real && confirm {
+        signature = Some(rpc.send_transaction(&encoded, false).await?);
+    }
+
+    let added: Vec<String> = additions.iter().map(ToString::to_string).collect();
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "table": table_key.to_string(),
+                "already_present": existing,
+                "added": added,
+                "instructions": chunks.len(),
+                "simulation": simulation,
+                "sent": signature.is_some(),
+                "signature": signature,
+            }))?
+        );
+    } else {
+        println!("table   : {table_key}");
+        println!("before  : {existing} addresses");
+        println!("adding  : {}", additions.len());
+        for key in &additions {
+            println!("  {key}");
+        }
+        println!("after   : {total} addresses ({} extend instructions)", chunks.len());
+        if let Some(error) = &simulation_error {
+            println!("simulation FAILED: {error}");
+        } else {
+            println!("simulation: ok");
+        }
+        match &signature {
+            Some(signature) => println!("sent: {signature}"),
+            None if simulation_error.is_none() => {
+                println!("dry-run only; add --real --confirm to send");
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
 /// `beast flash-alt-close` — recover the rent of a flash lookup table.
 ///
 /// A table must be deactivated first and then wait out the slot-hash cool-down

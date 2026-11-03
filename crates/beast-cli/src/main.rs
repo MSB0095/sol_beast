@@ -179,6 +179,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Append pool accounts to an existing flash lookup table so a full flash
+    /// cycle (borrow, swaps and repayment) fits in one transaction.
+    FlashAltExtend {
+        /// Lookup table address (the value of `flash.lookup_table`).
+        #[arg(long)]
+        table: Option<String>,
+        /// Account to append; repeat the flag for several accounts.
+        #[arg(long = "account")]
+        accounts: Vec<String>,
+        /// Sign and send the extend transaction (requires runtime.real=true).
+        #[arg(long)]
+        real: bool,
+        /// Required together with --real before anything is sent.
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Deactivate or close a flash lookup table and recover its rent.
     FlashAltClose {
         /// Lookup table address (the value of `flash.lookup_table`).
@@ -439,6 +457,31 @@ async fn main() -> Result<()> {
         } => {
             init_logging("info", cli.json_logs)?;
             commands::flash_alt(cli.config.as_deref(), real, confirm, json).await
+        }
+        Command::FlashAltExtend {
+            table,
+            accounts,
+            real,
+            confirm,
+            json,
+        } => {
+            init_logging("info", cli.json_logs)?;
+            let table = match table {
+                Some(table) => table,
+                None => {
+                    let path = cli.config.as_deref();
+                    commands::lookup_table_from_config(path)?
+                }
+            };
+            commands::flash_alt_extend(
+                cli.config.as_deref(),
+                &table,
+                &accounts,
+                real,
+                confirm,
+                json,
+            )
+            .await
         }
         Command::FlashAltClose {
             table,

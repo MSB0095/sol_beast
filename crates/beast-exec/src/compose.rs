@@ -568,7 +568,6 @@ pub fn assemble_v0(
         })
         .collect::<Vec<_>>();
 
-
     let message = VersionedMessage::V0(V0Message {
         header: MessageHeader {
             num_required_signatures: 1,

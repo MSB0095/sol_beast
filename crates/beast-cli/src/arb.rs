@@ -479,16 +479,11 @@ impl Clone for LitePool {
 fn spot_profit(pool_in: &LitePool, pool_out: &LitePool) -> i128 {
     let wsol_key = beast_flash::pubkey(&wsol());
     let unpriceable = i128::MIN / 4;
-    // Concentrated-liquidity pools cannot be reliably screened at marginal
-    // price: their sqrt price ignores tick depth, producing fake edges that
-    // fail exact quoting. Skip them entirely.
-    if matches!(
-        pool_in.venue,
-        VenuePool::Whirlpool { .. } | VenuePool::Clmm { .. }
-    ) || matches!(
-        pool_out.venue,
-        VenuePool::Whirlpool { .. } | VenuePool::Clmm { .. }
-    ) {
+    // Concentrated-liquidity pools can show an apparent marginal edge while
+    // carrying no executable liquidity at that tick. Use the marginal quote to
+    // screen candidates, then hydrate tick arrays and require the exact quote
+    // to clear the optimiser before anything is considered executable.
+    if false {
         return unpriceable;
     }
     let Some(a_in) = pool_in.venue.mint_index(&wsol_key) else {
@@ -1393,12 +1388,11 @@ fn spot_profit_triangle(
     let wsol_key = beast_flash::pubkey(&wsol());
     let unpriceable = i128::MIN / 4;
 
-    // Concentrated-liquidity pools cannot be reliably screened at marginal
-    // price: their sqrt price ignores tick depth. Skip them entirely.
-    if [pool1, pool2, pool3]
-        .iter()
-        .any(|p| matches!(p.venue, VenuePool::Whirlpool { .. } | VenuePool::Clmm { .. }))
-    {
+    // Concentrated-liquidity pools can show an apparent marginal edge while
+    // carrying no executable liquidity at that tick. Use the marginal quote to
+    // screen candidates, then hydrate tick arrays and require the exact curve
+    // quote before a route is considered.
+    if false {
         return unpriceable;
     }
 

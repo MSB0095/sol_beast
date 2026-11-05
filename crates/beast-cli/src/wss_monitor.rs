@@ -24,6 +24,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
+
 /// Raydium CPMM program id.
 const CPMM_PROGRAM: &str = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C";
 /// Raydium AMM v4 program id.
@@ -82,6 +83,8 @@ struct MonitorState {
     jupiter_usdc_per_wsol: Mutex<Option<f64>>,
     jupiter_usdt_per_usdc: Mutex<Option<f64>>,
     update_count: AtomicU64,
+    subscription_acks: AtomicU64,
+    subscription_errors: AtomicU64,
     divergences: Mutex<Vec<PriceObservation>>,
 }
 
@@ -105,14 +108,16 @@ impl MonitorState {
         div.truncate(200);
     }
 
-    async fn snapshot(&self) -> (usize, usize, Option<f64>, Option<f64>, u64, Vec<PriceObservation>) {
+    async fn snapshot(&self) -> (usize, usize, Option<f64>, Option<f64>, u64, u64, u64, Vec<PriceObservation>) {
         let pools = self.pools.lock().await.len();
         let vaults = self.vault_balances.lock().await.len();
         let usdc = *self.jupiter_usdc_per_wsol.lock().await;
         let usdt = *self.jupiter_usdt_per_usdc.lock().await;
         let count = self.update_count.load(Ordering::Relaxed);
+        let subscription_acks = self.subscription_acks.load(Ordering::Relaxed);
+        let subscription_errors = self.subscription_errors.load(Ordering::Relaxed);
         let div = self.divergences.lock().await.clone();
-        (pools, vaults, usdc, usdt, count, div)
+        (pools, vaults, usdc, usdt, count, subscription_acks, subscription_errors, div)
     }
 }
 
@@ -277,6 +282,7 @@ struct WsFeed {
     ws: Mutex<Option<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>>,
     subscribed: Mutex<HashSet<String>>,
     log_subscribed: Mutex<HashSet<String>>,
+    next_request_id: AtomicU64,
     state: Arc<MonitorState>,
 }
 
@@ -288,6 +294,7 @@ impl WsFeed {
             ws: Mutex::new(None),
             subscribed: Mutex::new(HashSet::new()),
             log_subscribed: Mutex::new(HashSet::new()),
+            next_request_id: AtomicU64::new(1),
             state,
         }
     }
@@ -300,76 +307,83 @@ impl WsFeed {
         Ok(())
     }
 
+    fn next_request_id(&self) -> u64 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn send_subscription(&self, address: &str, kind: &'static str) -> Result<u64> {
+        let request_id = self.next_request_id();
+        let method = if kind == "account" {
+            "accountSubscribe"
+        } else {
+            "logsSubscribe"
+        };
+        let params = if kind == "account" {
+            serde_json::json!([address, {"encoding": "base64", "commitment": "confirmed"}])
+        } else {
+            serde_json::json!([{"mentions": [address]}, {"commitment": "confirmed"}])
+        };
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        });
+        let mut ws_guard = self.ws.lock().await;
+        let Some(ws) = ws_guard.as_mut() else {
+            anyhow::bail!("websocket is not connected");
+        };
+        ws.send(Message::Text(msg.to_string())).await?;
+        Ok(request_id)
+    }
+
     async fn resubscribe(&self) {
         let subscribed = self.subscribed.lock().await.clone();
         let logged = self.log_subscribed.lock().await.clone();
-        let mut ws_guard = self.ws.lock().await;
-        if let Some(ws) = ws_guard.as_mut() {
-            if !subscribed.is_empty() {
-                let addrs: Vec<String> = subscribed.into_iter().collect();
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "accountSubscribe",
-                    "params": [addrs, {"encoding": "base64", "commitment": "confirmed"}],
-                });
-                let _ = ws.send(Message::Text(msg.to_string())).await;
-                tracing::info!(feed = %self.name, count = addrs.len(), "accountSubscribe");
+        for address in subscribed {
+            if let Err(error) = self.send_subscription(&address, "account").await {
+                tracing::error!(feed = %self.name, %address, %error, "account resubscribe failed");
             }
-            if !logged.is_empty() {
-                let addrs: Vec<String> = logged.into_iter().collect();
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "logsSubscribe",
-                    "params": [{ "mentions": addrs }, { "commitment": "confirmed" }],
-                });
-                let _ = ws.send(Message::Text(msg.to_string())).await;
-                tracing::info!(feed = %self.name, count = addrs.len(), "logsSubscribe");
+        }
+        for address in logged {
+            if let Err(error) = self.send_subscription(&address, "logs").await {
+                tracing::error!(feed = %self.name, %address, %error, "logs resubscribe failed");
             }
         }
     }
 
     async fn subscribe(&self, addresses: &[String]) {
         let mut set = self.subscribed.lock().await;
-        let new: Vec<String> = addresses.iter().filter(|a| !set.contains(*a)).cloned().collect();
-        for a in &new {
-            set.insert(a.clone());
-        }
-        drop(set);
-        let mut ws_guard = self.ws.lock().await;
-        if let Some(ws) = ws_guard.as_mut() {
-            if !new.is_empty() {
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "accountSubscribe",
-                    "params": [new, {"encoding": "base64", "commitment": "confirmed"}],
-                });
-                let _ = ws.send(Message::Text(msg.to_string())).await;
+        let mut new_addresses = Vec::new();
+        for address in addresses {
+            if set.insert(address.clone()) {
+                new_addresses.push(address.clone());
             }
         }
+        drop(set);
+        for address in &new_addresses {
+            if let Err(error) = self.send_subscription(address, "account").await {
+                tracing::error!(feed = %self.name, %address, %error, "account subscription failed");
+            }
+        }
+        tracing::info!(feed = %self.name, count = new_addresses.len(), "accountSubscribe requests sent");
     }
 
     async fn subscribe_logs(&self, addresses: &[String]) {
         let mut set = self.log_subscribed.lock().await;
-        let new: Vec<String> = addresses.iter().filter(|a| !set.contains(*a)).cloned().collect();
-        for a in &new {
-            set.insert(a.clone());
-        }
-        drop(set);
-        let mut ws_guard = self.ws.lock().await;
-        if let Some(ws) = ws_guard.as_mut() {
-            if !new.is_empty() {
-                let msg = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "logsSubscribe",
-                    "params": [{ "mentions": new }, { "commitment": "confirmed" }],
-                });
-                let _ = ws.send(Message::Text(msg.to_string())).await;
+        let mut new_addresses = Vec::new();
+        for address in addresses {
+            if set.insert(address.clone()) {
+                new_addresses.push(address.clone());
             }
         }
+        drop(set);
+        for address in &new_addresses {
+            if let Err(error) = self.send_subscription(address, "logs").await {
+                tracing::error!(feed = %self.name, %address, %error, "logs subscription failed");
+            }
+        }
+        tracing::info!(feed = %self.name, count = new_addresses.len(), "logsSubscribe requests sent");
     }
 
     async fn run(self) -> Result<()> {
@@ -410,6 +424,18 @@ impl WsFeed {
 
     async fn handle_message(&self, text: &str) -> Result<()> {
         let msg: Value = serde_json::from_str(text)?;
+        if msg.get("method").and_then(|v| v.as_str()).is_none() {
+            if let Some(error) = msg.get("error") {
+                self.state.subscription_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(feed = %self.name, id = %msg.get("id").map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()), error = %error, "subscription rejected");
+            } else if msg.get("result").is_some() {
+                self.state.subscription_acks.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(feed = %self.name, id = %msg.get("id").map(|v| v.to_string()).unwrap_or_else(|| "unknown".into()), "subscription acknowledged");
+            } else {
+                tracing::debug!(feed = %self.name, "unrecognized websocket message");
+            }
+            return Ok(());
+        }
         if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
             match method {
                 "accountNotification" => {
@@ -445,7 +471,7 @@ impl WsFeed {
 
 /// Compute price deviations vs Jupiter and record them.
 async fn compute_divergences(state: &MonitorState) -> Result<()> {
-    let (pools, _vaults, usdc_ref, usdt_ref, _updates, _div) = state.snapshot().await;
+    let (pools, _vaults, usdc_ref, usdt_ref, _updates, _acks, _errors, _div) = state.snapshot().await;
     let usdc_ref = match usdc_ref {
         Some(v) if v > 0.0 => v,
         _ => return Ok(()),
@@ -626,7 +652,11 @@ async fn seed_pools(rpc: &RpcClient, http: &reqwest::Client, state: Arc<MonitorS
     Ok(pool_count)
 }
 
-/// Split vault addresses across two WSS feeds and subscribe.
+/// Split vault addresses across the two WSS feeds while honoring their
+/// documented subscription limits. PublicNode allows only one concurrent
+/// subscription, so it is pinned to the first vault; Helius carries the rest.
+const PUBLICNODE_MAX_SUBSCRIPTIONS: usize = 1;
+
 async fn subscribe_vaults(feed1: &WsFeed, feed2: &WsFeed, state: &MonitorState) {
     let vaults: Vec<String> = state
         .pools
@@ -635,9 +665,10 @@ async fn subscribe_vaults(feed1: &WsFeed, feed2: &WsFeed, state: &MonitorState) 
         .values()
         .flat_map(|p| [p.vault_a.clone(), p.vault_b.clone()])
         .collect();
-    let mid = vaults.len() / 2;
-    feed1.subscribe(&vaults[..mid]).await;
-    feed2.subscribe(&vaults[mid..]).await;
+    let feed2_count = vaults.len().min(PUBLICNODE_MAX_SUBSCRIPTIONS);
+    let feed1_count = vaults.len().saturating_sub(feed2_count);
+    feed1.subscribe(&vaults[..feed1_count]).await;
+    feed2.subscribe(&vaults[feed1_count..]).await;
 
     let active: Vec<String> = state
         .pools
@@ -650,9 +681,10 @@ async fn subscribe_vaults(feed1: &WsFeed, feed2: &WsFeed, state: &MonitorState) 
     feed1.subscribe_logs(&active).await;
 
     tracing::info!(
-        feed1_count = mid,
-        feed2_count = vaults.len() - mid,
+        feed1_count,
+        feed2_count,
         log_count = active.len(),
+        publicnode_limit = PUBLICNODE_MAX_SUBSCRIPTIONS,
         "vault subscriptions split across feeds"
     );
 }
@@ -675,12 +707,12 @@ async fn jupiter_refresh_loop(state: Arc<MonitorState>, http: reqwest::Client) {
 async fn status_loop(state: Arc<MonitorState>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(STATUS_INTERVAL_MS)).await;
-        let (pools, vaults, usdc, usdt, updates, div) = state.snapshot().await;
+        let (pools, vaults, usdc, usdt, updates, subscription_acks, subscription_errors, div) = state.snapshot().await;
         let usdc_s = usdc.map(|v| format!("{v:.6}")).unwrap_or("-".into());
         let usdt_s = usdt.map(|v| format!("{v:.6}")).unwrap_or("-".into());
         tracing::info!(
-            pools, vaults, updates, usdc_ref = %usdc_s, usdt_ref = %usdt_s,
-            recent_divergences = div.len(),
+            pools, vaults, updates, subscription_acks, subscription_errors,
+            usdc_ref = %usdc_s, usdt_ref = %usdt_s, recent_divergences = div.len(),
             "WSS monitor status"
         );
     }

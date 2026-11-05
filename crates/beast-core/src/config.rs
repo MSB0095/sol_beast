@@ -907,6 +907,8 @@ pub struct Secrets {
     pub alchemy_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drpc_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpcfast_api_key: Option<String>,
     #[serde(skip)]
     pub path: Option<PathBuf>,
 }
@@ -942,6 +944,7 @@ impl fmt::Debug for Secrets {
                 "drpc_api_key",
                 &self.drpc_api_key.as_ref().map(|_| "<redacted>"),
             )
+            .field("rpcfast_api_key", &self.rpcfast_api_key.as_ref().map(|_| "<redacted>"))
             .field("path", &self.path)
             .finish()
     }
@@ -1000,6 +1003,7 @@ impl Secrets {
             ("HELIUS_API_KEY", self.helius_api_key.as_ref()),
             ("ALCHEMY_API_KEY", self.alchemy_api_key.as_ref()),
             ("DRPC_API_KEY", self.drpc_api_key.as_ref()),
+            ("RPCFAST_API_KEY", self.rpcfast_api_key.as_ref()),
             ("JUPITER_API_KEY", self.jupiter_api_key.as_ref()),
         ] {
             if let Some(value) = value {

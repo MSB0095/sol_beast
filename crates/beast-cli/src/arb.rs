@@ -1539,7 +1539,10 @@ fn optimize_triangle(
             Some(cycle) => cycle.profit,
             None => i128::MIN / 4,
         }
-    }, beast_exec::sizing::SizeObjective::MaxBorrowable, min_profit)?;
+    }, beast_exec::sizing::SizeObjective::MaxProfit, min_profit)?;
+    if best.profit < min_profit {
+        return None;
+    }
     evaluate_triangle(pool1, pool2, pool3, best.amount, fee_for(best.amount), costs)
 }
 
@@ -1580,7 +1583,10 @@ fn optimize_cycle(
             // it must also not poison the arithmetic with an overflow.
             None => i128::MIN / 4,
         }
-    }, beast_exec::sizing::SizeObjective::MaxBorrowable, min_profit)?;
+    }, beast_exec::sizing::SizeObjective::MaxProfit, min_profit)?;
+    if best.profit < min_profit {
+        return None;
+    }
     evaluate_cycle(pool_in, pool_out, best.amount, fee_for(best.amount), costs)
 }
 
@@ -1947,7 +1953,7 @@ async fn scan_once(
                             }
                         }
                     },
-                    beast_exec::sizing::SizeObjective::MaxBorrowable,
+                    beast_exec::sizing::SizeObjective::MaxProfit,
                     i128::from(options.min_profit_lamports),
                 )
                 .await;

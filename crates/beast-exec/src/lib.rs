@@ -1061,6 +1061,9 @@ impl Executor {
         preamble.push(
             solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
         );
+        preamble.push(
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(10_000),
+        );
         if !ata_exists {
             preamble.push(
                 spl_associated_token_account::instruction::create_associated_token_account_idempotent(
@@ -1742,6 +1745,9 @@ impl Executor {
         let mut preamble = Vec::new();
         preamble.push(
             solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000),
+        );
+        preamble.push(
+            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_price(10_000),
         );
         // Create WSOL ATA and every intermediate ATA idempotently.
         preamble.push(
